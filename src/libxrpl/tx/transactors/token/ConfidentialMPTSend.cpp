@@ -14,6 +14,7 @@
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
+#include <xrpl/protocol/STVector256.h>
 #include <xrpl/protocol/TER.h>
 #include <xrpl/protocol/TxFlags.h>
 #include <xrpl/protocol/XRPAmount.h>
@@ -31,10 +32,7 @@ namespace {
 creditCiphertext(SLE& sle, SField const& field, Slice const& delta)
 {
     if (!sle.isFieldPresent(field))
-    {
-        sle.setFieldVL(field, delta);
-        return tesSUCCESS;
-    }
+        return tecNO_PERMISSION;
     auto const sum = elgamalAdd(makeSlice(sle.getFieldVL(field)), delta);
     if (!sum)
         return tecINTERNAL;  // LCOV_EXCL_LINE
@@ -109,6 +107,9 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         return temMALFORMED;
 
     auto const dst = ctx.tx[sfDestination];
+    if (dst == (*sleIssuance)[sfIssuer])
+        return temMALFORMED;
+
     auto const sleDstAcct = ctx.view.read(keylet::account(dst));
     if (!sleDstAcct)
         return tecNO_TARGET;
@@ -131,15 +132,23 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
 
     if (!sleSrc->isFieldPresent(sfHolderEncryptionKey) ||
         !sleSrc->isFieldPresent(sfConfidentialBalanceSpending) ||
+        !sleSrc->isFieldPresent(sfConfidentialBalanceInbox) ||
         !sleSrc->isFieldPresent(sfIssuerEncryptedBalance) ||
         !sleSrc->isFieldPresent(sfConfidentialBalanceVersion) ||
         !sleDst->isFieldPresent(sfHolderEncryptionKey) ||
-        !sleDst->isFieldPresent(sfConfidentialBalanceInbox))
+        !sleDst->isFieldPresent(sfConfidentialBalanceSpending) ||
+        !sleDst->isFieldPresent(sfConfidentialBalanceInbox) ||
+        !sleDst->isFieldPresent(sfIssuerEncryptedBalance) ||
+        !sleDst->isFieldPresent(sfConfidentialBalanceVersion))
         return tecNO_PERMISSION;
 
     auto const auditorKey = (*sleIssuance)[~sfAuditorEncryptionKey];
     auto const auditorAmount = ctx.tx[~sfAuditorEncryptedAmount];
     if (static_cast<bool>(auditorKey) != static_cast<bool>(auditorAmount))
+        return tecNO_PERMISSION;
+    if (auditorKey &&
+        (!sleSrc->isFieldPresent(sfAuditorEncryptedBalance) ||
+         !sleDst->isFieldPresent(sfAuditorEncryptedBalance)))
         return tecNO_PERMISSION;
 
     MPTIssue const issue{mptId};
@@ -155,11 +164,19 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         !isTesSuccess(err))
         return err;
 
+    if (sleDstAcct->isFlag(lsfDepositAuth) &&
+        !ctx.view.exists(keylet::depositPreauth(dst, ctx.tx[sfAccount])))
+    {
+        if (!ctx.tx.isFieldPresent(sfCredentialIDs))
+            return tecNO_PERMISSION;
+        auto const credentialIDs = STVector256{ctx.tx[sfCredentialIDs]};
+        if (auto const err = credentials::authorizedDepositPreauth(ctx.view, credentialIDs, dst);
+            !isTesSuccess(err))
+            return err;
+    }
+
     auto const transcript = sendTranscript(
-        ctx.tx[sfAccount],
-        dst,
-        mptId,
-        sleSrc->getFieldU32(sfConfidentialBalanceVersion));
+        ctx.tx[sfAccount], dst, mptId, sleSrc->getFieldU32(sfConfidentialBalanceVersion));
     if (!sendVerify(
             makeSlice(sleSrc->getFieldVL(sfHolderEncryptionKey)),
             makeSlice(sleDst->getFieldVL(sfHolderEncryptionKey)),
@@ -191,8 +208,7 @@ ConfidentialMPTSend::doApply()
     if (!sleIssuance || !sleSrc || !sleDst || !sleDstAcct)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    if (auto err = verifyDepositPreauth(
-            ctx_.tx, view(), accountID_, dst, sleDstAcct, ctx_.journal);
+    if (auto err = verifyDepositPreauth(ctx_.tx, view(), accountID_, dst, sleDstAcct, ctx_.journal);
         !isTesSuccess(err))
         return err;
 
@@ -211,11 +227,9 @@ ConfidentialMPTSend::doApply()
 
     if (auto const auditorAmount = ctx_.tx[~sfAuditorEncryptedAmount])
     {
-        if (auto const ter =
-                debitCiphertext(*sleSrc, sfAuditorEncryptedBalance, *auditorAmount))
+        if (auto const ter = debitCiphertext(*sleSrc, sfAuditorEncryptedBalance, *auditorAmount))
             return ter;
-        if (auto const ter =
-                creditCiphertext(*sleDst, sfAuditorEncryptedBalance, *auditorAmount))
+        if (auto const ter = creditCiphertext(*sleDst, sfAuditorEncryptedBalance, *auditorAmount))
             return ter;
     }
 

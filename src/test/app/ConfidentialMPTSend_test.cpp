@@ -104,8 +104,7 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
                 return json::Value();
             jv[sfHolderEncryptionKey] = strHex(holderPk.slice());
             auto const transcript = convertSchnorrTranscript(account.id(), mptId);
-            auto const proof =
-                schnorrProve(holderPk.slice(), skSlice(*holderSk), transcript);
+            auto const proof = schnorrProve(holderPk.slice(), skSlice(*holderSk), transcript);
             if (!BEAST_EXPECT(proof))
                 return json::Value();
             jv[sfZKProof] = strHex(*proof);
@@ -363,8 +362,8 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         MPTTester mpt(env, alice, {.holders = {bob, carol}});
         mpt.create(
             {.ownerCount = 1,
-             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer |
-                 tfMPTCanClawback | tfMPTCanLock});
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanClawback |
+                 tfMPTCanLock});
         auto const [issuerPk, issuerSk] = secpKeys("iss-happy");
         auto const auditorPk = secpKeys("aud-happy").first;
         mpt.set(
@@ -458,6 +457,7 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         BEAST_EXPECT(strHex((*sleBob)[sfIssuerEncryptedBalance]) == strHex(*zIssuer));
         BEAST_EXPECT(strHex((*sleBob)[sfAuditorEncryptedBalance]) == strHex(*zAud));
         BEAST_EXPECT((*sleBob)[sfMPTAmount] == 800);
+        BEAST_EXPECT((*sleBob)[sfConfidentialBalanceVersion] == 3);
     }
 
     void
@@ -576,6 +576,24 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
             jv[jss::Account] = alice.human();
             env(jv, Ter(temMALFORMED));
         }
+        {
+            auto jv = sendJV(
+                env,
+                bob,
+                carol,
+                mpt.issuanceID(),
+                10,
+                100,
+                bobPk,
+                bobSk,
+                carolPk,
+                issuerPk,
+                std::nullopt,
+                scalarFromSecret(secpKeys("se-dst-iss").second),
+                scalarFromSecret(secpKeys("ge-dst-iss").second));
+            jv[jss::Destination] = alice.human();
+            env(jv, Ter(temMALFORMED));
+        }
 
         env(sendJV(
                 env,
@@ -672,6 +690,31 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
             std::nullopt,
             scalarFromSecret(secpKeys("se-ok").second),
             scalarFromSecret(secpKeys("ge-ok").second)));
+
+        BEAST_EXPECT(env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+            auto const sle = view.read(keylet::mptoken(mpt.issuanceID(), carol));
+            if (!sle)
+                return false;
+            auto replacement = std::make_shared<SLE>(*sle, sle->key());
+            replacement->makeFieldAbsent(sfIssuerEncryptedBalance);
+            view.rawReplace(replacement);
+            return true;
+        }));
+        env(sendJV(
+                env,
+                bob,
+                carol,
+                mpt.issuanceID(),
+                5,
+                90,
+                bobPk,
+                bobSk,
+                carolPk,
+                issuerPk,
+                std::nullopt,
+                scalarFromSecret(secpKeys("se-missing-mirror").second),
+                scalarFromSecret(secpKeys("ge-missing-mirror").second)),
+            Ter(tecNO_PERMISSION));
     }
 
     void
@@ -899,8 +942,7 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
 
         env(clawbackJV(env, alice, bob, mpt.issuanceID(), 40, issuerPk, issuerSk));
         BEAST_EXPECT(
-            (*env.le(keylet::mptIssuance(mpt.issuanceID())))[sfConfidentialOutstandingAmount] ==
-            0);
+            (*env.le(keylet::mptIssuance(mpt.issuanceID())))[sfConfidentialOutstandingAmount] == 0);
         BEAST_EXPECT((*env.le(keylet::mptIssuance(mpt.issuanceID())))[sfOutstandingAmount] == 0);
     }
 
@@ -1067,8 +1109,7 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         Account const credIssuer("credIssuer");
         env.fund(XRP(10'000), credIssuer);
         MPTTester mpt(env, alice, {.holders = {bob, carol}});
-        mpt.create(
-            {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
         auto const issuerPk = secpKeys("iss-da").first;
         mpt.set({.issuerEncryptionKey = strHex(issuerPk.slice())});
         mpt.authorize({.account = bob});
@@ -1115,6 +1156,27 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
                 scalarFromSecret(secpKeys("da-s1").second),
                 scalarFromSecret(secpKeys("da-g1").second)),
             Ter(tecNO_PERMISSION));
+
+        {
+            auto jv = sendJV(
+                env,
+                bob,
+                carol,
+                mpt.issuanceID(),
+                10,
+                80,
+                bobPk,
+                bobSk,
+                carolPk,
+                issuerPk,
+                std::nullopt,
+                scalarFromSecret(secpKeys("da-s-bad").second),
+                scalarFromSecret(secpKeys("da-g-bad").second));
+            auto proof = jv[sfZKProof].asString();
+            proof[0] = proof[0] == '0' ? '1' : '0';
+            jv[sfZKProof] = proof;
+            env(jv, Ter(tecNO_PERMISSION));
+        }
 
         env(deposit::auth(carol, bob));
         env(sendJV(

@@ -69,8 +69,14 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
     if (!sleMpt)
         return tecOBJECT_NOT_FOUND;
 
-    if (!sleMpt->isFieldPresent(sfIssuerEncryptedBalance) ||
-        !sleMpt->isFieldPresent(sfHolderEncryptionKey))
+    if (!sleMpt->isFieldPresent(sfHolderEncryptionKey) ||
+        !sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
+        !sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
+        !sleMpt->isFieldPresent(sfIssuerEncryptedBalance) ||
+        !sleMpt->isFieldPresent(sfConfidentialBalanceVersion))
+        return tecNO_PERMISSION;
+    if (sleIssuance->isFieldPresent(sfAuditorEncryptionKey) &&
+        !sleMpt->isFieldPresent(sfAuditorEncryptedBalance))
         return tecNO_PERMISSION;
 
     auto const amount = ctx.tx[sfMPTAmount];
@@ -80,8 +86,7 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
     if ((*sleIssuance)[sfOutstandingAmount] < amount)
         return tecINSUFFICIENT_FUNDS;
 
-    auto const transcript =
-        clawbackTranscript(ctx.tx[sfAccount], ctx.tx[sfHolder], mptId);
+    auto const transcript = clawbackTranscript(ctx.tx[sfAccount], ctx.tx[sfHolder], mptId);
     if (!clawbackVerify(
             makeSlice(sleMpt->getFieldVL(sfIssuerEncryptedBalance)),
             *issuerKey,
@@ -104,19 +109,14 @@ ConfidentialMPTClawback::doApply()
     if (!sleIssuance || !sleMpt)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    auto const holderPk = sleMpt->isFieldPresent(sfHolderEncryptionKey)
-        ? makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey))
-        : Slice{};
+    auto const holderPk = makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey));
     auto const issuerPk = makeSlice(sleIssuance->getFieldVL(sfIssuerEncryptionKey));
 
-    if (holderPk.size() == kConfidentialPubKeyLength)
-    {
-        auto const zHolder = encZero(holder, (*sleIssuance)[sfIssuer], mptId, holderPk);
-        if (!zHolder)
-            return tecINTERNAL;  // LCOV_EXCL_LINE
-        sleMpt->setFieldVL(sfConfidentialBalanceSpending, *zHolder);
-        sleMpt->setFieldVL(sfConfidentialBalanceInbox, *zHolder);
-    }
+    auto const zHolder = encZero(holder, (*sleIssuance)[sfIssuer], mptId, holderPk);
+    if (!zHolder)
+        return tecINTERNAL;  // LCOV_EXCL_LINE
+    sleMpt->setFieldVL(sfConfidentialBalanceSpending, *zHolder);
+    sleMpt->setFieldVL(sfConfidentialBalanceInbox, *zHolder);
 
     auto const zIssuer = encZero(holder, (*sleIssuance)[sfIssuer], mptId, issuerPk);
     if (!zIssuer)
@@ -131,17 +131,13 @@ ConfidentialMPTClawback::doApply()
         sleMpt->setFieldVL(sfAuditorEncryptedBalance, *zAud);
     }
 
-    if (sleMpt->isFieldPresent(sfConfidentialBalanceVersion))
-    {
-        auto const version = sleMpt->getFieldU32(sfConfidentialBalanceVersion);
-        sleMpt->setFieldU32(
-            sfConfidentialBalanceVersion,
-            version == std::numeric_limits<std::uint32_t>::max() ? 0 : version + 1);
-    }
+    auto const version = sleMpt->getFieldU32(sfConfidentialBalanceVersion);
+    sleMpt->setFieldU32(
+        sfConfidentialBalanceVersion,
+        version == std::numeric_limits<std::uint32_t>::max() ? 0 : version + 1);
 
     sleIssuance->setFieldU64(
-        sfConfidentialOutstandingAmount,
-        (*sleIssuance)[sfConfidentialOutstandingAmount] - amount);
+        sfConfidentialOutstandingAmount, (*sleIssuance)[sfConfidentialOutstandingAmount] - amount);
     sleIssuance->setFieldU64(sfOutstandingAmount, (*sleIssuance)[sfOutstandingAmount] - amount);
 
     view().update(sleMpt);
