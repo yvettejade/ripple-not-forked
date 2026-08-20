@@ -400,6 +400,12 @@ LEDGER_ENTRY(ltMPTOKEN_ISSUANCE, 0x007e, MPTokenIssuance, mpt_issuance, ({
     {sfPreviousTxnLgrSeq,        SoeRequired},
     {sfDomainID,                 SoeOptional},
     {sfMutableFlags,             SoeDefault},
+    // The DynamicMPT tree uses sfMutableFlags, while XLS-0096 named
+    // sfImmutableFlags. This was raised and clarified in favor of the latter.
+    {sfImmutableFlags,           SoeDefault},
+    {sfConfidentialOutstandingAmount, SoeDefault},
+    {sfIssuerEncryptionKey,      SoeOptional},
+    {sfAuditorEncryptionKey,     SoeOptional},
     {sfReferenceHolding,         SoeOptional},
 }))
 
@@ -411,6 +417,12 @@ LEDGER_ENTRY(ltMPTOKEN, 0x007f, MPToken, mptoken, ({
     {sfMPTokenIssuanceID,        SoeRequired},
     {sfMPTAmount,                SoeDefault},
     {sfLockedAmount,             SoeOptional},
+    {sfHolderEncryptionKey,      SoeOptional},
+    {sfConfidentialBalanceSpending, SoeOptional},
+    {sfConfidentialBalanceInbox, SoeOptional},
+    {sfIssuerEncryptedBalance,   SoeOptional},
+    {sfAuditorEncryptedBalance,  SoeOptional},
+    {sfConfidentialBalanceVersion, SoeOptional},
     {sfOwnerNode,                SoeRequired},
     {sfPreviousTxnID,            SoeRequired},
     {sfPreviousTxnLgrSeq,        SoeRequired},

@@ -109,4 +109,37 @@ private:
         bool requireAuth) const;
 };
 
+class ValidConfidentialMPT
+{
+    struct IssuanceChange
+    {
+        std::uint64_t outstandingBefore = 0;
+        std::uint64_t outstandingAfter = 0;
+        std::uint64_t confidentialBefore = 0;
+        std::uint64_t confidentialAfter = 0;
+        std::int64_t publicBalanceDelta = 0;
+    };
+
+    hash_map<MPTID, IssuanceChange> issuances_;
+    std::vector<
+        std::pair<std::shared_ptr<SLE const>, std::shared_ptr<SLE const>>>
+        tokens_;
+    bool deletedInitializedToken_ = false;
+
+public:
+    void
+    visitEntry(
+        bool,
+        std::shared_ptr<SLE const> const&,
+        std::shared_ptr<SLE const> const&);
+
+    bool
+    finalize(
+        STTx const&,
+        TER const,
+        XRPAmount const,
+        ReadView const&,
+        beast::Journal const&) const;
+};
+
 }  // namespace xrpl
