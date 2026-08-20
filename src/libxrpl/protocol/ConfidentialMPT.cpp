@@ -1,4 +1,4 @@
-#include <xrpl/crypto/ConfidentialMPT.h>
+#include <xrpl/protocol/ConfidentialMPT.h>
 
 #include <secp256k1.h>
 #include <secp256k1_mpt.h>

@@ -1,4 +1,4 @@
-#include <xrpl/crypto/ConfidentialMPT.h>
+#include <xrpl/protocol/ConfidentialMPT.h>
 
 #include <utility/mpt_utility.h>
 
