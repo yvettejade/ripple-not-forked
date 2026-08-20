@@ -46,7 +46,10 @@ public:
 /** Verify:
  *    - OutstandingAmount <= MaximumAmount for any MPT
  *    - OutstandingAmount after = OutstandingAmount before +
- *         sum (MPT after - MPT before) - this is total MPT credit/debit
+ *         sum (MPT after - MPT before) +
+ *         (ConfidentialOutstandingAmount after - before)
+ *      Public MPT credit/debit plus confidential outstanding must conserve
+ *      total OutstandingAmount.
  */
 class ValidMPTPayment
 {
@@ -54,6 +57,7 @@ class ValidMPTPayment
     struct MPTData
     {
         std::array<std::int64_t, 2> outstanding{};
+        std::array<std::int64_t, 2> confidentialOutstanding{};
         // sum (MPT after - MPT before)
         std::int64_t mptAmount{0};
     };

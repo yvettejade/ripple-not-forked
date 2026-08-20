@@ -105,8 +105,11 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (!holderKey && !sleMpt->isFieldPresent(sfHolderEncryptionKey))
         return tecNO_PERMISSION;
 
-    auto const pkHolder =
-        holderKey ? *holderKey : makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey));
+    // getFieldVL returns Blob by value; keep bytes alive for the Slice.
+    Blob const storedHolderKey =
+        holderKey ? Blob{} : sleMpt->getFieldVL(sfHolderEncryptionKey);
+    Slice const pkHolder =
+        holderKey ? *holderKey : makeSlice(storedHolderKey);
 
     auto const r = ctx.tx[sfBlindingFactor];
     if (!elgamalMatches(ctx.tx[sfHolderEncryptedAmount], pkHolder, amount, r) ||
