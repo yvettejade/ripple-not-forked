@@ -408,6 +408,53 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
     }
 
     void
+    testConvertLockAndAuth(FeatureBitset features)
+    {
+        testcase("Convert lock and auth");
+        using namespace test::jtx;
+
+        Env env{*this, features};
+        Account const alice("alice");
+        Account const bob("bob");
+        MPTTester mpt(env, alice, {.holders = {bob}});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock |
+                 tfMPTRequireAuth});
+        auto const issuerPk = secpKeys("issuer-lockauth").first;
+        mpt.set({.issuerEncryptionKey = strHex(issuerPk.slice())});
+        mpt.authorize({.account = bob});
+        mpt.authorize({.account = alice, .holder = bob});
+        mpt.pay(alice, bob, 100);
+
+        auto const [holderPk, holderSk] = secpKeys("holder-lockauth");
+        auto const r = scalarFromSecret(secpKeys("blind-lockauth").second);
+
+        // Locked holders cannot convert public MPT, including zero-amount key registration.
+        mpt.set({.holder = bob, .flags = tfMPTLock});
+        env(convertJV(
+                bob, mpt.issuanceID(), 0, holderPk, issuerPk, r, std::nullopt, true, &holderSk),
+            Ter(tecLOCKED));
+        env(convertJV(
+                bob, mpt.issuanceID(), 10, holderPk, issuerPk, r, std::nullopt, true, &holderSk),
+            Ter(tecLOCKED));
+        mpt.set({.holder = bob, .flags = tfMPTUnlock});
+
+        // Deauthorized holders cannot convert either.
+        mpt.authorize({.account = alice, .holder = bob, .flags = tfMPTUnauthorize});
+        env(convertJV(
+                bob, mpt.issuanceID(), 0, holderPk, issuerPk, r, std::nullopt, true, &holderSk),
+            Ter(tecNO_AUTH));
+        env(convertJV(
+                bob, mpt.issuanceID(), 10, holderPk, issuerPk, r, std::nullopt, true, &holderSk),
+            Ter(tecNO_AUTH));
+
+        mpt.authorize({.account = alice, .holder = bob});
+        env(convertJV(
+            bob, mpt.issuanceID(), 10, holderPk, issuerPk, r, std::nullopt, true, &holderSk));
+    }
+
+    void
     testFeeAndDelegate(FeatureBitset features)
     {
         testcase("Fee and delegate");
@@ -477,6 +524,7 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
         testConvertErrors(features);
         testNoConfidentialFlag(features);
         testMergeErrors(features);
+        testConvertLockAndAuth(features);
         testFeeAndDelegate(features);
         testDeletionBlocker(features);
     }

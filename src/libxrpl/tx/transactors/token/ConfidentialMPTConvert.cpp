@@ -3,9 +3,11 @@
 #include <xrpl/basics/Slice.h>
 #include <xrpl/ledger/ApplyView.h>
 #include <xrpl/ledger/ReadView.h>
+#include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Confidential.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
+#include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -94,6 +96,13 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     auto const sleMpt = ctx.view.read(keylet::mptoken(mptId, ctx.tx[sfAccount]));
     if (!sleMpt)
         return tecOBJECT_NOT_FOUND;
+
+    MPTIssue const issue{mptId};
+    if (auto const ter = requireAuth(ctx.view, issue, ctx.tx[sfAccount]); !isTesSuccess(ter))
+        return ter;
+
+    if (isFrozen(ctx.view, ctx.tx[sfAccount], issue))
+        return tecLOCKED;
 
     auto const amount = ctx.tx[sfMPTAmount];
     if ((*sleMpt)[sfMPTAmount] < amount)
