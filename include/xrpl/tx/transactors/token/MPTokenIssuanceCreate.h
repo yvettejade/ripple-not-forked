@@ -26,6 +26,7 @@ struct MPTCreateArgs
     // field. Used by readers (canTransfer, canTrade, freezing) to
     // inherit the underlying asset's transferability.
     std::optional<uint256> referenceHolding = std::nullopt;
+    std::optional<std::uint32_t> immutableFlags = std::nullopt;
 };
 // NOLINTEND(readability-redundant-member-init)
 

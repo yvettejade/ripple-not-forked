@@ -28,6 +28,8 @@ This section contains changes targeting a future version.
 
 ### Additions
 
+- `ConfidentialTransfer` amendment (XLS-0096): `MPTokenIssuanceCreate` and `MPTokenIssuanceSet` accept confidential-balance flags and encryption keys. `MPTokenIssuance` and `MPToken` ledger entries gain confidential fields. New result codes: `temBAD_CIPHERTEXT`, `tecBAD_PROOF`. New transactions: `ConfidentialMPTConvert` (public MPT to confidential), `ConfidentialMPTMergeInbox` (fold inbox into the spending balance), `ConfidentialMPTSend` (holder-to-holder confidential transfer), `ConfidentialMPTConvertBack` (confidential to public), and `ConfidentialMPTClawback` (issuer burns a holder's confidential balance). Confidential MPT transactions charge 10× the base fee. Unauthorizing an MPToken that holds confidential fields returns `tecHAS_OBLIGATIONS`.
+
 - `ledger_entry`, `account_objects`: The `Delegate` ledger entry now includes an optional `DestinationNode` field, which stores the index into the authorized account's owner directory. This field is present on entries created after bidirectional directory tracking was introduced and may appear in RPC responses for those entries. ([#6681](https://github.com/XRPLF/rippled/pull/6681))
 
 - `server_definitions`: Added the following new sections to the response ([#6321](https://github.com/XRPLF/rippled/pull/6321)):
