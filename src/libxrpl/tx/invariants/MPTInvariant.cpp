@@ -616,4 +616,132 @@ ValidMPTTransfer::finalize(
     return true;
 }
 
+void
+ValidConfidentialMPT::visitEntry(
+    bool,
+    std::shared_ptr<SLE const> const& before,
+    std::shared_ptr<SLE const> const& after)
+{
+    auto loadIssuance = [&](SLE const& sle, bool isBefore) {
+        if (sle.getType() != ltMPTOKEN_ISSUANCE)
+            return;
+        auto const id = makeMptID(sle[sfSequence], sle[sfIssuer]);
+        auto& d = data_[id];
+        auto const oa = sle[sfOutstandingAmount];
+        auto const coa = sle[~sfConfidentialOutstandingAmount].value_or(0);
+        if (coa > kMaxMpTokenAmount || oa > kMaxMpTokenAmount)
+            overflow_ = true;
+        if (isBefore)
+        {
+            d.oaBefore = oa;
+            d.coaBefore = coa;
+        }
+        else
+        {
+            d.oaAfter = oa;
+            d.coaAfter = coa;
+        }
+    };
+
+    auto loadMpt = [&](SLE const& sle, bool isBefore) {
+        if (sle.getType() != ltMPTOKEN)
+            return;
+        auto const amt = static_cast<std::int64_t>(sle[sfMPTAmount]);
+        auto& d = data_[sle[sfMPTokenIssuanceID]];
+        if (isBefore)
+            d.mptDelta -= amt;
+        else
+            d.mptDelta += amt;
+    };
+
+    if (before)
+    {
+        loadIssuance(*before, true);
+        loadMpt(*before, true);
+    }
+    if (after)
+    {
+        loadIssuance(*after, false);
+        loadMpt(*after, false);
+    }
+}
+
+bool
+ValidConfidentialMPT::finalize(
+    STTx const& tx,
+    TER const result,
+    XRPAmount const,
+    ReadView const& view,
+    beast::Journal const& j)
+{
+    if (!view.rules().enabled(featureConfidentialTransfer))
+        return true;
+
+    auto const type = tx.getTxnType();
+    bool const confidentialTx = type == ttCONFIDENTIAL_MPT_CONVERT ||
+        type == ttCONFIDENTIAL_MPT_CONVERT_BACK || type == ttCONFIDENTIAL_MPT_SEND ||
+        type == ttCONFIDENTIAL_MPT_MERGE_INBOX || type == ttCONFIDENTIAL_MPT_CLAWBACK;
+
+    if (overflow_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: confidential MPT amount overflow";
+        return !isTesSuccess(result);
+    }
+
+    for (auto const& [id, d] : data_)
+    {
+        (void)id;
+        auto const oaAfter = d.oaAfter.value_or(d.oaBefore.value_or(0));
+        auto const coaAfter = d.coaAfter.value_or(d.coaBefore.value_or(0));
+        auto const oaBefore = d.oaBefore.value_or(0);
+        auto const coaBefore = d.coaBefore.value_or(0);
+
+        if (coaAfter > oaAfter)
+        {
+            JLOG(j.fatal()) << "Invariant failed: COA exceeds OA";
+            return false;
+        }
+
+        if (!isTesSuccess(result))
+            continue;
+
+        auto const dCoa =
+            static_cast<std::int64_t>(coaAfter) - static_cast<std::int64_t>(coaBefore);
+        auto const dOa =
+            static_cast<std::int64_t>(oaAfter) - static_cast<std::int64_t>(oaBefore);
+
+        if (type == ttCONFIDENTIAL_MPT_CONVERT || type == ttCONFIDENTIAL_MPT_CONVERT_BACK)
+        {
+            if (dCoa != -d.mptDelta)
+            {
+                JLOG(j.fatal()) << "Invariant failed: COA change not offset by MPTAmount";
+                return false;
+            }
+        }
+        else if (type == ttCONFIDENTIAL_MPT_SEND || type == ttCONFIDENTIAL_MPT_MERGE_INBOX)
+        {
+            if (dCoa != 0 || dOa != 0)
+            {
+                JLOG(j.fatal()) << "Invariant failed: Send/Merge changed OA or COA";
+                return false;
+            }
+        }
+        else if (type == ttCONFIDENTIAL_MPT_CLAWBACK)
+        {
+            if (dCoa != dOa || dCoa > 0)
+            {
+                JLOG(j.fatal()) << "Invariant failed: Clawback OA/COA mismatch";
+                return false;
+            }
+        }
+        else if (!confidentialTx && dCoa != 0)
+        {
+            JLOG(j.fatal()) << "Invariant failed: COA changed by non-confidential tx";
+            return false;
+        }
+    }
+
+    return true;
+}
+
 }  // namespace xrpl

@@ -64,6 +64,8 @@ words:
   - Britto
   - Btrfs
   - Buildx
+  - Bulletproof
+  - Bulletproofs
   - canonicality
   - changespq
   - checkme
@@ -83,6 +85,7 @@ words:
   - confs
   - ConfidentialMPT
   - ConfidentialTransfer
+  - ConvertBack
   - connectability
   - coro
   - coros
@@ -96,6 +99,7 @@ words:
   - currenttxhash
   - daria
   - dcmake
+  - DLEQ
   - dearmor
   - dedented
   - deleteme
@@ -212,6 +216,7 @@ words:
   - nudb
   - nullptr
   - nunl
+  - NUMS
   - Nyffenegger
   - onlatest
   - ostr
@@ -219,6 +224,7 @@ words:
   - partitioner
   - paychan
   - paychans
+  - Pedersen
   - permdex
   - perminute
   - permissioned

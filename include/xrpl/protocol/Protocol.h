@@ -246,6 +246,32 @@ constexpr std::size_t kConfidentialSchnorrProofLength = 64;
 /** Base-fee multiplier charged for confidential MPT transactions. */
 constexpr std::uint32_t kConfidentialMptFeeMultiplier = 10;
 
+/** Pedersen commitment / compressed point (XLS-0096). */
+constexpr std::size_t kConfidentialCommitmentLength = 33;
+
+/** Compact Clawback sigma proof (DLEQ): c || s. */
+constexpr std::size_t kConfidentialClawbackProofLength = 64;
+
+/** Compact ConvertBack sigma proof: c || s_sk || s_b || s_gamma. */
+constexpr std::size_t kConfidentialConvertBackSigmaLength = 128;
+
+/** Compact Send sigma proof: c || s_r || s_m || s_b || s_sk || s_gamma. */
+constexpr std::size_t kConfidentialSendSigmaLength = 192;
+
+/** Single 64-bit Bulletproof (ConvertBack remaining balance). */
+constexpr std::size_t kConfidentialSingleBulletproofLength = 688;
+
+/** Aggregated Bulletproof for two 64-bit values (Send amount + remainder). */
+constexpr std::size_t kConfidentialAggregatedBulletproofLength = 754;
+
+/** ConvertBack ZKProof = ConvertBack sigma || single Bulletproof. */
+constexpr std::size_t kConfidentialConvertBackZkLength =
+    kConfidentialConvertBackSigmaLength + kConfidentialSingleBulletproofLength;
+
+/** Send ZKProof = Send sigma || aggregated Bulletproof. */
+constexpr std::size_t kConfidentialSendZkLength =
+    kConfidentialSendSigmaLength + kConfidentialAggregatedBulletproofLength;
+
 /** The maximum length of Data payload */
 constexpr std::size_t kMaxDataPayloadLength = 256;
 

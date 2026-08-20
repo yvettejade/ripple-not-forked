@@ -2105,7 +2105,10 @@ class Delegate_test : public beast::unit_test::Suite
             {"PermissionedDomainSet", featurePermissionedDomains},
             {"PermissionedDomainDelete", featurePermissionedDomains},
             {"ConfidentialMPTConvert", featureConfidentialTransfer},
-            {"ConfidentialMPTMergeInbox", featureConfidentialTransfer}};
+            {"ConfidentialMPTMergeInbox", featureConfidentialTransfer},
+            {"ConfidentialMPTConvertBack", featureConfidentialTransfer},
+            {"ConfidentialMPTSend", featureConfidentialTransfer},
+            {"ConfidentialMPTClawback", featureConfidentialTransfer}};
 
         // Can not delegate tx if any required feature disabled.
         {
@@ -2184,7 +2187,7 @@ class Delegate_test : public beast::unit_test::Suite
         // DO NOT modify expectedDelegableCount unless all scenarios, including
         // edge cases, have been fully tested and verified.
         // ====================================================================
-        std::size_t const expectedDelegableCount = 53;
+        std::size_t const expectedDelegableCount = 56;
 
         BEAST_EXPECTS(
             delegableCount == expectedDelegableCount,
