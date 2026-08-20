@@ -478,7 +478,7 @@ ipaLR(
     for (std::size_t i = 0; i < half; ++i)
         dotL = addM(dotL, mulM(aLo[i], bHi[i]));
     auto cL = mulM(dotL, ux);
-    if (cL)
+    if (cL.isNonZero())
     {
         auto ut = tmul(U, cL.data());
         if (!ut)
@@ -498,7 +498,7 @@ ipaLR(
     for (std::size_t i = 0; i < half; ++i)
         dotR = addM(dotR, mulM(aHi[i], bLo[i]));
     auto cR = mulM(dotR, ux);
-    if (cR)
+    if (cR.isNonZero())
     {
         auto ut = tmul(U, cR.data());
         if (!ut)
@@ -1059,7 +1059,7 @@ bpVerify(std::vector<secp256k1_pubkey> const& V, Slice const& proof, Slice const
 
     auto rhs = addOpt(tmul(Gw[0], aFinal.data()), tmul(Hw[0], bFinal.data()));
     auto abux = mulM(mulM(aFinal, bFinal), ux);
-    if (abux)
+    if (abux.isNonZero())
     {
         auto ut = tmul(U, abux.data());
         if (!ut)
