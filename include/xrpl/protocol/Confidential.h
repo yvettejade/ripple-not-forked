@@ -54,4 +54,116 @@ schnorrProve(Slice const& pk, Slice const& sk, Slice const& transcript);
 [[nodiscard]] bool
 schnorrVerify(Slice const& pk, Slice const& proof, Slice const& transcript);
 
+/** Pedersen commitment C = v·G + r·H with a NUMS H. 33 compressed bytes. */
+[[nodiscard]] std::optional<Buffer>
+pedersenCommit(std::uint64_t v, uint256 const& r);
+
+/** Clawback DLEQ: issuer Enc=(R,S) encrypts `m`. Witness is issuer sk (S-mG = sk·R). */
+[[nodiscard]] std::optional<Buffer>
+clawbackProve(
+    Slice const& issuerCt,
+    Slice const& issuerPk,
+    std::uint64_t m,
+    Slice const& issuerSk,
+    Slice const& transcript);
+
+[[nodiscard]] bool
+clawbackVerify(
+    Slice const& issuerCt,
+    Slice const& issuerPk,
+    std::uint64_t m,
+    Slice const& proof,
+    Slice const& transcript);
+
+struct ConvertBackProof
+{
+    Buffer holderEnc;
+    Buffer issuerEnc;
+    Buffer auditorEnc;
+    Buffer balanceCommitment;
+    Buffer zkProof;
+};
+
+[[nodiscard]] std::optional<ConvertBackProof>
+convertBackProve(
+    Slice const& holderPk,
+    Slice const& holderSk,
+    Slice const& issuerPk,
+    std::optional<Slice> const& auditorPk,
+    Slice const& spendingCt,
+    std::uint64_t amount,
+    std::uint64_t balance,
+    uint256 const& r,
+    uint256 const& gamma,
+    Slice const& transcript);
+
+[[nodiscard]] bool
+convertBackVerify(
+    Slice const& holderPk,
+    Slice const& issuerPk,
+    std::optional<Slice> const& auditorPk,
+    Slice const& spendingCt,
+    std::uint64_t amount,
+    Slice const& holderEnc,
+    Slice const& issuerEnc,
+    std::optional<Slice> const& auditorEnc,
+    uint256 const& r,
+    Slice const& balanceCommitment,
+    Slice const& zkProof,
+    Slice const& transcript);
+
+struct SendProof
+{
+    Buffer senderEnc;
+    Buffer destEnc;
+    Buffer issuerEnc;
+    Buffer auditorEnc;
+    Buffer amountCommitment;
+    Buffer balanceCommitment;
+    Buffer zkProof;
+};
+
+[[nodiscard]] std::optional<SendProof>
+sendProve(
+    Slice const& senderPk,
+    Slice const& senderSk,
+    Slice const& destPk,
+    Slice const& issuerPk,
+    std::optional<Slice> const& auditorPk,
+    Slice const& spendingCt,
+    std::uint64_t amount,
+    std::uint64_t balance,
+    uint256 const& r,
+    uint256 const& gamma,
+    Slice const& transcript);
+
+[[nodiscard]] bool
+sendVerify(
+    Slice const& senderPk,
+    Slice const& destPk,
+    Slice const& issuerPk,
+    std::optional<Slice> const& auditorPk,
+    Slice const& spendingCt,
+    Slice const& senderEnc,
+    Slice const& destEnc,
+    Slice const& issuerEnc,
+    std::optional<Slice> const& auditorEnc,
+    Slice const& amountCommitment,
+    Slice const& balanceCommitment,
+    Slice const& zkProof,
+    Slice const& transcript);
+
+[[nodiscard]] Buffer
+clawbackTranscript(AccountID const& issuer, AccountID const& holder, MPTID const& mptId);
+
+[[nodiscard]] Buffer
+convertBackTranscript(AccountID const& account, MPTID const& mptId, std::uint32_t version);
+
+[[nodiscard]] Buffer
+sendTranscript(
+    AccountID const& sender,
+    AccountID const& dest,
+    MPTID const& mptId,
+    std::uint32_t version);
+
 }  // namespace xrpl

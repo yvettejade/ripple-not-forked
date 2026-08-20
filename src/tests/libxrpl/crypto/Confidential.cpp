@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <utility>
 
 using namespace xrpl;
@@ -139,4 +140,218 @@ TEST(Confidential, RejectsBadCiphertext)
     std::array<unsigned char, kConfidentialCiphertextLength> zeros{};
     EXPECT_FALSE(isConfidentialCiphertext(Slice(zeros.data(), zeros.size())));
     EXPECT_FALSE(elgamalAdd(Slice(zeros.data(), zeros.size()), Slice(zeros.data(), zeros.size())));
+}
+
+
+TEST(Confidential, PedersenCommit)
+{
+    auto const r = scalarFromSecret(secpKeys("pedersen-blind").second);
+    auto const C = pedersenCommit(42, r);
+    ASSERT_TRUE(C);
+    EXPECT_EQ(C->size(), kConfidentialCommitmentLength);
+    EXPECT_TRUE(isConfidentialPubKey(*C));
+    auto const C0 = pedersenCommit(0, r);
+    ASSERT_TRUE(C0);
+    EXPECT_NE(*C, *C0);
+}
+
+TEST(Confidential, ClawbackProveVerify)
+{
+    auto const [pk, sk] = secpKeys("claw-iss");
+    auto const r = scalarFromSecret(secpKeys("claw-r").second);
+    std::uint64_t const m = 99;
+    auto const ct = elgamalEncrypt(pk.slice(), m, r);
+    ASSERT_TRUE(ct);
+    auto const issuer = calcAccountID(pk);
+    auto const holder = calcAccountID(secpKeys("claw-hold").first);
+    auto const mptId = makeMptID(3, issuer);
+    auto const transcript = clawbackTranscript(issuer, holder, mptId);
+
+    auto const proof = clawbackProve(*ct, pk.slice(), m, skSlice(sk), transcript);
+    ASSERT_TRUE(proof);
+    EXPECT_EQ(proof->size(), kConfidentialClawbackProofLength);
+    EXPECT_TRUE(clawbackVerify(*ct, pk.slice(), m, *proof, transcript));
+    EXPECT_FALSE(clawbackVerify(*ct, pk.slice(), m - 1, *proof, transcript));
+}
+
+TEST(Confidential, ConvertBackProveVerify)
+{
+    auto const [holderPk, holderSk] = secpKeys("cb-holder");
+    auto const issuerPk = secpKeys("cb-issuer").first;
+    auto const auditorPk = secpKeys("cb-auditor").first;
+    auto const r = scalarFromSecret(secpKeys("cb-r").second);
+    auto const gamma = scalarFromSecret(secpKeys("cb-gamma").second);
+    auto const spendR = scalarFromSecret(secpKeys("cb-spend-r").second);
+    std::uint64_t const balance = 100;
+    std::uint64_t const amount = 25;
+    auto const spending = elgamalEncrypt(holderPk.slice(), balance, spendR);
+    ASSERT_TRUE(spending);
+
+    auto const account = calcAccountID(holderPk);
+    auto const mptId = makeMptID(9, calcAccountID(issuerPk));
+    auto const transcript = convertBackTranscript(account, mptId, 1);
+
+    auto const proof = convertBackProve(
+        holderPk.slice(),
+        skSlice(holderSk),
+        issuerPk.slice(),
+        std::nullopt,
+        *spending,
+        amount,
+        balance,
+        r,
+        gamma,
+        transcript);
+    ASSERT_TRUE(proof);
+    EXPECT_EQ(proof->zkProof.size(), kConfidentialConvertBackZkLength);
+    EXPECT_TRUE(convertBackVerify(
+        holderPk.slice(),
+        issuerPk.slice(),
+        std::nullopt,
+        *spending,
+        amount,
+        proof->holderEnc,
+        proof->issuerEnc,
+        std::nullopt,
+        r,
+        proof->balanceCommitment,
+        proof->zkProof,
+        transcript));
+
+    auto const withAud = convertBackProve(
+        holderPk.slice(),
+        skSlice(holderSk),
+        issuerPk.slice(),
+        std::optional<Slice>{auditorPk.slice()},
+        *spending,
+        amount,
+        balance,
+        r,
+        gamma,
+        transcript);
+    ASSERT_TRUE(withAud);
+    EXPECT_FALSE(withAud->auditorEnc.empty());
+    EXPECT_TRUE(convertBackVerify(
+        holderPk.slice(),
+        issuerPk.slice(),
+        std::optional<Slice>{auditorPk.slice()},
+        *spending,
+        amount,
+        withAud->holderEnc,
+        withAud->issuerEnc,
+        std::optional<Slice>{withAud->auditorEnc},
+        r,
+        withAud->balanceCommitment,
+        withAud->zkProof,
+        transcript));
+
+    // Tampered zkProof fails
+    auto tampered = withAud->zkProof;
+    tampered.data()[0] ^= 0x01;
+    EXPECT_FALSE(convertBackVerify(
+        holderPk.slice(),
+        issuerPk.slice(),
+        std::optional<Slice>{auditorPk.slice()},
+        *spending,
+        amount,
+        withAud->holderEnc,
+        withAud->issuerEnc,
+        std::optional<Slice>{withAud->auditorEnc},
+        r,
+        withAud->balanceCommitment,
+        tampered,
+        transcript));
+}
+
+TEST(Confidential, SendProveVerify)
+{
+    auto const [senderPk, senderSk] = secpKeys("send-sender");
+    auto const destPk = secpKeys("send-dest").first;
+    auto const issuerPk = secpKeys("send-iss").first;
+    auto const auditorPk = secpKeys("send-aud").first;
+    auto const r = scalarFromSecret(secpKeys("send-r").second);
+    auto const gamma = scalarFromSecret(secpKeys("send-gamma").second);
+    auto const spendR = scalarFromSecret(secpKeys("send-spend-r").second);
+    std::uint64_t const balance = 80;
+    std::uint64_t const amount = 17;
+    auto const spending = elgamalEncrypt(senderPk.slice(), balance, spendR);
+    ASSERT_TRUE(spending);
+
+    auto const transcript = sendTranscript(
+        calcAccountID(senderPk), calcAccountID(destPk), makeMptID(2, calcAccountID(issuerPk)), 4);
+
+    auto const proof = sendProve(
+        senderPk.slice(),
+        skSlice(senderSk),
+        destPk.slice(),
+        issuerPk.slice(),
+        std::nullopt,
+        *spending,
+        amount,
+        balance,
+        r,
+        gamma,
+        transcript);
+    ASSERT_TRUE(proof);
+    EXPECT_EQ(proof->zkProof.size(), kConfidentialSendZkLength);
+    EXPECT_TRUE(sendVerify(
+        senderPk.slice(),
+        destPk.slice(),
+        issuerPk.slice(),
+        std::nullopt,
+        *spending,
+        proof->senderEnc,
+        proof->destEnc,
+        proof->issuerEnc,
+        std::nullopt,
+        proof->amountCommitment,
+        proof->balanceCommitment,
+        proof->zkProof,
+        transcript));
+
+    auto tampered = proof->zkProof;
+    tampered.data()[40] ^= 0xff;
+    EXPECT_FALSE(sendVerify(
+        senderPk.slice(),
+        destPk.slice(),
+        issuerPk.slice(),
+        std::nullopt,
+        *spending,
+        proof->senderEnc,
+        proof->destEnc,
+        proof->issuerEnc,
+        std::nullopt,
+        proof->amountCommitment,
+        proof->balanceCommitment,
+        tampered,
+        transcript));
+
+    auto const withAud = sendProve(
+        senderPk.slice(),
+        skSlice(senderSk),
+        destPk.slice(),
+        issuerPk.slice(),
+        std::optional<Slice>{auditorPk.slice()},
+        *spending,
+        amount,
+        balance,
+        r,
+        gamma,
+        transcript);
+    ASSERT_TRUE(withAud);
+    EXPECT_FALSE(withAud->auditorEnc.empty());
+    EXPECT_TRUE(sendVerify(
+        senderPk.slice(),
+        destPk.slice(),
+        issuerPk.slice(),
+        std::optional<Slice>{auditorPk.slice()},
+        *spending,
+        withAud->senderEnc,
+        withAud->destEnc,
+        withAud->issuerEnc,
+        std::optional<Slice>{withAud->auditorEnc},
+        withAud->amountCommitment,
+        withAud->balanceCommitment,
+        withAud->zkProof,
+        transcript));
 }
