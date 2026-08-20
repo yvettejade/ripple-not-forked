@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
 
+#include <xrpl/basics/Blob.h>
 #include <xrpl/basics/Slice.h>
 #include <xrpl/ledger/ApplyView.h>
 #include <xrpl/ledger/ReadView.h>
@@ -78,18 +79,18 @@ ConfidentialMPTMergeInbox::doApply()
     if (!sleIssuance || !sleMpt)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    auto const summed = elgamalAdd(
-        makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)),
-        makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceInbox)));
+    // getFieldVL returns Blob by value; keep bytes alive for Slice views.
+    Blob const spendingBlob = sleMpt->getFieldVL(sfConfidentialBalanceSpending);
+    Blob const inboxBlob = sleMpt->getFieldVL(sfConfidentialBalanceInbox);
+    Blob const holderPkBlob = sleMpt->getFieldVL(sfHolderEncryptionKey);
+
+    auto const summed = elgamalAdd(makeSlice(spendingBlob), makeSlice(inboxBlob));
     if (!summed)
         return tecINTERNAL;  // LCOV_EXCL_LINE
     sleMpt->setFieldVL(sfConfidentialBalanceSpending, *summed);
 
-    auto const zero = encZero(
-        accountID_,
-        (*sleIssuance)[sfIssuer],
-        mptId,
-        makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey)));
+    auto const zero =
+        encZero(accountID_, (*sleIssuance)[sfIssuer], mptId, makeSlice(holderPkBlob));
     if (!zero)
         return tecINTERNAL;  // LCOV_EXCL_LINE
     sleMpt->setFieldVL(sfConfidentialBalanceInbox, *zero);

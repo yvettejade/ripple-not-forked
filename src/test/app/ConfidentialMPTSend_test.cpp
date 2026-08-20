@@ -541,6 +541,9 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
             Ter(tecBAD_PROOF));
 
         env(mergeJV(bob, mpt.issuanceID()));
+        // Commit convert/merge before lock/unlock closes the ledger; otherwise
+        // close() can replay lock against a pre-merge MPToken and drop version.
+        env.close();
 
         env(sendJV(
                 env,
@@ -634,9 +637,8 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
                 std::nullopt,
                 scalarFromSecret(secpKeys("se-bad").second),
                 scalarFromSecret(secpKeys("ge-bad").second));
-            auto proofHex = jv[sfZKProof].asString();
-            proofHex[0] = proofHex[0] == '0' ? '1' : '0';
-            jv[sfZKProof] = proofHex;
+            // Replace proof with valid-length zeros so verification fails.
+            jv[sfZKProof] = std::string(kConfidentialSendZkLength * 2, '0');
             env(jv, Ter(tecBAD_PROOF));
         }
 
@@ -656,6 +658,9 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
                 scalarFromSecret(secpKeys("se-lock").second),
                 scalarFromSecret(secpKeys("ge-lock").second)),
             Ter(tecLOCKED));
+        // Close before unlock so canonical reorder cannot apply unlock first and
+        // then the holder's send in the same ledger (open ledger had tecLOCKED).
+        env.close();
         mpt.set({.holder = bob, .flags = tfMPTUnlock});
 
         env(sendJV(
@@ -704,6 +709,9 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
             true,
             &bobSk));
         env(mergeJV(bob, mpt.issuanceID()));
+        // Commit convert/merge before lock/unlock closes the ledger; otherwise
+        // close() can replay lock against a pre-merge MPToken and drop version.
+        env.close();
 
         {
             json::Value jv;
@@ -767,6 +775,9 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
                 scalarFromSecret(secpKeys("cb-lock").second),
                 scalarFromSecret(secpKeys("cb-lockg").second)),
             Ter(tecLOCKED));
+        // Close before unlock so canonical reorder cannot apply unlock first and
+        // then ConvertBack in the same ledger (open ledger had tecLOCKED).
+        env.close();
         mpt.set({.holder = bob, .flags = tfMPTUnlock});
 
         {
@@ -782,9 +793,8 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
                 std::nullopt,
                 scalarFromSecret(secpKeys("cb-bad").second),
                 scalarFromSecret(secpKeys("cb-badg").second));
-            auto proofHex = jv[sfZKProof].asString();
-            proofHex[0] = proofHex[0] == '0' ? '1' : '0';
-            jv[sfZKProof] = proofHex;
+            // Replace proof with valid-length zeros so verification fails.
+            jv[sfZKProof] = std::string(kConfidentialConvertBackZkLength * 2, '0');
             env(jv, Ter(tecBAD_PROOF));
         }
 

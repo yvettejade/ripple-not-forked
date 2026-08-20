@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
 
+#include <xrpl/basics/Blob.h>
 #include <xrpl/basics/Slice.h>
 #include <xrpl/ledger/ApplyView.h>
 #include <xrpl/ledger/ReadView.h>
@@ -145,7 +146,8 @@ ConfidentialMPTConvert::doApply()
     if (!sleIssuance || !sleMpt)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    sleMpt->setFieldU64(sfMPTAmount, (*sleMpt)[sfMPTAmount] - amount);
+    // ValueProxy clears SoeDefault MPTAmount when the value is 0.
+    (*sleMpt)[sfMPTAmount] = (*sleMpt)[sfMPTAmount] - amount;
 
     auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
     sleIssuance->setFieldU64(sfConfidentialOutstandingAmount, coa + amount);
@@ -156,11 +158,9 @@ ConfidentialMPTConvert::doApply()
     auto const initializing = !sleMpt->isFieldPresent(sfConfidentialBalanceSpending);
     if (initializing)
     {
-        auto const zero = encZero(
-            accountID_,
-            (*sleIssuance)[sfIssuer],
-            mptId,
-            makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey)));
+        Blob const holderPkBlob = sleMpt->getFieldVL(sfHolderEncryptionKey);
+        auto const zero =
+            encZero(accountID_, (*sleIssuance)[sfIssuer], mptId, makeSlice(holderPkBlob));
         if (!zero)
             return tecINTERNAL;  // LCOV_EXCL_LINE
         sleMpt->setFieldVL(sfConfidentialBalanceSpending, *zero);

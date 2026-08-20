@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTConvertBack.h>
 
+#include <xrpl/basics/Blob.h>
 #include <xrpl/basics/Slice.h>
 #include <xrpl/ledger/ApplyView.h>
 #include <xrpl/ledger/ReadView.h>
@@ -111,7 +112,10 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
         return tecNO_PERMISSION;
 
     auto const r = ctx.tx[sfBlindingFactor];
-    auto const holderPk = makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey));
+    // getFieldVL returns Blob by value; keep bytes alive for any Slice view.
+    Blob const holderPkBlob = sleMpt->getFieldVL(sfHolderEncryptionKey);
+    Blob const spendingBlob = sleMpt->getFieldVL(sfConfidentialBalanceSpending);
+    Slice const holderPk = makeSlice(holderPkBlob);
     if (!elgamalMatches(ctx.tx[sfHolderEncryptedAmount], holderPk, amount, r) ||
         !elgamalMatches(ctx.tx[sfIssuerEncryptedAmount], *issuerKey, amount, r))
         return tecBAD_PROOF;
@@ -128,7 +132,7 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
             holderPk,
             *issuerKey,
             auditorKey,
-            makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)),
+            makeSlice(spendingBlob),
             amount,
             ctx.tx[sfHolderEncryptedAmount],
             ctx.tx[sfIssuerEncryptedAmount],
@@ -152,10 +156,10 @@ ConfidentialMPTConvertBack::doApply()
     if (!sleIssuance || !sleMpt)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    sleMpt->setFieldU64(sfMPTAmount, (*sleMpt)[sfMPTAmount] + amount);
-    sleIssuance->setFieldU64(
-        sfConfidentialOutstandingAmount,
-        (*sleIssuance)[sfConfidentialOutstandingAmount] - amount);
+    // ValueProxy clears SoeDefault MPTAmount when the value is 0.
+    (*sleMpt)[sfMPTAmount] = (*sleMpt)[sfMPTAmount] + amount;
+    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
+    sleIssuance->setFieldU64(sfConfidentialOutstandingAmount, coa - amount);
 
     if (auto const ter = debitCiphertext(
             *sleMpt, sfConfidentialBalanceSpending, ctx_.tx[sfHolderEncryptedAmount]))

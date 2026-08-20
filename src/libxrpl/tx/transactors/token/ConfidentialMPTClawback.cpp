@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTClawback.h>
 
+#include <xrpl/basics/Blob.h>
 #include <xrpl/basics/Slice.h>
 #include <xrpl/ledger/ApplyView.h>
 #include <xrpl/ledger/ReadView.h>
@@ -82,8 +83,9 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
 
     auto const transcript =
         clawbackTranscript(ctx.tx[sfAccount], ctx.tx[sfHolder], mptId);
+    Blob const issuerBalBlob = sleMpt->getFieldVL(sfIssuerEncryptedBalance);
     if (!clawbackVerify(
-            makeSlice(sleMpt->getFieldVL(sfIssuerEncryptedBalance)),
+            makeSlice(issuerBalBlob),
             *issuerKey,
             amount,
             ctx.tx[sfZKProof],
@@ -104,21 +106,24 @@ ConfidentialMPTClawback::doApply()
     if (!sleIssuance || !sleMpt)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    auto const holderPk = sleMpt->isFieldPresent(sfHolderEncryptionKey)
-        ? makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey))
-        : Slice{};
-    auto const issuerPk = makeSlice(sleIssuance->getFieldVL(sfIssuerEncryptionKey));
+    // getFieldVL returns Blob by value; keep bytes alive for Slice views.
+    auto const holderPkBlob = sleMpt->isFieldPresent(sfHolderEncryptionKey)
+        ? sleMpt->getFieldVL(sfHolderEncryptionKey)
+        : Blob{};
+    auto const issuerPkBlob = sleIssuance->getFieldVL(sfIssuerEncryptionKey);
 
-    if (holderPk.size() == kConfidentialPubKeyLength)
+    if (holderPkBlob.size() == kConfidentialPubKeyLength)
     {
-        auto const zHolder = encZero(holder, (*sleIssuance)[sfIssuer], mptId, holderPk);
+        auto const zHolder =
+            encZero(holder, (*sleIssuance)[sfIssuer], mptId, makeSlice(holderPkBlob));
         if (!zHolder)
             return tecINTERNAL;  // LCOV_EXCL_LINE
         sleMpt->setFieldVL(sfConfidentialBalanceSpending, *zHolder);
         sleMpt->setFieldVL(sfConfidentialBalanceInbox, *zHolder);
     }
 
-    auto const zIssuer = encZero(holder, (*sleIssuance)[sfIssuer], mptId, issuerPk);
+    auto const zIssuer =
+        encZero(holder, (*sleIssuance)[sfIssuer], mptId, makeSlice(issuerPkBlob));
     if (!zIssuer)
         return tecINTERNAL;  // LCOV_EXCL_LINE
     sleMpt->setFieldVL(sfIssuerEncryptedBalance, *zIssuer);
@@ -141,7 +146,7 @@ ConfidentialMPTClawback::doApply()
 
     sleIssuance->setFieldU64(
         sfConfidentialOutstandingAmount,
-        (*sleIssuance)[sfConfidentialOutstandingAmount] - amount);
+        (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0) - amount);
     sleIssuance->setFieldU64(sfOutstandingAmount, (*sleIssuance)[sfOutstandingAmount] - amount);
 
     view().update(sleMpt);
