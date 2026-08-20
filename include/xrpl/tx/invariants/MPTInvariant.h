@@ -109,4 +109,27 @@ private:
         bool requireAuth) const;
 };
 
+/** XLS-0096: COA is non-negative, COA <= OA, and Convert/ConvertBack offset COA vs MPTAmount. */
+class ValidConfidentialMPT
+{
+    struct IssuanceDelta
+    {
+        std::optional<std::uint64_t> oaBefore;
+        std::optional<std::uint64_t> oaAfter;
+        std::optional<std::uint64_t> coaBefore;
+        std::optional<std::uint64_t> coaAfter;
+        std::int64_t mptDelta{0};
+    };
+
+    hash_map<uint192, IssuanceDelta> data_;
+    bool overflow_{false};
+
+public:
+    void
+    visitEntry(bool, std::shared_ptr<SLE const> const&, std::shared_ptr<SLE const> const&);
+
+    bool
+    finalize(STTx const&, TER const, XRPAmount const, ReadView const&, beast::Journal const&);
+};
+
 }  // namespace xrpl
