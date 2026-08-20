@@ -105,23 +105,95 @@ combine(secp256k1_pubkey const& a, secp256k1_pubkey const& b)
     return out;
 }
 
+// Canonical encoding of the secp256k1 identity for confidential ciphertext
+// components. Must not collide with compressed pubkeys (0x02/0x03) or the
+// all-zero slice rejected by RejectsBadCiphertext.
+constexpr unsigned char kInfinityPoint[kConfidentialPubKeyLength] = {
+    0x00, 'X', 'L', 'S', '0', '0', '9', '6', 'I', 'N', 'F', 0, 0, 0, 0, 0,
+    0,    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0, 0, 0, 0, 0,
+    0};
+
+struct EcPoint
+{
+    bool infinity = false;
+    secp256k1_pubkey pk{};
+};
+
+[[nodiscard]] bool
+isInfinityEncoding(Slice const& bytes)
+{
+    return bytes.size() == kConfidentialPubKeyLength &&
+        std::memcmp(bytes.data(), kInfinityPoint, kConfidentialPubKeyLength) == 0;
+}
+
+[[nodiscard]] bool
+parseEcPoint(Slice const& bytes, EcPoint& out)
+{
+    if (isInfinityEncoding(bytes))
+    {
+        out.infinity = true;
+        return true;
+    }
+    out.infinity = false;
+    return parsePoint(bytes, out.pk);
+}
+
+[[nodiscard]] bool
+serializeEcPoint(EcPoint const& p, unsigned char out[kConfidentialPubKeyLength])
+{
+    if (p.infinity)
+    {
+        std::memcpy(out, kInfinityPoint, kConfidentialPubKeyLength);
+        return true;
+    }
+    return serializePoint(p.pk, out);
+}
+
+[[nodiscard]] EcPoint
+combineEc(EcPoint const& a, EcPoint const& b)
+{
+    if (a.infinity)
+        return b;
+    if (b.infinity)
+        return a;
+    auto const sum = combine(a.pk, b.pk);
+    if (!sum)
+        return EcPoint{.infinity = true};
+    return EcPoint{.infinity = false, .pk = *sum};
+}
+
+[[nodiscard]] bool
+negateEc(EcPoint& p)
+{
+    if (p.infinity)
+        return true;
+    return secp256k1_ec_pubkey_negate(secp256k1Context(), &p.pk) == 1;
+}
+
 [[nodiscard]] std::optional<Buffer>
-serializeCiphertext(secp256k1_pubkey const& r, secp256k1_pubkey const& s)
+serializeCiphertext(EcPoint const& r, EcPoint const& s)
 {
     Buffer out(kConfidentialCiphertextLength);
-    if (!serializePoint(r, out.data()) ||
-        !serializePoint(s, out.data() + kConfidentialPubKeyLength))
+    if (!serializeEcPoint(r, out.data()) ||
+        !serializeEcPoint(s, out.data() + kConfidentialPubKeyLength))
         return std::nullopt;
     return out;
 }
 
+[[nodiscard]] std::optional<Buffer>
+serializeCiphertext(secp256k1_pubkey const& r, secp256k1_pubkey const& s)
+{
+    return serializeCiphertext(
+        EcPoint{.infinity = false, .pk = r}, EcPoint{.infinity = false, .pk = s});
+}
+
 [[nodiscard]] bool
-parseCiphertext(Slice const& ct, secp256k1_pubkey& r, secp256k1_pubkey& s)
+parseCiphertext(Slice const& ct, EcPoint& r, EcPoint& s)
 {
     if (ct.size() != kConfidentialCiphertextLength)
         return false;
-    return parsePoint(Slice(ct.data(), kConfidentialPubKeyLength), r) &&
-        parsePoint(Slice(ct.data() + kConfidentialPubKeyLength, kConfidentialPubKeyLength), s);
+    return parseEcPoint(Slice(ct.data(), kConfidentialPubKeyLength), r) &&
+        parseEcPoint(Slice(ct.data() + kConfidentialPubKeyLength, kConfidentialPubKeyLength), s);
 }
 
 [[nodiscard]] std::optional<secp256k1_pubkey>
@@ -144,8 +216,8 @@ isConfidentialPubKey(Slice const& key)
 bool
 isConfidentialCiphertext(Slice const& ct)
 {
-    secp256k1_pubkey r;
-    secp256k1_pubkey s;
+    EcPoint r;
+    EcPoint s;
     return parseCiphertext(ct, r, s);
 }
 
@@ -189,36 +261,29 @@ elgamalEncrypt(Slice const& pkBytes, std::uint64_t m, uint256 const& r)
 std::optional<Buffer>
 elgamalAdd(Slice const& a, Slice const& b)
 {
-    secp256k1_pubkey ra;
-    secp256k1_pubkey sa;
-    secp256k1_pubkey rb;
-    secp256k1_pubkey sb;
+    EcPoint ra;
+    EcPoint sa;
+    EcPoint rb;
+    EcPoint sb;
     if (!parseCiphertext(a, ra, sa) || !parseCiphertext(b, rb, sb))
         return std::nullopt;
-    auto const r = combine(ra, rb);
-    auto const s = combine(sa, sb);
-    if (!r || !s)
-        return std::nullopt;
-    return serializeCiphertext(*r, *s);
+    return serializeCiphertext(combineEc(ra, rb), combineEc(sa, sb));
 }
 
 std::optional<Buffer>
 elgamalSub(Slice const& a, Slice const& b)
 {
-    secp256k1_pubkey ra;
-    secp256k1_pubkey sa;
-    secp256k1_pubkey rb;
-    secp256k1_pubkey sb;
+    EcPoint ra;
+    EcPoint sa;
+    EcPoint rb;
+    EcPoint sb;
     if (!parseCiphertext(a, ra, sa) || !parseCiphertext(b, rb, sb))
         return std::nullopt;
-    if (secp256k1_ec_pubkey_negate(secp256k1Context(), &rb) != 1 ||
-        secp256k1_ec_pubkey_negate(secp256k1Context(), &sb) != 1)
+    if (!negateEc(rb) || !negateEc(sb))
         return std::nullopt;
-    auto const r = combine(ra, rb);
-    auto const s = combine(sa, sb);
-    if (!r || !s)
-        return std::nullopt;
-    return serializeCiphertext(*r, *s);
+    auto const r = combineEc(ra, rb);
+    auto const s = combineEc(sa, sb);
+    return serializeCiphertext(r, s);
 }
 
 std::optional<Buffer>

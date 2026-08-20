@@ -393,7 +393,17 @@ ValidMPTPayment::visitEntry(
                 overflow_ = true;
                 return false;
             }
-            data_[makeKey(sle)].outstanding[static_cast<std::size_t>(order)] = outstanding;
+            auto const confidential =
+                static_cast<std::int64_t>(sle[~sfConfidentialOutstandingAmount].value_or(0));
+            if (confidential < 0 ||
+                static_cast<std::uint64_t>(confidential) > kMaxMpTokenAmount)
+            {
+                overflow_ = true;
+                return false;
+            }
+            auto& slot = data_[makeKey(sle)];
+            slot.outstanding[static_cast<std::size_t>(order)] = outstanding;
+            slot.confidentialOutstanding[static_cast<std::size_t>(order)] = confidential;
         }
         else if (type == ltMPTOKEN)
         {
@@ -459,8 +469,11 @@ ValidMPTPayment::finalize(
             bool const addOverflows =
                 (data.mptAmount > 0 && data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
                 (data.mptAmount < 0 && data.outstanding[kIBefore] < (-signedMax - data.mptAmount));
+            auto const confDelta =
+                data.confidentialOutstanding[kIAfter] - data.confidentialOutstanding[kIBefore];
             if (addOverflows ||
-                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + data.mptAmount))
+                data.outstanding[kIAfter] !=
+                    (data.outstanding[kIBefore] + data.mptAmount + confDelta))
             {
                 JLOG(j.fatal()) << "Invariant failed: invalid OutstandingAmount balance "
                                 << data.outstanding[kIBefore] << " " << data.outstanding[kIAfter]

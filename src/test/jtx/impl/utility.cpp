@@ -13,6 +13,7 @@
 #include <xrpl/protocol/ErrorCodes.h>
 #include <xrpl/protocol/HashPrefix.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STObject.h>
 #include <xrpl/protocol/STParsedJSON.h>
@@ -21,6 +22,7 @@
 #include <xrpl/protocol/XRPAmount.h>
 #include <xrpl/protocol/jss.h>
 
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -57,7 +59,16 @@ fillFee(json::Value& jv, ReadView const& view)
 {
     if (jv.isMember(jss::Fee))
         return;
-    jv[jss::Fee] = to_string(view.fees().base);
+    auto fee = view.fees().base;
+    std::string const txType =
+        jv.isMember(jss::TransactionType) ? jv[jss::TransactionType].asString() : "";
+    // Confidential MPT txs charge kConfidentialMptFeeMultiplier × base on-ledger.
+    // Keep production calculateBaseFee unchanged; only jtx autofill scales here.
+    if (txType == jss::ConfidentialMPTConvert || txType == jss::ConfidentialMPTMergeInbox)
+    {
+        fee = fee * static_cast<XRPAmount::value_type>(kConfidentialMptFeeMultiplier);
+    }
+    jv[jss::Fee] = to_string(fee);
 }
 
 void
