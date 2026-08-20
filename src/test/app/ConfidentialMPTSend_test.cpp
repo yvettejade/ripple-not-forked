@@ -34,7 +34,7 @@
 
 namespace xrpl {
 
-class ConfidentialMPTSend_test : public beast::unit_test::suite
+class ConfidentialMPTSend_test : public beast::unit_test::Suite
 {
     static std::pair<PublicKey, SecretKey>
     secpKeys(char const* phrase)
@@ -57,7 +57,7 @@ class ConfidentialMPTSend_test : public beast::unit_test::suite
     }
 
     static json::Value
-    mergeJV(Account const& account, MPTID const& mptId)
+    mergeJV(test::jtx::Account const& account, MPTID const& mptId)
     {
         json::Value jv;
         jv[jss::TransactionType] = jss::ConfidentialMPTMergeInbox;
@@ -68,7 +68,7 @@ class ConfidentialMPTSend_test : public beast::unit_test::suite
 
     json::Value
     convertJV(
-        Account const& account,
+        test::jtx::Account const& account,
         MPTID const& mptId,
         std::uint64_t amount,
         PublicKey const& holderPk,
@@ -116,7 +116,7 @@ class ConfidentialMPTSend_test : public beast::unit_test::suite
     json::Value
     convertBackJV(
         test::jtx::Env& env,
-        Account const& account,
+        test::jtx::Account const& account,
         MPTID const& mptId,
         std::uint64_t amount,
         std::uint64_t balance,
@@ -168,8 +168,8 @@ class ConfidentialMPTSend_test : public beast::unit_test::suite
     json::Value
     sendJV(
         test::jtx::Env& env,
-        Account const& sender,
-        Account const& dest,
+        test::jtx::Account const& sender,
+        test::jtx::Account const& dest,
         MPTID const& mptId,
         std::uint64_t amount,
         std::uint64_t balance,
@@ -224,8 +224,8 @@ class ConfidentialMPTSend_test : public beast::unit_test::suite
     json::Value
     clawbackJV(
         test::jtx::Env& env,
-        Account const& issuer,
-        Account const& holder,
+        test::jtx::Account const& issuer,
+        test::jtx::Account const& holder,
         MPTID const& mptId,
         std::uint64_t amount,
         PublicKey const& issuerPk,
