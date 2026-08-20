@@ -237,6 +237,12 @@ static_assert(Number::kMaxRep >= kMaxMpTokenAmount);
 /** Compressed secp256k1 / EC-ElGamal public key length (XLS-0096). */
 constexpr std::size_t kConfidentialPubKeyLength = 33;
 
+/** EC-ElGamal ciphertext: two compressed points (R, S). */
+constexpr std::size_t kConfidentialCiphertextLength = 66;
+
+/** Schnorr proof of knowledge of an ElGamal secret key (c || s). */
+constexpr std::size_t kConfidentialSchnorrProofLength = 64;
+
 /** Base-fee multiplier charged for confidential MPT transactions. */
 constexpr std::uint32_t kConfidentialMptFeeMultiplier = 10;
 

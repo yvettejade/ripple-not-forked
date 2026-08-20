@@ -82,6 +82,14 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
 
                 return tecHAS_OBLIGATIONS;
             }
+
+            if (ctx.view.rules().enabled(featureConfidentialTransfer) &&
+                (sleMpt->isFieldPresent(sfHolderEncryptionKey) ||
+                 sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
+                 sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
+                 sleMpt->isFieldPresent(sfIssuerEncryptedBalance)))
+                return tecHAS_OBLIGATIONS;
+
             if (ctx.view.rules().enabled(featureSingleAssetVault) && sleMpt->isFlag(lsfMPTLocked))
                 return tecNO_PERMISSION;
 

@@ -112,6 +112,7 @@ words:
   - enablerepo
   - endmacro
   - ElGamal
+  - EncZero
   - exceptioned
   - EXPECT_STREQ
   - Falco
@@ -222,6 +223,7 @@ words:
   - perminute
   - permissioned
   - pointee
+  - PoK
   - populator
   - preauth
   - preauthorization
@@ -255,6 +257,7 @@ words:
   - sahyadri
   - Satoshi
   - scons
+  - Schnorr
   - secp
   - sendq
   - seqit

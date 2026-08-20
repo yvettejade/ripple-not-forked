@@ -7,6 +7,7 @@
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/ledger/helpers/DelegateHelpers.h>
 #include <xrpl/ledger/helpers/MPTokenHelpers.h>
+#include <xrpl/protocol/Confidential.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
