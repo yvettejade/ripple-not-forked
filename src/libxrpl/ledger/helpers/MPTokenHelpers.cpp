@@ -290,6 +290,14 @@ removeEmptyHolding(
         (view.rules().enabled(fixCleanup3_1_3) && (*mptoken)[~sfLockedAmount].valueOr(0) != 0))
         return tecHAS_OBLIGATIONS;
 
+    if (view.rules().enabled(featureConfidentialTransfer) &&
+        (mptoken->isFieldPresent(sfHolderEncryptionKey) ||
+         mptoken->isFieldPresent(sfConfidentialBalanceInbox) ||
+         mptoken->isFieldPresent(sfConfidentialBalanceSpending) ||
+         mptoken->isFieldPresent(sfIssuerEncryptedBalance) ||
+         mptoken->isFieldPresent(sfAuditorEncryptedBalance)))
+        return tecHAS_OBLIGATIONS;
+
     return authorizeMPToken(
         view,
         {},  // priorBalance

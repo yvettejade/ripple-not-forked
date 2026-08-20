@@ -319,6 +319,13 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
         }
 
         {
+            auto jv = convertJV(
+                bob, mpt.issuanceID(), 10, holderPk, issuerPk, r, auditorPk, true, &holderSk);
+            jv[sfBlindingFactor] = to_string(uint256{});
+            env(jv, Ter(temMALFORMED));
+        }
+
+        {
             auto const badR = scalarFromSecret(secpKeys("wrong-r").second);
             auto jv = convertJV(
                 bob, mpt.issuanceID(), 10, holderPk, issuerPk, r, auditorPk, true, &holderSk);

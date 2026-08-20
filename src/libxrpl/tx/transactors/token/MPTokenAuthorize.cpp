@@ -87,7 +87,8 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
                 (sleMpt->isFieldPresent(sfHolderEncryptionKey) ||
                  sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
                  sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
-                 sleMpt->isFieldPresent(sfIssuerEncryptedBalance)))
+                 sleMpt->isFieldPresent(sfIssuerEncryptedBalance) ||
+                 sleMpt->isFieldPresent(sfAuditorEncryptedBalance)))
                 return tecHAS_OBLIGATIONS;
 
             if (ctx.view.rules().enabled(featureSingleAssetVault) && sleMpt->isFlag(lsfMPTLocked))

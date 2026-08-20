@@ -57,6 +57,9 @@ ConfidentialMPTConvert::preflight(PreflightContext const& ctx)
     if (amount > kMaxMpTokenAmount)
         return temBAD_AMOUNT;
 
+    if (!isConfidentialScalar(ctx.tx[sfBlindingFactor]))
+        return temMALFORMED;
+
     if (!isConfidentialCiphertext(ctx.tx[sfHolderEncryptedAmount]) ||
         !isConfidentialCiphertext(ctx.tx[sfIssuerEncryptedAmount]))
         return temBAD_CIPHERTEXT;
