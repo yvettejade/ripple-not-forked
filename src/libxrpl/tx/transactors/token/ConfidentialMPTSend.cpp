@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
 
+#include <xrpl/basics/Blob.h>
 #include <xrpl/basics/Slice.h>
 #include <xrpl/ledger/ApplyView.h>
 #include <xrpl/ledger/ReadView.h>
@@ -155,17 +156,21 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         !isTesSuccess(err))
         return err;
 
+    // getFieldVL returns Blob by value; keep bytes alive for Slice views.
+    Blob const srcPkBlob = sleSrc->getFieldVL(sfHolderEncryptionKey);
+    Blob const dstPkBlob = sleDst->getFieldVL(sfHolderEncryptionKey);
+    Blob const spendingBlob = sleSrc->getFieldVL(sfConfidentialBalanceSpending);
     auto const transcript = sendTranscript(
         ctx.tx[sfAccount],
         dst,
         mptId,
         sleSrc->getFieldU32(sfConfidentialBalanceVersion));
     if (!sendVerify(
-            makeSlice(sleSrc->getFieldVL(sfHolderEncryptionKey)),
-            makeSlice(sleDst->getFieldVL(sfHolderEncryptionKey)),
+            makeSlice(srcPkBlob),
+            makeSlice(dstPkBlob),
             *issuerKey,
             auditorKey,
-            makeSlice(sleSrc->getFieldVL(sfConfidentialBalanceSpending)),
+            makeSlice(spendingBlob),
             ctx.tx[sfSenderEncryptedAmount],
             ctx.tx[sfDestinationEncryptedAmount],
             ctx.tx[sfIssuerEncryptedAmount],
