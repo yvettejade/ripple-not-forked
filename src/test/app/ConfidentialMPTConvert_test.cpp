@@ -29,7 +29,7 @@
 
 namespace xrpl {
 
-class ConfidentialMPTConvert_test : public beast::unit_test::suite
+class ConfidentialMPTConvert_test : public beast::unit_test::Suite
 {
     static std::pair<PublicKey, SecretKey>
     secpKeys(char const* phrase)
@@ -52,7 +52,7 @@ class ConfidentialMPTConvert_test : public beast::unit_test::suite
     }
 
     static json::Value
-    mergeJV(Account const& account, MPTID const& mptId)
+    mergeJV(test::jtx::Account const& account, MPTID const& mptId)
     {
         json::Value jv;
         jv[jss::TransactionType] = jss::ConfidentialMPTMergeInbox;
@@ -63,7 +63,7 @@ class ConfidentialMPTConvert_test : public beast::unit_test::suite
 
     json::Value
     convertJV(
-        Account const& account,
+        test::jtx::Account const& account,
         MPTID const& mptId,
         std::uint64_t amount,
         PublicKey const& holderPk,

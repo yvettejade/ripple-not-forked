@@ -144,7 +144,7 @@ ConfidentialMPTConvert::doApply()
 
     sleMpt->setFieldU64(sfMPTAmount, (*sleMpt)[sfMPTAmount] - amount);
 
-    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].value_or(0);
+    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
     sleIssuance->setFieldU64(sfConfidentialOutstandingAmount, coa + amount);
 
     if (auto const holderKey = ctx_.tx[~sfHolderEncryptionKey])
