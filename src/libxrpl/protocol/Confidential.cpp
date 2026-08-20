@@ -12,11 +12,33 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 
 namespace xrpl {
 namespace {
+
+// #region agent log
+inline void
+agentDbg(char const* hyp, char const* loc, char const* msg, int v = 0)
+{
+    if (FILE* f = std::fopen("/opt/cursor/logs/debug.log", "a"))
+    {
+        std::fprintf(
+            f,
+            "{\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":{\"v\":%d},"
+            "\"timestamp\":0}\n",
+            hyp,
+            loc,
+            msg,
+            v);
+        std::fclose(f);
+    }
+}
+// #endregion
+
+
 
 uint256 const&
 secp256k1Order()
@@ -103,6 +125,61 @@ combine(secp256k1_pubkey const& a, secp256k1_pubkey const& b)
     if (secp256k1_ec_pubkey_combine(secp256k1Context(), &out, ins, 2) != 1)
         return std::nullopt;
     return out;
+}
+
+/** NUMS stand-in for the EC identity; libsecp256k1 cannot serialize O. */
+[[nodiscard]] secp256k1_pubkey const&
+identityPoint()
+{
+    static secp256k1_pubkey const kId = [] {
+        static constexpr char const kDomain[] = "XLS-0096/ElGamal/Identity";
+        sha512_half_hasher h;
+        h(kDomain, sizeof(kDomain) - 1);
+        uint256 x = static_cast<uint256>(h);
+        for (std::uint32_t t = 0; t < (1u << 20); ++t)
+        {
+            unsigned char enc[kConfidentialPubKeyLength];
+            enc[0] = 0x02;
+            std::memcpy(enc + 1, x.data(), 32);
+            secp256k1_pubkey pk;
+            if (secp256k1_ec_pubkey_parse(secp256k1Context(), &pk, enc, sizeof(enc)) == 1)
+                return pk;
+            enc[0] = 0x03;
+            if (secp256k1_ec_pubkey_parse(secp256k1Context(), &pk, enc, sizeof(enc)) == 1)
+                return pk;
+            ++x;
+        }
+        logicError("identityPoint: hash-to-curve failed");
+        return secp256k1_pubkey{};
+    }();
+    return kId;
+}
+
+[[nodiscard]] bool
+isIdentityPoint(secp256k1_pubkey const& pk)
+{
+    unsigned char a[kConfidentialPubKeyLength];
+    unsigned char b[kConfidentialPubKeyLength];
+    if (!serializePoint(pk, a) || !serializePoint(identityPoint(), b))
+        return false;
+    return std::memcmp(a, b, sizeof(a)) == 0;
+}
+
+/** Point add that maps infinity to the identity sentinel and treats the sentinel as O. */
+[[nodiscard]] std::optional<secp256k1_pubkey>
+combineAllowIdentity(secp256k1_pubkey const& a, secp256k1_pubkey const& b)
+{
+    bool const aId = isIdentityPoint(a);
+    bool const bId = isIdentityPoint(b);
+    if (aId && bId)
+        return identityPoint();
+    if (aId)
+        return b;
+    if (bId)
+        return a;
+    if (auto out = combine(a, b))
+        return out;
+    return identityPoint();
 }
 
 [[nodiscard]] std::optional<Buffer>
@@ -195,8 +272,8 @@ elgamalAdd(Slice const& a, Slice const& b)
     secp256k1_pubkey sb;
     if (!parseCiphertext(a, ra, sa) || !parseCiphertext(b, rb, sb))
         return std::nullopt;
-    auto const r = combine(ra, rb);
-    auto const s = combine(sa, sb);
+    auto const r = combineAllowIdentity(ra, rb);
+    auto const s = combineAllowIdentity(sa, sb);
     if (!r || !s)
         return std::nullopt;
     return serializeCiphertext(*r, *s);
@@ -211,11 +288,38 @@ elgamalSub(Slice const& a, Slice const& b)
     secp256k1_pubkey sb;
     if (!parseCiphertext(a, ra, sa) || !parseCiphertext(b, rb, sb))
         return std::nullopt;
-    if (secp256k1_ec_pubkey_negate(secp256k1Context(), &rb) != 1 ||
-        secp256k1_ec_pubkey_negate(secp256k1Context(), &sb) != 1)
+    if (isIdentityPoint(rb))
+    {
+        // -O = O; leave rb as identity sentinel.
+    }
+    else if (secp256k1_ec_pubkey_negate(secp256k1Context(), &rb) != 1)
+    {
         return std::nullopt;
-    auto const r = combine(ra, rb);
-    auto const s = combine(sa, sb);
+    }
+    if (isIdentityPoint(sb))
+    {
+        // -O = O
+    }
+    else if (secp256k1_ec_pubkey_negate(secp256k1Context(), &sb) != 1)
+    {
+        return std::nullopt;
+    }
+    auto const r = combineAllowIdentity(ra, rb);
+    auto const s = combineAllowIdentity(sa, sb);
+    // #region agent log
+    {
+        int const same = (a.size() == b.size() &&
+                          std::memcmp(a.data(), b.data(), a.size()) == 0)
+            ? 1
+            : 0;
+        agentDbg(
+            "A",
+            "Confidential.cpp:elgamalSub",
+            "combine_result",
+            (r ? 1 : 0) | ((s ? 1 : 0) << 1) | (same << 2) |
+                ((r && isIdentityPoint(*r) && s && isIdentityPoint(*s)) ? 8 : 0));
+    }
+    // #endregion
     if (!r || !s)
         return std::nullopt;
     return serializeCiphertext(*r, *s);

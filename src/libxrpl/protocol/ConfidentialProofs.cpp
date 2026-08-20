@@ -12,12 +12,32 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 #include <vector>
 
 namespace xrpl {
 namespace {
+
+// #region agent log
+inline void
+agentDbg(char const* hyp, char const* loc, char const* msg, int v = 0)
+{
+    if (FILE* f = std::fopen("/opt/cursor/logs/debug.log", "a"))
+    {
+        std::fprintf(
+            f,
+            "{\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":{\"v\":%d},"
+            "\"timestamp\":0}\n",
+            hyp,
+            loc,
+            msg,
+            v);
+        std::fclose(f);
+    }
+}
+// #endregion
 
 constexpr std::size_t kSc = 32;
 constexpr std::size_t kPt = kConfidentialPubKeyLength;
@@ -147,10 +167,11 @@ invM(uint256 a)
     subBE(e, uint256{std::uint64_t{2}});
     uint256 base = a;
     uint256 res{std::uint64_t{1}};
-    for (int i = 255; i >= 0; --i)
+    // Square-and-multiply over big-endian bytes: bitIndex 0 is MSB (data()[0] bit 7).
+    for (int bitIndex = 0; bitIndex < 256; ++bitIndex)
     {
         res = mulM(res, res);
-        if ((e.data()[i / 8] >> (7 - (i % 8))) & 1u)
+        if ((e.data()[bitIndex / 8] >> (7 - (bitIndex % 8))) & 1u)
             res = mulM(res, base);
     }
     return res;
@@ -838,7 +859,17 @@ bpVerify(std::vector<secp256k1_pubkey> const& V, Slice const& proof, Slice const
     std::memcpy(tHat.data(), p, kSc);
     p += kSc;
     if (!isConfidentialScalar(tauX) || !isConfidentialScalar(mu) || !isConfidentialScalar(tHat))
+    {
+        // #region agent log
+        agentDbg(
+            "F",
+            "ConfidentialProofs.cpp:bpVerify",
+            "scalar_reject",
+            (isConfidentialScalar(tauX) ? 1 : 0) | (isConfidentialScalar(mu) ? 2 : 0) |
+                (isConfidentialScalar(tHat) ? 4 : 0) | (tHat.isZero() ? 8 : 0));
+        // #endregion
         return false;
+    }
     std::vector<secp256k1_pubkey> Lr(rounds), Rr(rounds);
     for (std::size_t i = 0; i < rounds; ++i)
         if (!takePt(Lr[i]))
@@ -851,7 +882,16 @@ bpVerify(std::vector<secp256k1_pubkey> const& V, Slice const& proof, Slice const
     p += kSc;
     std::memcpy(bFinal.data(), p, kSc);
     if (!isConfidentialScalar(aFinal) || !isConfidentialScalar(bFinal))
+    {
+        // #region agent log
+        agentDbg(
+            "F",
+            "ConfidentialProofs.cpp:bpVerify",
+            "ab_scalar_reject",
+            (aFinal.isZero() ? 1 : 0) | (bFinal.isZero() ? 2 : 0));
+        // #endregion
         return false;
+    }
 
     std::vector<secp256k1_pubkey> G, Hv;
     secp256k1_pubkey U;
@@ -977,7 +1017,12 @@ bpVerify(std::vector<secp256k1_pubkey> const& V, Slice const& proof, Slice const
         if (!serPt(*lhs, lb) || !serPt(*rhs, rb))
             return false;
         if (std::memcmp(lb, rb, kPt) != 0)
+        {
+            // #region agent log
+            agentDbg("C", "ConfidentialProofs.cpp:bpVerify", "T_eq_mismatch", static_cast<int>(m));
+            // #endregion
             return false;
+        }
     }
 
     // Build IPA input commitment P =
@@ -1026,6 +1071,17 @@ bpVerify(std::vector<secp256k1_pubkey> const& V, Slice const& proof, Slice const
         uInvs[i] = invM(us[i]);
         if (!uInvs[i])
             return false;
+        // #region agent log
+        if (i == 0)
+        {
+            uint256 prod = mulM(us[i], uInvs[i]);
+            agentDbg(
+                "G",
+                "ConfidentialProofs.cpp:bpVerify",
+                "u_uInv_is_one",
+                (prod == uint256{std::uint64_t{1}}) ? 1 : 0);
+        }
+        // #endregion
         last = us[i];
     }
 
@@ -1079,7 +1135,11 @@ bpVerify(std::vector<secp256k1_pubkey> const& V, Slice const& proof, Slice const
     unsigned char lb[kPt], rb[kPt];
     if (!serPt(*Pcur, lb) || !serPt(*rhs, rb))
         return false;
-    return std::memcmp(lb, rb, kPt) == 0;
+    bool const ipaOk = std::memcmp(lb, rb, kPt) == 0;
+    // #region agent log
+    agentDbg("D", "ConfidentialProofs.cpp:bpVerify", ipaOk ? "IPA_ok" : "IPA_mismatch", static_cast<int>(m));
+    // #endregion
+    return ipaOk;
 }
 
 
@@ -1397,8 +1457,12 @@ convertBackSigmaVerify(
     if (!Abal)
         return false;
 
-    return c == convertBackChallenge(
-               *Apk, *Adec, *Abal, holderPk, spendingCt, balanceCommitment, transcript);
+    bool const ok = c == convertBackChallenge(
+                        *Apk, *Adec, *Abal, holderPk, spendingCt, balanceCommitment, transcript);
+    // #region agent log
+    agentDbg("B", "ConfidentialProofs.cpp:convertBackSigmaVerify", ok ? "sigma_ok" : "sigma_fail", 0);
+    // #endregion
+    return ok;
 }
 
 static uint256
@@ -1620,7 +1684,11 @@ sendSigmaVerify(
     feed.push_back(*Tb);
     feed.push_back(*Tsk1);
     feed.push_back(*Tsk2);
-    return c == sendChallenge(feed, transcript);
+    bool const ok = c == sendChallenge(feed, transcript);
+    // #region agent log
+    agentDbg("B", "ConfidentialProofs.cpp:sendSigmaVerify", ok ? "sigma_ok" : "sigma_fail", static_cast<int>(n));
+    // #endregion
+    return ok;
 }
 
 std::optional<ConvertBackProof>
@@ -1709,7 +1777,12 @@ convertBackVerify(
         return false;
     if (!elgamalMatches(holderEnc, holderPk, amount, r) ||
         !elgamalMatches(issuerEnc, issuerPk, amount, r))
+    {
+        // #region agent log
+        agentDbg("E", "ConfidentialProofs.cpp:convertBackVerify", "elgamalMatches_fail", 0);
+        // #endregion
         return false;
+    }
     if (auditorPk && !elgamalMatches(*auditorEnc, *auditorPk, amount, r))
         return false;
 
@@ -1717,7 +1790,12 @@ convertBackVerify(
     Slice const bp(
         zkProof.data() + kConfidentialConvertBackSigmaLength, kConfidentialSingleBulletproofLength);
     if (!convertBackSigmaVerify(holderPk, spendingCt, balanceCommitment, sigma, transcript))
+    {
+        // #region agent log
+        agentDbg("B", "ConfidentialProofs.cpp:convertBackVerify", "sigma_verify_false", 0);
+        // #endregion
         return false;
+    }
 
     secp256k1_pubkey Cb;
     if (!parsePt(balanceCommitment, Cb))
@@ -1727,8 +1805,17 @@ convertBackVerify(
         return false;
     auto Crem = psub(Cb, *Camt);
     if (!Crem)
+    {
+        // #region agent log
+        agentDbg("E", "ConfidentialProofs.cpp:convertBackVerify", "Crem_psub_fail", 0);
+        // #endregion
         return false;
-    return bpVerify({*Crem}, bp, transcript);
+    }
+    bool const bpOk = bpVerify({*Crem}, bp, transcript);
+    // #region agent log
+    agentDbg("C", "ConfidentialProofs.cpp:convertBackVerify", bpOk ? "bp_ok" : "bp_fail", 0);
+    // #endregion
+    return bpOk;
 }
 
 std::optional<SendProof>
@@ -1886,12 +1973,26 @@ sendVerify(
         zkProof.data() + kConfidentialSendSigmaLength,
         kConfidentialAggregatedBulletproofLength);
     if (!sendSigmaVerify(senderPk, Pks, C2, C1, Cm, Cb, B1, B2, sigma, transcript))
+    {
+        // #region agent log
+        agentDbg("B", "ConfidentialProofs.cpp:sendVerify", "sigma_verify_false", 0);
+        // #endregion
         return false;
+    }
 
     auto Crem = psub(Cb, Cm);
     if (!Crem)
+    {
+        // #region agent log
+        agentDbg("E", "ConfidentialProofs.cpp:sendVerify", "Crem_psub_fail", 0);
+        // #endregion
         return false;
-    return bpVerify({Cm, *Crem}, bp, transcript);
+    }
+    bool const bpOk = bpVerify({Cm, *Crem}, bp, transcript);
+    // #region agent log
+    agentDbg("C", "ConfidentialProofs.cpp:sendVerify", bpOk ? "bp_ok" : "bp_fail", 0);
+    // #endregion
+    return bpOk;
 }
 
 }  // namespace xrpl
