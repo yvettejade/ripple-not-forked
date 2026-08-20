@@ -686,10 +686,12 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         MPTTester mpt(env, alice, {.holders = {bob}});
         mpt.create(
             {.ownerCount = 1,
-             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock});
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock |
+                 tfMPTRequireAuth});
         auto const issuerPk = secpKeys("iss-cb").first;
         mpt.set({.issuerEncryptionKey = strHex(issuerPk.slice())});
         mpt.authorize({.account = bob});
+        mpt.authorize({.account = alice, .holder = bob});
         mpt.pay(alice, bob, 200);
 
         auto const [bobPk, bobSk] = secpKeys("bob-cb");
@@ -768,6 +770,22 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
                 scalarFromSecret(secpKeys("cb-lockg").second)),
             Ter(tecLOCKED));
         mpt.set({.holder = bob, .flags = tfMPTUnlock});
+
+        mpt.authorize({.account = alice, .holder = bob, .flags = tfMPTUnauthorize});
+        env(convertBackJV(
+                env,
+                bob,
+                mpt.issuanceID(),
+                10,
+                80,
+                bobPk,
+                bobSk,
+                issuerPk,
+                std::nullopt,
+                scalarFromSecret(secpKeys("cb-unauth").second),
+                scalarFromSecret(secpKeys("cb-unauthg").second)),
+            Ter(tecNO_AUTH));
+        mpt.authorize({.account = alice, .holder = bob});
 
         {
             auto jv = convertBackJV(

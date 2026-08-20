@@ -119,6 +119,9 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
         return tecBAD_PROOF;
 
     MPTIssue const issue{mptId};
+    if (auto const ter = requireAuth(ctx.view, issue, ctx.tx[sfAccount]); !isTesSuccess(ter))
+        return ter;
+
     if (isFrozen(ctx.view, ctx.tx[sfAccount], issue))
         return tecLOCKED;
 
