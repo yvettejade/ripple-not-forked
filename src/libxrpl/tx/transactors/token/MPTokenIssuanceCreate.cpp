@@ -37,6 +37,11 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfMutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    if (ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) &&
+        (!ctx.rules.enabled(featureConfidentialTransfer) ||
+         !ctx.rules.enabled(featureDynamicMPT)))
+        return false;
+
     return true;
 }
 
@@ -61,9 +66,17 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
         ((*mutableFlags == 0u) || ((*mutableFlags & tmfMPTokenIssuanceCreateMutableMask) != 0u)))
         return temINVALID_FLAG;
 
+    if (ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) &&
+        (ctx.tx[~sfMutableFlags].value_or(0) &
+         tmfMPTCanMutateCanHoldConfidentialBalance))
+        return temINVALID_FLAG;
+
     if (auto const fee = ctx.tx[~sfTransferFee])
     {
         if (fee > kMaxTransferFee)
+            return temBAD_TRANSFER_FEE;
+
+        if (fee > 0u && ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance))
             return temBAD_TRANSFER_FEE;
 
         // If a non-zero TransferFee is set then the tfTransferable flag
@@ -144,8 +157,16 @@ MPTokenIssuanceCreate::create(ApplyView& view, beast::Journal journal, MPTCreate
         if (args.domainId)
             (*mptIssuance)[sfDomainID] = *args.domainId;
 
-        if (args.mutableFlags)
-            (*mptIssuance)[sfMutableFlags] = *args.mutableFlags;
+        auto mutableFlags = args.mutableFlags.value_or(0);
+        if (view.rules().enabled(featureConfidentialTransfer))
+        {
+            if ((args.flags & lsfMPTCanHoldConfidentialBalance) != 0u)
+                mutableFlags &= ~lsmfMPTCanMutateCanHoldConfidentialBalance;
+            else
+                mutableFlags |= lsmfMPTCanMutateCanHoldConfidentialBalance;
+        }
+        if (mutableFlags != 0u)
+            (*mptIssuance)[sfMutableFlags] = mutableFlags;
 
         if (args.referenceHolding)
         {

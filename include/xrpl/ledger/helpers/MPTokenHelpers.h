@@ -63,6 +63,9 @@ transferRate(ReadView const& view, MPTID const& issuanceID);
 [[nodiscard]] TER
 canAddHolding(ReadView const& view, MPTIssue const& mptIssue);
 
+[[nodiscard]] bool
+hasConfidentialMPTState(SLE const& mptoken);
+
 //------------------------------------------------------------------------------
 //
 // Authorization (MPT-specific)

@@ -4,6 +4,7 @@
 #include <xrpl/beast/utility/Zero.h>
 #include <xrpl/beast/utility/instrumentation.h>
 #include <xrpl/core/ServiceRegistry.h>
+#include <xrpl/protocol/ConfidentialMPT.h>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/ledger/helpers/DelegateHelpers.h>
 #include <xrpl/protocol/Feature.h>
@@ -78,12 +79,37 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
     auto const mutableFlags = ctx.tx[~sfMutableFlags];
     auto const metadata = ctx.tx[~sfMPTokenMetadata];
     auto const transferFee = ctx.tx[~sfTransferFee];
-    auto const isMutate = mutableFlags || metadata || transferFee;
+    auto const issuerKey = ctx.tx[~sfIssuerEncryptionKey];
+    auto const auditorKey = ctx.tx[~sfAuditorEncryptionKey];
+    auto const enablesConfidential =
+        ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance);
+    auto const isConfidentialMutation =
+        enablesConfidential || issuerKey || auditorKey;
+    auto const isMutate =
+        mutableFlags || metadata || transferFee || isConfidentialMutation;
 
     if (isMutate && !ctx.rules.enabled(featureDynamicMPT))
         return temDISABLED;
 
+    if (isConfidentialMutation &&
+        !ctx.rules.enabled(featureConfidentialTransfer))
+        return temDISABLED;
+
+    if (auditorKey && !issuerKey)
+        return temMALFORMED;
+
     if (ctx.tx.isFieldPresent(sfDomainID) && ctx.tx.isFieldPresent(sfHolder))
+        return temMALFORMED;
+
+    if ((issuerKey || auditorKey) && ctx.tx.isFieldPresent(sfHolder))
+        return temMALFORMED;
+
+    auto const validKey = [](auto const& key) {
+        return !key ||
+            confidential::isValidPublicKey(
+                   Slice{key->data(), key->size()});
+    };
+    if (!validKey(issuerKey) || !validKey(auditorKey))
         return temMALFORMED;
 
     // fails if both flags are set
@@ -113,6 +139,9 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
             return temMALFORMED;
 
         if (transferFee && *transferFee > kMaxTransferFee)
+            return temBAD_TRANSFER_FEE;
+
+        if (transferFee && *transferFee != 0u && enablesConfidential)
             return temBAD_TRANSFER_FEE;
 
         if (metadata && metadata->length() > kMaxMpTokenMetadataLength)
@@ -230,6 +259,43 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
         return currentMutableFlags & mutableFlag;
     };
 
+    auto const enablesConfidential =
+        ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance);
+    auto const hasIssuerKey = ctx.tx.isFieldPresent(sfIssuerEncryptionKey);
+    auto const hasAuditorKey = ctx.tx.isFieldPresent(sfAuditorEncryptionKey);
+
+    if (enablesConfidential)
+    {
+        if (!isMutableFlag(
+                lsmfMPTCanMutateCanHoldConfidentialBalance) ||
+            sleMptIssuance->isFlag(
+                lsfMPTCanHoldConfidentialBalance))
+            return tecNO_PERMISSION;
+
+        if ((*sleMptIssuance)[sfTransferFee] != 0u)
+            return tecNO_PERMISSION;
+    }
+
+    if (hasIssuerKey || hasAuditorKey)
+    {
+        if ((hasIssuerKey &&
+             sleMptIssuance->isFieldPresent(
+                 sfIssuerEncryptionKey)) ||
+            (hasAuditorKey &&
+             sleMptIssuance->isFieldPresent(
+                 sfAuditorEncryptionKey)))
+            return tecNO_PERMISSION;
+
+        if (!sleMptIssuance->isFlag(
+                lsfMPTCanHoldConfidentialBalance) &&
+            !enablesConfidential)
+            return tecNO_PERMISSION;
+
+        if (sleMptIssuance->isFieldPresent(
+                sfConfidentialOutstandingAmount))
+            return tecNO_PERMISSION;
+    }
+
     if (auto const mutableFlags = ctx.tx[~sfMutableFlags])
     {
         if (std::ranges::any_of(kMptMutabilityFlags, [mutableFlags, &isMutableFlag](auto const& f) {
@@ -258,6 +324,12 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
             return tecNO_PERMISSION;
 
         if (!isMutableFlag(lsmfMPTCanMutateTransferFee))
+            return tecNO_PERMISSION;
+
+        if (fee > 0u &&
+            (sleMptIssuance->isFlag(
+                 lsfMPTCanHoldConfidentialBalance) ||
+             enablesConfidential))
             return tecNO_PERMISSION;
     }
 
@@ -294,6 +366,12 @@ MPTokenIssuanceSet::doApply()
     else if (ctx_.tx.isFlag(tfMPTUnlock))
     {
         flagsOut &= ~lsfMPTLocked;
+    }
+
+    if (ctx_.tx.isFlag(
+            tfMPTSetCanHoldConfidentialBalance))
+    {
+        flagsOut |= lsfMPTCanHoldConfidentialBalance;
     }
 
     if (auto const mutableFlags = ctx_.tx[~sfMutableFlags].value_or(0))
@@ -348,6 +426,14 @@ MPTokenIssuanceSet::doApply()
             sle->setFieldVL(sfMPTokenMetadata, *metadata);
         }
     }
+
+    if (auto const issuerKey =
+            ctx_.tx[~sfIssuerEncryptionKey])
+        sle->setFieldVL(sfIssuerEncryptionKey, *issuerKey);
+
+    if (auto const auditorKey =
+            ctx_.tx[~sfAuditorEncryptionKey])
+        sle->setFieldVL(sfAuditorEncryptionKey, *auditorKey);
 
     if (domainID)
     {
