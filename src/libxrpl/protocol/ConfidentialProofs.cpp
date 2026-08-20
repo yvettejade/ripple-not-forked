@@ -147,7 +147,8 @@ invM(uint256 a)
     subBE(e, uint256{std::uint64_t{2}});
     uint256 base = a;
     uint256 res{std::uint64_t{1}};
-    for (int i = 255; i >= 0; --i)
+    // Square-and-multiply from MSB (big-endian byte 0, bit 7) to LSB.
+    for (int i = 0; i < 256; ++i)
     {
         res = mulM(res, res);
         if ((e.data()[i / 8] >> (7 - (i % 8))) & 1u)
