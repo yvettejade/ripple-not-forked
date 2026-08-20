@@ -191,6 +191,13 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
     if (isTesSuccess(checkTxPermission(sle, tx)))
         return tesSUCCESS;
 
+    // Confidential enablement and encryption-key installation have no granular
+    // delegate permission. Reject them unless the delegate has the full
+    // MPTokenIssuanceSet transaction permission (handled above).
+    if (tx.isFlag(tfMPTSetCanHoldConfidentialBalance) ||
+        tx.isFieldPresent(sfIssuerEncryptionKey) || tx.isFieldPresent(sfAuditorEncryptionKey))
+        return terNO_DELEGATE_PERMISSION;
+
     // this is added in case more flags will be added for MPTokenIssuanceSet
     // in the future. Currently unreachable.
     if ((tx.getFlags() & tfMPTokenIssuanceSetMask) != 0u)
@@ -318,6 +325,14 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
         (alreadyConfidential || enablingConfidential))
         return tecNO_PERMISSION;
 
+    // COA uses soeDEFAULT and may remain present at 0 after ConvertBack. Block
+    // key upload / confidential enablement only while confidential supply
+    // is actually circulating.
+    auto const coa =
+        (*sleMptIssuance)[~sfConfidentialOutstandingAmount].value_or(0);
+    if ((issuerKey || auditorKey || enablingConfidential) && coa > 0)
+        return tecNO_PERMISSION;
+
     if (issuerKey || auditorKey)
     {
         if (sleMptIssuance->isFieldPresent(sfIssuerEncryptionKey) ||
@@ -325,9 +340,6 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
             return tecNO_PERMISSION;
 
         if (!alreadyConfidential && !enablingConfidential)
-            return tecNO_PERMISSION;
-
-        if (sleMptIssuance->isFieldPresent(sfConfidentialOutstandingAmount))
             return tecNO_PERMISSION;
     }
 

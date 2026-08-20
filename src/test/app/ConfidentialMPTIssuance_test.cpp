@@ -1,5 +1,6 @@
 #include <test/jtx/Account.h>
 #include <test/jtx/Env.h>
+#include <test/jtx/delegate.h>
 #include <test/jtx/mpt.h>
 #include <test/jtx/ter.h>
 
@@ -254,6 +255,51 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
     }
 
     void
+    testDelegateConfidential(FeatureBitset features)
+    {
+        testcase("Delegate cannot enable confidential or install keys");
+        using namespace test::jtx;
+
+        auto const issuerKey = secp256k1KeyHex("delegate-issuer-key");
+        Env env{*this, features};
+        Account const alice("alice");
+        Account const bob("bob");
+        env.fund(XRP(100000), alice, bob);
+        env.close();
+
+        MPTTester mpt(env, alice, {.fund = false});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanLock});
+
+        // Lock-only granular permission must not authorize confidential Set.
+        env(delegate::set(alice, bob, {"MPTokenIssuanceLock"}));
+        env.close();
+        mpt.set(
+            {.flags = tfMPTSetCanHoldConfidentialBalance,
+             .delegate = bob,
+             .err = terNO_DELEGATE_PERMISSION});
+        mpt.set(
+            {.flags = tfMPTSetCanHoldConfidentialBalance,
+             .issuerEncryptionKey = issuerKey,
+             .delegate = bob,
+             .err = terNO_DELEGATE_PERMISSION});
+        mpt.set(
+            {.issuerEncryptionKey = issuerKey,
+             .delegate = bob,
+             .err = terNO_DELEGATE_PERMISSION});
+
+        // Full transaction permission still allows confidential Set.
+        env(delegate::set(alice, bob, {"MPTokenIssuanceSet"}));
+        env.close();
+        mpt.set(
+            {.flags = tfMPTSetCanHoldConfidentialBalance,
+             .issuerEncryptionKey = issuerKey,
+             .delegate = bob});
+        auto const sle = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sle->isFlag(lsfMPTCanHoldConfidentialBalance));
+        BEAST_EXPECT(strHex((*sle)[sfIssuerEncryptionKey]) == issuerKey);
+    }
+
+    void
     testWithFeats(FeatureBitset features)
     {
         testDisabled(features);
@@ -261,6 +307,7 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         testSet(features);
         testSetTransferFee(features);
         testDuplicateKeys(features);
+        testDelegateConfidential(features);
     }
 
 public:
