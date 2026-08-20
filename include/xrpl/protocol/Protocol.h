@@ -234,6 +234,12 @@ constexpr std::size_t kMaxMpTokenMetadataLength = 1024;
 constexpr std::uint64_t kMaxMpTokenAmount = 0x7FFF'FFFF'FFFF'FFFFull;
 static_assert(Number::kMaxRep >= kMaxMpTokenAmount);
 
+/** Compressed secp256k1 / EC-ElGamal public key length (XLS-0096). */
+constexpr std::size_t kConfidentialPubKeyLength = 33;
+
+/** Base-fee multiplier charged for confidential MPT transactions. */
+constexpr std::uint32_t kConfidentialMptFeeMultiplier = 10;
+
 /** The maximum length of Data payload */
 constexpr std::size_t kMaxDataPayloadLength = 256;
 

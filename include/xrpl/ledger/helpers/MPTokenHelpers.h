@@ -1,10 +1,12 @@
 #pragma once
 
+#include <xrpl/basics/Slice.h>
 #include <xrpl/beast/utility/Journal.h>
 #include <xrpl/ledger/ApplyView.h>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/ledger/helpers/TokenHelpers.h>
 #include <xrpl/protocol/MPTIssue.h>
+#include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/Rate.h>
 #include <xrpl/protocol/STAmount.h>
 #include <xrpl/protocol/TER.h>
@@ -13,6 +15,13 @@
 #include <optional>
 
 namespace xrpl {
+
+/** True if `key` is a 33-byte compressed secp256k1 public key. */
+[[nodiscard]] inline bool
+isConfidentialPubKey(Slice const& key)
+{
+    return key.size() == kConfidentialPubKeyLength && (key[0] == 0x02 || key[0] == 0x03);
+}
 
 //------------------------------------------------------------------------------
 //

@@ -6,6 +6,7 @@
 #include <xrpl/core/ServiceRegistry.h>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/ledger/helpers/DelegateHelpers.h>
+#include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -31,9 +32,18 @@ namespace xrpl {
 bool
 MPTokenIssuanceSet::checkExtraFeatures(PreflightContext const& ctx)
 {
-    return !ctx.tx.isFieldPresent(sfDomainID) ||
-        (ctx.rules.enabled(featurePermissionedDomains) &&
-         ctx.rules.enabled(featureSingleAssetVault));
+    if (ctx.tx.isFieldPresent(sfDomainID) &&
+        !(ctx.rules.enabled(featurePermissionedDomains) &&
+          ctx.rules.enabled(featureSingleAssetVault)))
+        return false;
+
+    if ((ctx.tx.isFieldPresent(sfIssuerEncryptionKey) ||
+         ctx.tx.isFieldPresent(sfAuditorEncryptionKey) ||
+         ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance)) &&
+        !ctx.rules.enabled(featureConfidentialTransfer))
+        return false;
+
+    return true;
 }
 
 std::uint32_t
@@ -79,6 +89,10 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
     auto const metadata = ctx.tx[~sfMPTokenMetadata];
     auto const transferFee = ctx.tx[~sfTransferFee];
     auto const isMutate = mutableFlags || metadata || transferFee;
+    auto const issuerKey = ctx.tx[~sfIssuerEncryptionKey];
+    auto const auditorKey = ctx.tx[~sfAuditorEncryptionKey];
+    auto const hasKeys = issuerKey || auditorKey;
+    auto const enablingConfidential = ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance);
 
     if (isMutate && !ctx.rules.enabled(featureDynamicMPT))
         return temDISABLED;
@@ -95,10 +109,31 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
     if (holderID && accountID == holderID)
         return temMALFORMED;
 
-    if (ctx.rules.enabled(featureSingleAssetVault) || ctx.rules.enabled(featureDynamicMPT))
+    if (hasKeys && holderID)
+        return temMALFORMED;
+
+    if (enablingConfidential && holderID)
+        return temMALFORMED;
+
+    if (auditorKey && !issuerKey)
+        return temMALFORMED;
+
+    if (issuerKey && !isConfidentialPubKey(*issuerKey))
+        return temMALFORMED;
+
+    if (auditorKey && !isConfidentialPubKey(*auditorKey))
+        return temMALFORMED;
+
+    // Check before the DynamicMPT "no Flags when mutating" rule, which would
+    // otherwise return temMALFORMED for this same combination.
+    if (transferFee && *transferFee != 0u && enablingConfidential)
+        return temBAD_TRANSFER_FEE;
+
+    if (ctx.rules.enabled(featureSingleAssetVault) || ctx.rules.enabled(featureDynamicMPT) ||
+        ctx.rules.enabled(featureConfidentialTransfer))
     {
         // Is this transaction actually changing anything ?
-        if (ctx.tx.getFlags() == 0 && !ctx.tx.isFieldPresent(sfDomainID) && !isMutate)
+        if (ctx.tx.getFlags() == 0 && !ctx.tx.isFieldPresent(sfDomainID) && !isMutate && !hasKeys)
             return temMALFORMED;
     }
 
@@ -261,6 +296,40 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
             return tecNO_PERMISSION;
     }
 
+    auto const issuerKey = ctx.tx[~sfIssuerEncryptionKey];
+    auto const auditorKey = ctx.tx[~sfAuditorEncryptionKey];
+    auto const enablingConfidential = ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance);
+    auto const alreadyConfidential =
+        sleMptIssuance->isFlag(lsfMPTCanHoldConfidentialBalance);
+
+    if (enablingConfidential)
+    {
+        auto const immutableFlags = sleMptIssuance->getFieldU32(sfImmutableFlags);
+        if ((immutableFlags & lsifMPTCanHoldConfidentialBalance) != 0u)
+            return tecNO_PERMISSION;
+
+        auto const existingFee = sleMptIssuance->getFieldU16(sfTransferFee);
+        if (existingFee != 0u)
+            return tecNO_PERMISSION;
+    }
+
+    if (auto const fee = ctx.tx[~sfTransferFee]; fee && *fee != 0u &&
+        (alreadyConfidential || enablingConfidential))
+        return tecNO_PERMISSION;
+
+    if (issuerKey || auditorKey)
+    {
+        if (sleMptIssuance->isFieldPresent(sfIssuerEncryptionKey) ||
+            sleMptIssuance->isFieldPresent(sfAuditorEncryptionKey))
+            return tecNO_PERMISSION;
+
+        if (!alreadyConfidential && !enablingConfidential)
+            return tecNO_PERMISSION;
+
+        if (sleMptIssuance->isFieldPresent(sfConfidentialOutstandingAmount))
+            return tecNO_PERMISSION;
+    }
+
     return tesSUCCESS;
 }
 
@@ -295,6 +364,9 @@ MPTokenIssuanceSet::doApply()
     {
         flagsOut &= ~lsfMPTLocked;
     }
+
+    if (ctx_.tx.isFlag(tfMPTSetCanHoldConfidentialBalance))
+        flagsOut |= lsfMPTCanHoldConfidentialBalance;
 
     if (auto const mutableFlags = ctx_.tx[~sfMutableFlags].value_or(0))
     {
@@ -348,6 +420,12 @@ MPTokenIssuanceSet::doApply()
             sle->setFieldVL(sfMPTokenMetadata, *metadata);
         }
     }
+
+    if (auto const issuerKey = ctx_.tx[~sfIssuerEncryptionKey])
+        sle->setFieldVL(sfIssuerEncryptionKey, *issuerKey);
+
+    if (auto const auditorKey = ctx_.tx[~sfAuditorEncryptionKey])
+        sle->setFieldVL(sfAuditorEncryptionKey, *auditorKey);
 
     if (domainID)
     {

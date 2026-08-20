@@ -70,6 +70,8 @@ words:
   - choco
   - chrono
   - citardauq
+  - ciphertext
+  - ciphertexts
   - clawback
   - clawbacks
   - cmaketoolchain
@@ -79,6 +81,8 @@ words:
   - conanfile
   - conanrun
   - confs
+  - ConfidentialMPT
+  - ConfidentialTransfer
   - connectability
   - coro
   - coros
@@ -107,6 +111,7 @@ words:
   - enabled
   - enablerepo
   - endmacro
+  - ElGamal
   - exceptioned
   - EXPECT_STREQ
   - Falco
@@ -156,6 +161,7 @@ words:
   - LOCALGOOD
   - logwstream
   - lseq
+  - lsif
   - lsmf
   - ltype
   - mathbunnyru
