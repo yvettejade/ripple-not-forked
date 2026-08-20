@@ -64,7 +64,11 @@ fillFee(json::Value& jv, ReadView const& view)
         jv.isMember(jss::TransactionType) ? jv[jss::TransactionType].asString() : "";
     // Confidential MPT txs charge kConfidentialMptFeeMultiplier × base on-ledger.
     // Keep production calculateBaseFee unchanged; only jtx autofill scales here.
-    if (txType == jss::ConfidentialMPTConvert || txType == jss::ConfidentialMPTMergeInbox)
+    if (txType == jss::ConfidentialMPTConvert ||
+        txType == jss::ConfidentialMPTMergeInbox ||
+        txType == jss::ConfidentialMPTSend ||
+        txType == jss::ConfidentialMPTConvertBack ||
+        txType == jss::ConfidentialMPTClawback)
     {
         fee = fee * static_cast<XRPAmount::value_type>(kConfidentialMptFeeMultiplier);
     }
