@@ -1,6 +1,7 @@
 #include <xrpl/tx/transactors/token/MPTokenIssuanceDestroy.h>
 
 #include <xrpl/ledger/helpers/AccountRootHelpers.h>
+#include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -33,6 +34,10 @@ MPTokenIssuanceDestroy::preclaim(PreclaimContext const& ctx)
 
     // ensure it has no outstanding balances
     if ((*sleMPT)[sfOutstandingAmount] != 0)
+        return tecHAS_OBLIGATIONS;
+
+    if (ctx.view.rules().enabled(featureConfidentialTransfer) &&
+        (*sleMPT)[sfConfidentialOutstandingAmount] != 0)
         return tecHAS_OBLIGATIONS;
 
     if ((*sleMPT)[~sfLockedAmount].value_or(0) != 0)
