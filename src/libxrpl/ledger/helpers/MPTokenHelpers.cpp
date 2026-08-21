@@ -287,6 +287,7 @@ removeEmptyHolding(
     // accounting out of balance, so fail. Since this should be impossible
     // anyway, I'm not going to put any effort into it.
     if (mptoken->at(sfMPTAmount) != 0 ||
+        mptoken->isFieldPresent(sfHolderEncryptionKey) ||
         (view.rules().enabled(fixCleanup3_1_3) && (*mptoken)[~sfLockedAmount].valueOr(0) != 0))
         return tecHAS_OBLIGATIONS;
 

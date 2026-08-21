@@ -394,6 +394,9 @@ ValidMPTPayment::visitEntry(
                 return false;
             }
             data_[makeKey(sle)].outstanding[static_cast<std::size_t>(order)] = outstanding;
+            data_[makeKey(sle)].confidential[static_cast<std::size_t>(order)] =
+                static_cast<std::int64_t>(
+                    sle[~sfConfidentialOutstandingAmount].value_or(0));
         }
         else if (type == ltMPTOKEN)
         {
@@ -459,8 +462,11 @@ ValidMPTPayment::finalize(
             bool const addOverflows =
                 (data.mptAmount > 0 && data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
                 (data.mptAmount < 0 && data.outstanding[kIBefore] < (-signedMax - data.mptAmount));
+            auto const confidentialDelta =
+                data.confidential[kIAfter] - data.confidential[kIBefore];
             if (addOverflows ||
-                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + data.mptAmount))
+                data.outstanding[kIAfter] !=
+                    (data.outstanding[kIBefore] + data.mptAmount + confidentialDelta))
             {
                 JLOG(j.fatal()) << "Invariant failed: invalid OutstandingAmount balance "
                                 << data.outstanding[kIBefore] << " " << data.outstanding[kIAfter]
@@ -610,6 +616,147 @@ ValidMPTTransfer::finalize(
         {
             JLOG(j.fatal()) << "Invariant failed: invalid MPToken transfer between holders";
             return invariantPasses;
+        }
+    }
+
+    return true;
+}
+
+void
+ValidConfidentialMPT::visitEntry(
+    bool isDelete,
+    std::shared_ptr<SLE const> const& before,
+    std::shared_ptr<SLE const> const& after)
+{
+    auto const sle = after ? after : before;
+    if (!sle)
+        return;
+
+    if (sle->getType() == ltMPTOKEN_ISSUANCE)
+    {
+        auto const id = makeMptID(sle->at(sfSequence), sle->at(sfIssuer));
+        auto& change = issuances_[id];
+        if (before)
+        {
+            change.outstandingBefore = before->at(sfOutstandingAmount);
+            change.confidentialBefore =
+                before->getFieldU64(sfConfidentialOutstandingAmount);
+        }
+        if (after && !isDelete)
+        {
+            change.outstandingAfter = after->at(sfOutstandingAmount);
+            change.confidentialAfter =
+                after->getFieldU64(sfConfidentialOutstandingAmount);
+        }
+        return;
+    }
+
+    if (sle->getType() != ltMPTOKEN)
+        return;
+
+    auto const id = sle->at(sfMPTokenIssuanceID);
+    auto const beforeAmount = before ? before->at(sfMPTAmount) : 0;
+    auto const afterAmount = after && !isDelete ? after->at(sfMPTAmount) : 0;
+    issuances_[id].publicBalanceDelta +=
+        static_cast<std::int64_t>(afterAmount) -
+        static_cast<std::int64_t>(beforeAmount);
+
+    if (isDelete && sle->isFieldPresent(sfHolderEncryptionKey))
+        deletedInitializedToken_ = true;
+
+    tokens_.emplace_back(before, isDelete ? nullptr : after);
+}
+
+bool
+ValidConfidentialMPT::finalize(
+    STTx const& tx,
+    TER const result,
+    XRPAmount const,
+    ReadView const& view,
+    beast::Journal const& j) const
+{
+    if (!view.rules().enabled(featureConfidentialTransfer) ||
+        !isTesSuccess(result))
+        return true;
+
+    if (deletedInitializedToken_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: initialized confidential MPToken deleted";
+        return false;
+    }
+
+    for (auto const& [id, change] : issuances_)
+    {
+        auto const issuance = view.read(keylet::mptIssuance(id));
+        if (issuance &&
+            issuance->getFieldU64(sfConfidentialOutstandingAmount) >
+                issuance->at(sfOutstandingAmount))
+        {
+            JLOG(j.fatal()) << "Invariant failed: confidential MPT amount exceeds outstanding";
+            return false;
+        }
+
+        if (tx.getTxnType() == ttCONFIDENTIAL_MPT_CONVERT ||
+            tx.getTxnType() == ttCONFIDENTIAL_MPT_CONVERT_BACK)
+        {
+            auto const confidentialDelta =
+                static_cast<std::int64_t>(change.confidentialAfter) -
+                static_cast<std::int64_t>(change.confidentialBefore);
+            // The XLS-0096 ConvertBack example decreased OA while its normative
+            // sections kept OA unchanged. This was raised and clarified: both
+            // conversion directions preserve total outstanding supply.
+            if (confidentialDelta != -change.publicBalanceDelta ||
+                change.outstandingAfter != change.outstandingBefore)
+            {
+                JLOG(j.fatal())
+                    << "Invariant failed: confidential conversion changed supply";
+                return false;
+            }
+        }
+    }
+
+    for (auto const& [before, after] : tokens_)
+    {
+        if (!after)
+            continue;
+
+        auto const hasSpending =
+            after->isFieldPresent(sfConfidentialBalanceSpending);
+        auto const hasInbox =
+            after->isFieldPresent(sfConfidentialBalanceInbox);
+        auto const hasIssuer = after->isFieldPresent(sfIssuerEncryptedBalance);
+        auto const hasKey = after->isFieldPresent(sfHolderEncryptionKey);
+        if (hasSpending != hasInbox || hasSpending != hasIssuer ||
+            hasSpending != hasKey)
+        {
+            JLOG(j.fatal()) << "Invariant failed: incomplete confidential MPToken fields";
+            return false;
+        }
+
+        if (hasSpending)
+        {
+            auto const issuance =
+                view.read(keylet::mptIssuance(after->at(sfMPTokenIssuanceID)));
+            if (!issuance ||
+                !issuance->isFlag(lsfMPTCanHoldConfidentialBalance))
+            {
+                JLOG(j.fatal())
+                    << "Invariant failed: confidential MPToken without issuance flag";
+                return false;
+            }
+        }
+
+        if (before && hasSpending &&
+            before->isFieldPresent(sfConfidentialBalanceSpending) &&
+            before->isFieldPresent(sfConfidentialBalanceVersion) &&
+            before->at(sfConfidentialBalanceSpending) !=
+                after->at(sfConfidentialBalanceSpending) &&
+            before->at(sfConfidentialBalanceVersion) ==
+                after->at(sfConfidentialBalanceVersion))
+        {
+            JLOG(j.fatal())
+                << "Invariant failed: confidential spending balance changed without version";
+            return false;
         }
     }
 
