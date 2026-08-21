@@ -23,8 +23,7 @@ ConfidentialMPTClawback::preflight(PreflightContext const& ctx)
 {
     if (ctx.tx[sfMPTAmount] > kMaxMpTokenAmount)
         return temBAD_AMOUNT;
-    auto const proof = ctx.tx[~sfZKProof];
-    if (!proof || proof->size() != kSchnorrProofBytes)
+    if (ctx.tx[sfZKProof].size() != kSchnorrProofBytes)
         return temMALFORMED;
     return tesSUCCESS;
 }
@@ -43,13 +42,16 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
         return tecNO_PERMISSION;
     if (!issuance->isFlag(lsfMPTCanClawback) ||
         !issuance->isFieldPresent(sfIssuerEncryptionKey) ||
-        !token->isFieldPresent(sfIssuerEncryptedBalance))
+        !token->isFieldPresent(sfIssuerEncryptedBalance) ||
+        !token->isFieldPresent(sfHolderEncryptionKey))
         return tecNO_PERMISSION;
 
     CompressedPoint issuerPk;
     Ciphertext issuerCt;
     SchnorrProof proof;
-    auto const proofBlob = ctx.tx[sfZKProof];
+    auto const proofBlob = ctx.tx.getFieldVL(sfZKProof);
+    if (proofBlob.size() != proof.size())
+        return temMALFORMED;
     std::copy(proofBlob.begin(), proofBlob.end(), proof.begin());
     auto const context = confidential_mpt::proofContext(
         static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CLAWBACK),
@@ -57,8 +59,9 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
         id,
         token->at(sfConfidentialBalanceVersion));
     if (!parseCompressedPoint(
-            makeSlice(issuance->at(sfIssuerEncryptionKey)), issuerPk) ||
-        !parseCiphertext(makeSlice(token->at(sfIssuerEncryptedBalance)), issuerCt) ||
+            makeSlice(issuance->getFieldVL(sfIssuerEncryptionKey)), issuerPk) ||
+        !parseCiphertext(
+            makeSlice(token->getFieldVL(sfIssuerEncryptedBalance)), issuerCt) ||
         !verifyClawbackProof(
             issuerPk, issuerCt, amount, proof, makeSlice(context)))
         return tecBAD_PROOF;
@@ -67,9 +70,7 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
 }
 
 XRPAmount
-ConfidentialMPTClawback::calculateBaseFee(
-    ReadView const& view,
-    STTx const& tx)
+ConfidentialMPTClawback::calculateBaseFee(ReadView const& view, STTx const& tx)
 {
     return confidential_mpt::proofBaseFee(view, tx);
 }
@@ -90,12 +91,10 @@ ConfidentialMPTClawback::doApply()
     if (amount > coa || amount > oa)
         return tefINTERNAL;
 
-    auto const holderKey = token->at(sfHolderEncryptionKey);
-    auto const issuerKey = issuance->at(sfIssuerEncryptionKey);
-    auto const holderZero =
-        confidential_mpt::canonicalZero(holder, id, holderKey);
-    auto const issuerZero =
-        confidential_mpt::canonicalZero(holder, id, issuerKey);
+    auto const holderZero = confidential_mpt::canonicalZero(
+        holder, id, makeSlice(token->getFieldVL(sfHolderEncryptionKey)));
+    auto const issuerZero = confidential_mpt::canonicalZero(
+        holder, id, makeSlice(issuance->getFieldVL(sfIssuerEncryptionKey)));
     if (!holderZero || !issuerZero)
         return tefINTERNAL;
 
@@ -105,7 +104,9 @@ ConfidentialMPTClawback::doApply()
     if (issuance->isFieldPresent(sfAuditorEncryptionKey))
     {
         auto const auditorZero = confidential_mpt::canonicalZero(
-            holder, id, issuance->at(sfAuditorEncryptionKey));
+            holder,
+            id,
+            makeSlice(issuance->getFieldVL(sfAuditorEncryptionKey)));
         if (!auditorZero)
             return tefINTERNAL;
         token->setFieldVL(sfAuditorEncryptedBalance, *auditorZero);

@@ -51,8 +51,12 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     auto const token = ctx.view.read(keylet::mptoken(id, account));
     if (!issuance || !token)
         return tecOBJECT_NOT_FOUND;
+    // Dedicated-account model: the issuer account cannot convert its own
+    // issuance. XLS-0096 §7.3 omitted a result code; sibling confidential
+    // transactors use temMALFORMED. Preclaim is required because the issuer
+    // comparison needs the issuance object.
     if (account == issuance->at(sfIssuer))
-        return tecNO_PERMISSION;
+        return temMALFORMED;
     if (!issuance->isFlag(lsfMPTCanHoldConfidentialBalance) ||
         !issuance->isFieldPresent(sfIssuerEncryptionKey))
         return tecNO_PERMISSION;
@@ -76,31 +80,31 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
         return tecNO_PERMISSION;
 
     Scalar blinding;
-    if (!parseScalar(
-            {ctx.tx[sfBlindingFactor].data(),
-             ctx.tx[sfBlindingFactor].size()},
+    if (!parseNonZeroScalar(
+            {ctx.tx[sfBlindingFactor].data(), ctx.tx[sfBlindingFactor].size()},
             blinding))
         return tecBAD_PROOF;
 
-    auto verifyEncryption = [&](SField const& cipherField, Blob const& key) {
+    auto verifyEncryption = [&](SField const& cipherField, Slice key) {
         CompressedPoint publicKey;
         Ciphertext ciphertext;
-        return parseCompressedPoint(makeSlice(key), publicKey) &&
-            parseCiphertext(makeSlice(ctx.tx[cipherField]), ciphertext) &&
+        return parseCompressedPoint(key, publicKey) &&
+            parseCiphertext(makeSlice(ctx.tx.getFieldVL(cipherField)), ciphertext) &&
             verifyDeterministicEncryption(
-                   ciphertext, publicKey, amount, blinding);
+                ciphertext, publicKey, amount, blinding);
     };
 
-    Blob const holderPublicKey =
-        suppliedKey.value_or(token->at(sfHolderEncryptionKey));
+    Slice const holderPublicKey = suppliedKey
+        ? *suppliedKey
+        : makeSlice(token->getFieldVL(sfHolderEncryptionKey));
     if (!verifyEncryption(sfHolderEncryptedAmount, holderPublicKey) ||
         !verifyEncryption(
             sfIssuerEncryptedAmount,
-            issuance->at(sfIssuerEncryptionKey)) ||
+            makeSlice(issuance->getFieldVL(sfIssuerEncryptionKey))) ||
         (auditorRequired &&
          !verifyEncryption(
              sfAuditorEncryptedAmount,
-             issuance->at(sfAuditorEncryptionKey))))
+             makeSlice(issuance->getFieldVL(sfAuditorEncryptionKey)))))
         return tecBAD_PROOF;
 
     if (suppliedKey)
@@ -114,7 +118,7 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
             account,
             id,
             0);
-        if (!parseCompressedPoint(makeSlice(*suppliedKey), publicKey) ||
+        if (!parseCompressedPoint(*suppliedKey, publicKey) ||
             !verifySchnorrProofOfKnowledge(
                 publicKey, schnorr, makeSlice(context)))
             return tecBAD_PROOF;
@@ -124,9 +128,7 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
 }
 
 XRPAmount
-ConfidentialMPTConvert::calculateBaseFee(
-    ReadView const& view,
-    STTx const& tx)
+ConfidentialMPTConvert::calculateBaseFee(ReadView const& view, STTx const& tx)
 {
     return confidential_mpt::proofBaseFee(view, tx);
 }
@@ -148,11 +150,13 @@ ConfidentialMPTConvert::doApply()
 
     if (!token->isFieldPresent(sfHolderEncryptionKey))
     {
-        auto const holderKey = ctx_.tx.at(sfHolderEncryptionKey);
+        auto const holderKey = ctx_.tx.getFieldVL(sfHolderEncryptionKey);
         auto const holderZero =
-            confidential_mpt::canonicalZero(accountID_, id, holderKey);
+            confidential_mpt::canonicalZero(accountID_, id, makeSlice(holderKey));
         auto const issuerZero = confidential_mpt::canonicalZero(
-            accountID_, id, issuance->at(sfIssuerEncryptionKey));
+            accountID_,
+            id,
+            makeSlice(issuance->getFieldVL(sfIssuerEncryptionKey)));
         if (!holderZero || !issuerZero)
             return tefINTERNAL;
 
@@ -165,7 +169,9 @@ ConfidentialMPTConvert::doApply()
         if (issuance->isFieldPresent(sfAuditorEncryptionKey))
         {
             auto const auditorZero = confidential_mpt::canonicalZero(
-                accountID_, id, issuance->at(sfAuditorEncryptionKey));
+                accountID_,
+                id,
+                makeSlice(issuance->getFieldVL(sfAuditorEncryptionKey)));
             if (!auditorZero)
                 return tefINTERNAL;
             token->setFieldVL(sfAuditorEncryptedBalance, *auditorZero);
@@ -173,11 +179,11 @@ ConfidentialMPTConvert::doApply()
     }
 
     auto const inbox = confidential_mpt::addCiphertexts(
-        token->at(sfConfidentialBalanceInbox),
-        ctx_.tx.at(sfHolderEncryptedAmount));
+        makeSlice(token->getFieldVL(sfConfidentialBalanceInbox)),
+        ctx_.tx[sfHolderEncryptedAmount]);
     auto const issuer = confidential_mpt::addCiphertexts(
-        token->at(sfIssuerEncryptedBalance),
-        ctx_.tx.at(sfIssuerEncryptedAmount));
+        makeSlice(token->getFieldVL(sfIssuerEncryptedBalance)),
+        ctx_.tx[sfIssuerEncryptedAmount]);
     if (!inbox || !issuer)
         return tefINTERNAL;
     token->setFieldVL(sfConfidentialBalanceInbox, *inbox);
@@ -186,16 +192,15 @@ ConfidentialMPTConvert::doApply()
     if (issuance->isFieldPresent(sfAuditorEncryptionKey))
     {
         auto const auditor = confidential_mpt::addCiphertexts(
-            token->at(sfAuditorEncryptedBalance),
-            ctx_.tx.at(sfAuditorEncryptedAmount));
+            makeSlice(token->getFieldVL(sfAuditorEncryptedBalance)),
+            ctx_.tx[sfAuditorEncryptedAmount]);
         if (!auditor)
             return tefINTERNAL;
         token->setFieldVL(sfAuditorEncryptedBalance, *auditor);
     }
 
     token->setFieldU64(sfMPTAmount, token->at(sfMPTAmount) - amount);
-    issuance->setFieldU64(
-        sfConfidentialOutstandingAmount, newConfidential);
+    issuance->setFieldU64(sfConfidentialOutstandingAmount, newConfidential);
     view().update(token);
     view().update(issuance);
     return tesSUCCESS;

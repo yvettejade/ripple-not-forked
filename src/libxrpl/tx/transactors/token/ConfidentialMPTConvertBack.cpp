@@ -42,14 +42,18 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     auto const token = ctx.view.read(keylet::mptoken(id, account));
     if (!issuance || !token)
         return tecOBJECT_NOT_FOUND;
+    // XLS-0096 §10.4.1.2. Issuer identity is on-ledger, so this lives in
+    // preclaim rather than preflight.
     if (account == issuance->at(sfIssuer))
-        return tecNO_PERMISSION;
+        return temMALFORMED;
     if (!issuance->isFlag(lsfMPTCanHoldConfidentialBalance) ||
         !token->isFieldPresent(sfHolderEncryptionKey) ||
         !token->isFieldPresent(sfConfidentialBalanceSpending))
         return tecNO_PERMISSION;
+    // XLS-0096 named this terFROZEN; this tree already has terLOCKED for MPT
+    // locks and no terFROZEN enumerator.
     if (isFrozen(ctx.view, account, MPTIssue{id}))
-        return tecLOCKED;
+        return terLOCKED;
     if (amount > issuance->at(sfConfidentialOutstandingAmount))
         return tecINSUFFICIENT_FUNDS;
 
@@ -83,10 +87,10 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
              makeSlice(issuance->getFieldVL(sfAuditorEncryptionKey)))))
         return tecBAD_PROOF;
 
-    // The installed standard libsecp256k1 has no Bulletproof module. This
-    // dependency question was raised; fail closed until the specified
-    // 128-byte sigma and 688-byte standard Bulletproof verifier are available.
-    // Do not invent a fake verifier for the under-specified ConvertBack sigma.
+    // Compact ConvertBack sigma (128 bytes) and the 688-byte Bulletproof are
+    // specified only as wire sizes. XLS-0096 gave neither the Fiat–Shamir
+    // transcript nor the sigma equations, and the in-tree libsecp256k1 has no
+    // Bulletproof module. Do not invent those verifiers; fail closed.
     return tecBAD_PROOF;
 }
 
@@ -101,7 +105,51 @@ ConfidentialMPTConvertBack::calculateBaseFee(
 TER
 ConfidentialMPTConvertBack::doApply()
 {
-    return tefINTERNAL;
+    auto const id = ctx_.tx[sfMPTokenIssuanceID];
+    auto issuance = view().peek(keylet::mptIssuance(id));
+    auto token = view().peek(keylet::mptoken(id, accountID_));
+    if (!issuance || !token)
+        return tefINTERNAL;
+
+    auto const amount = ctx_.tx[sfMPTAmount];
+    auto const coa = issuance->at(sfConfidentialOutstandingAmount);
+    if (amount > coa)
+        return tefINTERNAL;
+    if (token->at(sfMPTAmount) > kMaxMpTokenAmount - amount)
+        return tefINTERNAL;
+
+    auto const spending = confidential_mpt::subtractCiphertexts(
+        makeSlice(token->getFieldVL(sfConfidentialBalanceSpending)),
+        ctx_.tx[sfHolderEncryptedAmount]);
+    auto const issuer = confidential_mpt::subtractCiphertexts(
+        makeSlice(token->getFieldVL(sfIssuerEncryptedBalance)),
+        ctx_.tx[sfIssuerEncryptedAmount]);
+    if (!spending || !issuer)
+        return tefINTERNAL;
+
+    token->setFieldVL(sfConfidentialBalanceSpending, *spending);
+    token->setFieldVL(sfIssuerEncryptedBalance, *issuer);
+    if (issuance->isFieldPresent(sfAuditorEncryptionKey))
+    {
+        auto const auditor = confidential_mpt::subtractCiphertexts(
+            makeSlice(token->getFieldVL(sfAuditorEncryptedBalance)),
+            ctx_.tx[sfAuditorEncryptedAmount]);
+        if (!auditor)
+            return tefINTERNAL;
+        token->setFieldVL(sfAuditorEncryptedBalance, *auditor);
+    }
+
+    // ConvertBack restores public form. XLS-0096's worked example decreased
+    // OA; the normative text (clarified) keeps OA unchanged and only lowers
+    // COA.
+    token->setFieldU64(sfMPTAmount, token->at(sfMPTAmount) + amount);
+    token->setFieldU32(
+        sfConfidentialBalanceVersion,
+        token->at(sfConfidentialBalanceVersion) + 1u);
+    issuance->setFieldU64(sfConfidentialOutstandingAmount, coa - amount);
+    view().update(token);
+    view().update(issuance);
+    return tesSUCCESS;
 }
 
 void

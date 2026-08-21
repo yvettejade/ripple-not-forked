@@ -105,11 +105,9 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
         return temMALFORMED;
     crypto::confidential::CompressedPoint parsedKey;
     if ((issuerKey &&
-         !crypto::confidential::parseCompressedPoint(
-             makeSlice(*issuerKey), parsedKey)) ||
+         !crypto::confidential::parseCompressedPoint(*issuerKey, parsedKey)) ||
         (auditorKey &&
-         !crypto::confidential::parseCompressedPoint(
-             makeSlice(*auditorKey), parsedKey)))
+         !crypto::confidential::parseCompressedPoint(*auditorKey, parsedKey)))
         return temMALFORMED;
 
     if (auditorKey && !issuerKey)
@@ -312,6 +310,8 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
             return tecNO_PERMISSION;
     }
 
+    auto const issuerKey = ctx.tx[~sfIssuerEncryptionKey];
+    auto const auditorKey = ctx.tx[~sfAuditorEncryptionKey];
     if (issuerKey || auditorKey)
     {
         if (sleMptIssuance->isFieldPresent(sfIssuerEncryptionKey) ||

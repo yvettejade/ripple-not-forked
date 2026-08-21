@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
 
+#include <xrpl/ledger/helpers/CredentialHelpers.h>
 #include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -27,6 +28,9 @@ ConfidentialMPTSend::preflight(PreflightContext const& ctx)
         (ctx.tx.isFieldPresent(sfAuditorEncryptedAmount) &&
          !confidential_mpt::validCiphertext(ctx.tx[sfAuditorEncryptedAmount])))
         return temBAD_CIPHERTEXT;
+    if (auto const err = credentials::checkFields(ctx.tx, ctx.j);
+        !isTesSuccess(err))
+        return err;
     return tesSUCCESS;
 }
 
@@ -41,8 +45,10 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         return tecNO_TARGET;
     if (!issuance)
         return tecOBJECT_NOT_FOUND;
+    // XLS-0096 §8.3.1.2. Issuer identity is on-ledger, so this lives in
+    // preclaim rather than preflight.
     if (account == issuance->at(sfIssuer))
-        return tecNO_PERMISSION;
+        return temMALFORMED;
     if (!issuance->isFlag(lsfMPTCanTransfer))
         return tecNO_AUTH;
     if (!issuance->isFlag(lsfMPTCanHoldConfidentialBalance) ||
@@ -59,8 +65,10 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     };
     if (!initialized(sender) || !initialized(receiver))
         return tecNO_PERMISSION;
+    // XLS-0096 named this terFROZEN; this tree already has terLOCKED for MPT
+    // locks and no terFROZEN enumerator.
     if (isAnyFrozen(ctx.view, {account, destination}, MPTIssue{id}))
-        return tecLOCKED;
+        return terLOCKED;
     if (auto const ter = requireAuth(ctx.view, MPTIssue{id}, account);
         !isTesSuccess(ter))
         return ter;
@@ -73,10 +81,15 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     if (auditorRequired != ctx.tx.isFieldPresent(sfAuditorEncryptedAmount))
         return tecNO_PERMISSION;
 
-    // The installed standard libsecp256k1 has no Bulletproof module. This
-    // dependency question was raised; fail closed until the specified
-    // 192-byte sigma and 754-byte aggregated Bulletproof verifier are available.
-    // Do not invent a fake verifier for the under-specified Send compact sigma.
+    if (auto const err =
+            credentials::valid(ctx.tx, ctx.view, ctx.tx[sfAccount], ctx.j);
+        !isTesSuccess(err))
+        return err;
+
+    // Compact Send sigma (192 bytes) and the 754-byte aggregated Bulletproof
+    // are specified only as wire sizes. XLS-0096 gave neither the Fiat–Shamir
+    // transcript nor the sigma equations, and the in-tree libsecp256k1 has no
+    // Bulletproof module. Do not invent those verifiers; fail closed.
     return tecBAD_PROOF;
 }
 
@@ -89,7 +102,60 @@ ConfidentialMPTSend::calculateBaseFee(ReadView const& view, STTx const& tx)
 TER
 ConfidentialMPTSend::doApply()
 {
-    return tefINTERNAL;
+    auto const id = ctx_.tx[sfMPTokenIssuanceID];
+    auto const destination = ctx_.tx[sfDestination];
+    auto const sleDst = view().read(keylet::account(destination));
+    if (auto const err = verifyDepositPreauth(
+            ctx_.tx, view(), accountID_, destination, sleDst, ctx_.journal);
+        !isTesSuccess(err))
+        return err;
+
+    auto issuance = view().peek(keylet::mptIssuance(id));
+    auto sender = view().peek(keylet::mptoken(id, accountID_));
+    auto receiver = view().peek(keylet::mptoken(id, destination));
+    if (!issuance || !sender || !receiver)
+        return tefINTERNAL;
+
+    auto const spending = confidential_mpt::subtractCiphertexts(
+        makeSlice(sender->getFieldVL(sfConfidentialBalanceSpending)),
+        ctx_.tx[sfSenderEncryptedAmount]);
+    auto const senderIssuer = confidential_mpt::subtractCiphertexts(
+        makeSlice(sender->getFieldVL(sfIssuerEncryptedBalance)),
+        ctx_.tx[sfIssuerEncryptedAmount]);
+    auto const inbox = confidential_mpt::addCiphertexts(
+        makeSlice(receiver->getFieldVL(sfConfidentialBalanceInbox)),
+        ctx_.tx[sfDestinationEncryptedAmount]);
+    auto const receiverIssuer = confidential_mpt::addCiphertexts(
+        makeSlice(receiver->getFieldVL(sfIssuerEncryptedBalance)),
+        ctx_.tx[sfIssuerEncryptedAmount]);
+    if (!spending || !senderIssuer || !inbox || !receiverIssuer)
+        return tefINTERNAL;
+
+    sender->setFieldVL(sfConfidentialBalanceSpending, *spending);
+    sender->setFieldVL(sfIssuerEncryptedBalance, *senderIssuer);
+    sender->setFieldU32(
+        sfConfidentialBalanceVersion,
+        sender->at(sfConfidentialBalanceVersion) + 1u);
+    receiver->setFieldVL(sfConfidentialBalanceInbox, *inbox);
+    receiver->setFieldVL(sfIssuerEncryptedBalance, *receiverIssuer);
+
+    if (issuance->isFieldPresent(sfAuditorEncryptionKey))
+    {
+        auto const senderAuditor = confidential_mpt::subtractCiphertexts(
+            makeSlice(sender->getFieldVL(sfAuditorEncryptedBalance)),
+            ctx_.tx[sfAuditorEncryptedAmount]);
+        auto const receiverAuditor = confidential_mpt::addCiphertexts(
+            makeSlice(receiver->getFieldVL(sfAuditorEncryptedBalance)),
+            ctx_.tx[sfAuditorEncryptedAmount]);
+        if (!senderAuditor || !receiverAuditor)
+            return tefINTERNAL;
+        sender->setFieldVL(sfAuditorEncryptedBalance, *senderAuditor);
+        receiver->setFieldVL(sfAuditorEncryptedBalance, *receiverAuditor);
+    }
+
+    view().update(sender);
+    view().update(receiver);
+    return tesSUCCESS;
 }
 
 void

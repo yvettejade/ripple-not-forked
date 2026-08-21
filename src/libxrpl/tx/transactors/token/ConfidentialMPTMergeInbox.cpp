@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
 
+#include <xrpl/basics/Slice.h>
 #include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -7,8 +8,6 @@
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTUtils.h>
-
-#include <limits>
 
 namespace xrpl {
 
@@ -27,8 +26,10 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
     auto const token = ctx.view.read(keylet::mptoken(id, account));
     if (!issuance || !token)
         return tecOBJECT_NOT_FOUND;
+    // XLS-0096 §9.2.1.1.2. Issuer identity is on-ledger, so this lives in
+    // preclaim rather than preflight.
     if (account == issuance->at(sfIssuer))
-        return tecNO_PERMISSION;
+        return temMALFORMED;
     if (!issuance->isFlag(lsfMPTCanHoldConfidentialBalance))
         return tecNO_PERMISSION;
     if (!token->isFieldPresent(sfConfidentialBalanceSpending) ||
@@ -60,10 +61,12 @@ ConfidentialMPTMergeInbox::doApply()
         return tefINTERNAL;
 
     auto const spending = confidential_mpt::addCiphertexts(
-        token->at(sfConfidentialBalanceSpending),
-        token->at(sfConfidentialBalanceInbox));
+        makeSlice(token->getFieldVL(sfConfidentialBalanceSpending)),
+        makeSlice(token->getFieldVL(sfConfidentialBalanceInbox)));
     auto const inbox = confidential_mpt::canonicalZero(
-        accountID_, id, token->at(sfHolderEncryptionKey));
+        accountID_,
+        id,
+        makeSlice(token->getFieldVL(sfHolderEncryptionKey)));
     if (!spending || !inbox)
         return tefINTERNAL;
 
