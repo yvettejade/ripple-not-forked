@@ -180,7 +180,6 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             set[sfAccount] = issuer.human();
             set[sfTransactionType] = jss::MPTokenIssuanceSet;
             set[sfMPTokenIssuanceID] = to_string(tester.issuanceID());
-            set[sfFlags] = tfMPTSetCanHoldConfidentialBalance;
             set[sfIssuerEncryptionKey] = kGenerator;
             env(set);
             env.close();
@@ -217,14 +216,14 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         send[sfBalanceCommitment] = kGenerator;
         send[sfAmountCommitment] = kGenerator;
         send[sfZKProof] = dummyProof(946);
-        env(send, proofFee(env), ter(temBAD_CIPHERTEXT));
+        env(send, proofFee(env), Ter(temBAD_CIPHERTEXT));
 
         send[sfSenderEncryptedAmount] = validCiphertextHex();
         send[sfDestinationEncryptedAmount] = validCiphertextHex();
         send[sfIssuerEncryptedAmount] = validCiphertextHex();
         send[sfAccount] = alice.human();
         send[sfDestination] = alice.human();
-        env(send, proofFee(env), ter(temMALFORMED));
+        env(send, proofFee(env), Ter(temMALFORMED));
     }
 
     void
@@ -236,15 +235,12 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         Env env(*this, features);
         Account const issuer{"issuer"};
         Account const alice{"alice"};
-        MPTTester tester(
-            env,
-            issuer,
-            {.holders = {alice},
-             .create = {
-                 .pay = std::pair<std::vector<Account>, std::uint64_t>{
-                     {alice}, 1'000},
-                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance |
-                     tfMPTCanClawback}});
+        MPTTester tester(env, issuer, {.holders = {alice}});
+        tester.create(
+            {.pay =
+                 std::pair<std::vector<Account>, std::uint64_t>{{alice}, 1'000},
+             .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance |
+                 tfMPTCanClawback});
 
         auto const issuerSk = scalar(1);
         CompressedPoint issuerPk{};
@@ -356,7 +352,8 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         BEAST_EXPECT(after);
         BEAST_EXPECT(issuanceAfter);
         BEAST_EXPECT(after->at(sfMPTAmount) == 950);
-        BEAST_EXPECT(issuanceAfter->at(sfConfidentialOutstandingAmount) == 0);
+        BEAST_EXPECT(
+            issuanceAfter->getFieldU64(sfConfidentialOutstandingAmount) == 0);
         BEAST_EXPECT(issuanceAfter->at(sfOutstandingAmount) == 950);
         BEAST_EXPECT(after->at(sfConfidentialBalanceVersion) == 2);
     }
@@ -371,14 +368,11 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         Account const issuer{"issuer"};
         Account const alice{"alice"};
         Account const bob{"bob"};
-        MPTTester tester(
-            env,
-            issuer,
-            {.holders = {alice, bob},
-             .create = {
-                 .pay = std::pair<std::vector<Account>, std::uint64_t>{
-                     {alice, bob}, 500},
-                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance}});
+        MPTTester tester(env, issuer, {.holders = {alice, bob}});
+        tester.create(
+            {.pay = std::pair<std::vector<Account>, std::uint64_t>{
+                 {alice, bob}, 500},
+             .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
 
         auto const issuerSk = scalar(1);
         CompressedPoint issuerPk{};
@@ -462,7 +456,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         convertBack[sfBlindingFactor] = hex(backBlind);
         convertBack[sfBalanceCommitment] = kGenerator;
         convertBack[sfZKProof] = dummyProof(816);
-        env(convertBack, proofFee(env), ter(tecBAD_PROOF));
+        env(convertBack, proofFee(env), Ter(tecBAD_PROOF));
 
         json::Value send;
         send[sfAccount] = alice.human();
@@ -475,10 +469,10 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         send[sfBalanceCommitment] = kGenerator;
         send[sfAmountCommitment] = kGenerator;
         send[sfZKProof] = dummyProof(946);
-        env(send, proofFee(env), ter(tecBAD_PROOF));
+        env(send, proofFee(env), Ter(tecBAD_PROOF));
 
         send[sfAccount] = issuer.human();
-        env(send, proofFee(env), ter(temMALFORMED));
+        env(send, proofFee(env), Ter(temMALFORMED));
     }
 
     void
@@ -490,14 +484,10 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         Env env(*this, features);
         Account const issuer{"issuer"};
         Account const alice{"alice"};
-        MPTTester tester(
-            env,
-            issuer,
-            {.holders = {alice},
-             .create = {
-                 .pay = std::pair<std::vector<Account>, std::uint64_t>{
-                     {alice}, 100},
-                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance}});
+        MPTTester tester(env, issuer, {.holders = {alice}});
+        tester.create(
+            {.pay = std::pair<std::vector<Account>, std::uint64_t>{{alice}, 100},
+             .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
 
         json::Value set;
         set[sfAccount] = issuer.human();
@@ -513,7 +503,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         merge[sfMPTokenIssuanceID] = to_string(tester.issuanceID());
         env(merge,
             Fee{static_cast<std::uint64_t>(env.current()->fees().base.drops())},
-            ter(telINSUF_FEE_P));
+            Ter(telINSUF_FEE_P));
     }
 
 public:

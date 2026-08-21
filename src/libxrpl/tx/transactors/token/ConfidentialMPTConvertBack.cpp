@@ -54,7 +54,7 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     // locks and no terFROZEN enumerator.
     if (isFrozen(ctx.view, account, MPTIssue{id}))
         return terLOCKED;
-    if (amount > issuance->at(sfConfidentialOutstandingAmount))
+    if (amount > issuance->getFieldU64(sfConfidentialOutstandingAmount))
         return tecINSUFFICIENT_FUNDS;
 
     auto const auditorRequired =
@@ -112,7 +112,7 @@ ConfidentialMPTConvertBack::doApply()
         return tefINTERNAL;
 
     auto const amount = ctx_.tx[sfMPTAmount];
-    auto const coa = issuance->at(sfConfidentialOutstandingAmount);
+    auto const coa = issuance->getFieldU64(sfConfidentialOutstandingAmount);
     if (amount > coa)
         return tefINTERNAL;
     if (token->at(sfMPTAmount) > kMaxMpTokenAmount - amount)
@@ -146,7 +146,7 @@ ConfidentialMPTConvertBack::doApply()
     token->setFieldU32(
         sfConfidentialBalanceVersion,
         token->at(sfConfidentialBalanceVersion) + 1u);
-    issuance->setFieldU64(sfConfidentialOutstandingAmount, coa - amount);
+    confidential_mpt::setConfidentialOutstanding(*issuance, coa - amount);
     view().update(token);
     view().update(issuance);
     return tesSUCCESS;

@@ -14,6 +14,7 @@ namespace xrpl {
 
 class ReadView;
 class STTx;
+class STLedgerEntry;
 
 namespace confidential_mpt {
 
@@ -48,6 +49,9 @@ proofContext(
     AccountID const& account,
     MPTID const& issuanceID,
     std::uint32_t version);
+
+void
+setConfidentialOutstanding(STLedgerEntry& issuance, std::uint64_t amount);
 
 }  // namespace confidential_mpt
 }  // namespace xrpl

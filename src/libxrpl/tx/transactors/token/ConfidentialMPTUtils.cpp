@@ -3,6 +3,8 @@
 #include <xrpl/basics/Slice.h>
 #include <xrpl/crypto/confidential/ElGamal.h>
 #include <xrpl/ledger/ReadView.h>
+#include <xrpl/protocol/SField.h>
+#include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/tx/Transactor.h>
 
@@ -116,6 +118,16 @@ proofContext(
     out.push_back(static_cast<std::uint8_t>(version >> 8));
     out.push_back(static_cast<std::uint8_t>(version));
     return out;
+}
+
+void
+setConfidentialOutstanding(STLedgerEntry& issuance, std::uint64_t amount)
+{
+    // sfConfidentialOutstandingAmount is a defaulted UINT64. Writing 0 throws.
+    if (amount == 0)
+        issuance.makeFieldAbsent(sfConfidentialOutstandingAmount);
+    else
+        issuance.setFieldU64(sfConfidentialOutstandingAmount, amount);
 }
 
 }  // namespace xrpl::confidential_mpt

@@ -86,7 +86,7 @@ ConfidentialMPTClawback::doApply()
     if (!issuance || !token)
         return tefINTERNAL;
 
-    auto const coa = issuance->at(sfConfidentialOutstandingAmount);
+    auto const coa = issuance->getFieldU64(sfConfidentialOutstandingAmount);
     auto const oa = issuance->at(sfOutstandingAmount);
     if (amount > coa || amount > oa)
         return tefINTERNAL;
@@ -115,7 +115,7 @@ ConfidentialMPTClawback::doApply()
         sfConfidentialBalanceVersion,
         token->at(sfConfidentialBalanceVersion) + 1u);
 
-    issuance->setFieldU64(sfConfidentialOutstandingAmount, coa - amount);
+    confidential_mpt::setConfidentialOutstanding(*issuance, coa - amount);
     issuance->setFieldU64(sfOutstandingAmount, oa - amount);
     view().update(token);
     view().update(issuance);

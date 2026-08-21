@@ -54,6 +54,7 @@ class ValidMPTPayment
     struct MPTData
     {
         std::array<std::int64_t, 2> outstanding{};
+        std::array<std::int64_t, 2> confidential{};
         // sum (MPT after - MPT before)
         std::int64_t mptAmount{0};
     };

@@ -144,7 +144,7 @@ ConfidentialMPTConvert::doApply()
 
     auto const amount = ctx_.tx[sfMPTAmount];
     auto const newConfidential =
-        issuance->at(sfConfidentialOutstandingAmount) + amount;
+        issuance->getFieldU64(sfConfidentialOutstandingAmount) + amount;
     if (newConfidential > issuance->at(sfOutstandingAmount))
         return tefINTERNAL;
 
@@ -200,7 +200,7 @@ ConfidentialMPTConvert::doApply()
     }
 
     token->setFieldU64(sfMPTAmount, token->at(sfMPTAmount) - amount);
-    issuance->setFieldU64(sfConfidentialOutstandingAmount, newConfidential);
+    confidential_mpt::setConfidentialOutstanding(*issuance, newConfidential);
     view().update(token);
     view().update(issuance);
     return tesSUCCESS;

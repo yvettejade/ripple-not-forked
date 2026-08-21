@@ -362,10 +362,7 @@ MPTokenIssuanceSet::doApply()
     }
 
     if (ctx_.tx.isFlag(tfMPTSetCanHoldConfidentialBalance))
-    {
         flagsOut |= lsfMPTCanHoldConfidentialBalance;
-        sle->setFieldU64(sfConfidentialOutstandingAmount, 0);
-    }
 
     if (auto const mutableFlags = ctx_.tx[~sfMutableFlags].value_or(0))
     {

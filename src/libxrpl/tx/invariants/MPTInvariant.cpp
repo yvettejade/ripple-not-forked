@@ -394,6 +394,9 @@ ValidMPTPayment::visitEntry(
                 return false;
             }
             data_[makeKey(sle)].outstanding[static_cast<std::size_t>(order)] = outstanding;
+            data_[makeKey(sle)].confidential[static_cast<std::size_t>(order)] =
+                static_cast<std::int64_t>(
+                    sle[~sfConfidentialOutstandingAmount].value_or(0));
         }
         else if (type == ltMPTOKEN)
         {
@@ -459,8 +462,11 @@ ValidMPTPayment::finalize(
             bool const addOverflows =
                 (data.mptAmount > 0 && data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
                 (data.mptAmount < 0 && data.outstanding[kIBefore] < (-signedMax - data.mptAmount));
+            auto const confidentialDelta =
+                data.confidential[kIAfter] - data.confidential[kIBefore];
             if (addOverflows ||
-                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + data.mptAmount))
+                data.outstanding[kIAfter] !=
+                    (data.outstanding[kIBefore] + data.mptAmount + confidentialDelta))
             {
                 JLOG(j.fatal()) << "Invariant failed: invalid OutstandingAmount balance "
                                 << data.outstanding[kIBefore] << " " << data.outstanding[kIAfter]
@@ -634,13 +640,13 @@ ValidConfidentialMPT::visitEntry(
         {
             change.outstandingBefore = before->at(sfOutstandingAmount);
             change.confidentialBefore =
-                before->at(sfConfidentialOutstandingAmount);
+                before->getFieldU64(sfConfidentialOutstandingAmount);
         }
         if (after && !isDelete)
         {
             change.outstandingAfter = after->at(sfOutstandingAmount);
             change.confidentialAfter =
-                after->at(sfConfidentialOutstandingAmount);
+                after->getFieldU64(sfConfidentialOutstandingAmount);
         }
         return;
     }
@@ -683,7 +689,7 @@ ValidConfidentialMPT::finalize(
     {
         auto const issuance = view.read(keylet::mptIssuance(id));
         if (issuance &&
-            issuance->at(sfConfidentialOutstandingAmount) >
+            issuance->getFieldU64(sfConfidentialOutstandingAmount) >
                 issuance->at(sfOutstandingAmount))
         {
             JLOG(j.fatal()) << "Invariant failed: confidential MPT amount exceeds outstanding";
@@ -741,6 +747,8 @@ ValidConfidentialMPT::finalize(
         }
 
         if (before && hasSpending &&
+            before->isFieldPresent(sfConfidentialBalanceSpending) &&
+            before->isFieldPresent(sfConfidentialBalanceVersion) &&
             before->at(sfConfidentialBalanceSpending) !=
                 after->at(sfConfidentialBalanceSpending) &&
             before->at(sfConfidentialBalanceVersion) ==
