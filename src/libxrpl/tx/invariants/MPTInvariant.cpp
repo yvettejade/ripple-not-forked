@@ -26,6 +26,17 @@
 #include <memory>
 
 namespace xrpl {
+namespace {
+
+bool
+isConfidentialMPTTransaction(TxType type)
+{
+    return type == ttCONFIDENTIAL_MPT_CONVERT || type == ttCONFIDENTIAL_MPT_CONVERT_BACK ||
+        type == ttCONFIDENTIAL_MPT_SEND || type == ttCONFIDENTIAL_MPT_MERGE_INBOX ||
+        type == ttCONFIDENTIAL_MPT_CLAWBACK;
+}
+
+}  // namespace
 
 void
 ValidMPTIssuance::visitEntry(
@@ -443,6 +454,9 @@ ValidMPTPayment::finalize(
 {
     if (isTesSuccess(result))
     {
+        if (isConfidentialMPTTransaction(tx.getTxnType()))
+            return true;
+
         bool const invariantPasses = !view.rules().enabled(featureMPTokensV2);
         if (overflow_)
         {
@@ -610,6 +624,216 @@ ValidMPTTransfer::finalize(
         {
             JLOG(j.fatal()) << "Invariant failed: invalid MPToken transfer between holders";
             return invariantPasses;
+        }
+    }
+
+    return true;
+}
+
+void
+ValidConfidentialMPT::visitEntry(
+    bool isDelete,
+    std::shared_ptr<SLE const> const& before,
+    std::shared_ptr<SLE const> const& after)
+{
+    auto loadIssuance = [&](SLE const& sle, bool isBefore) {
+        if (sle.getType() != ltMPTOKEN_ISSUANCE)
+            return;
+        auto const id = makeMptID(sle[sfSequence], sle[sfIssuer]);
+        auto& d = data_[id];
+        auto const oa = sle[sfOutstandingAmount];
+        auto const coa = sle[~sfConfidentialOutstandingAmount].value_or(0);
+        if (coa > kMaxMpTokenAmount || oa > kMaxMpTokenAmount)
+            overflow_ = true;
+        if (isBefore)
+        {
+            d.oaBefore = oa;
+            d.coaBefore = coa;
+            d.confidentialBefore = sle.isFlag(lsfMPTCanHoldConfidentialBalance);
+        }
+        else
+        {
+            d.oaAfter = oa;
+            d.coaAfter = coa;
+            d.confidentialAfter = sle.isFlag(lsfMPTCanHoldConfidentialBalance);
+        }
+    };
+
+    auto loadMptAmount = [&](SLE const& sle, bool isBefore) {
+        if (sle.getType() != ltMPTOKEN)
+            return;
+        auto const amt = static_cast<std::int64_t>(sle[sfMPTAmount]);
+        auto& d = data_[sle[sfMPTokenIssuanceID]];
+        if (isBefore)
+            d.mptDelta -= amt;
+        else
+            d.mptDelta += amt;
+    };
+
+    auto const hasConfidentialState = [](SLE const& sle) {
+        return sle.isFieldPresent(sfHolderEncryptionKey) ||
+            sle.isFieldPresent(sfConfidentialBalanceSpending) ||
+            sle.isFieldPresent(sfConfidentialBalanceInbox) ||
+            sle.isFieldPresent(sfIssuerEncryptedBalance) ||
+            sle.isFieldPresent(sfAuditorEncryptedBalance) ||
+            sle.isFieldPresent(sfConfidentialBalanceVersion);
+    };
+
+    if (before && before->getType() == ltMPTOKEN && isDelete && hasConfidentialState(*before))
+        data_[(*before)[sfMPTokenIssuanceID]].deletedConfidentialState = true;
+
+    if (after && after->getType() == ltMPTOKEN)
+    {
+        auto& d = data_[(*after)[sfMPTokenIssuanceID]];
+        bool const hasSpending = after->isFieldPresent(sfConfidentialBalanceSpending);
+        bool const hasInbox = after->isFieldPresent(sfConfidentialBalanceInbox);
+        bool const hasIssuer = after->isFieldPresent(sfIssuerEncryptedBalance);
+        bool const hasAuditor = after->isFieldPresent(sfAuditorEncryptedBalance);
+        bool const hasHolderKey = after->isFieldPresent(sfHolderEncryptionKey);
+        bool const hasVersion = after->isFieldPresent(sfConfidentialBalanceVersion);
+        bool const anyCore = hasSpending || hasInbox || hasIssuer;
+        bool const allCore = hasSpending && hasInbox && hasIssuer;
+
+        d.encryptedFieldsAfter = d.encryptedFieldsAfter || anyCore || hasAuditor;
+        if ((anyCore && (!allCore || !hasHolderKey || !hasVersion)) || (hasAuditor && !allCore))
+            d.encryptedFieldsInconsistent = true;
+    }
+
+    if (before && after && before->getType() == ltMPTOKEN && after->getType() == ltMPTOKEN)
+    {
+        bool const spendingBefore = before->isFieldPresent(sfConfidentialBalanceSpending);
+        bool const spendingAfter = after->isFieldPresent(sfConfidentialBalanceSpending);
+        bool const spendingChanged = spendingBefore != spendingAfter ||
+            (spendingBefore &&
+             before->getFieldVL(sfConfidentialBalanceSpending) !=
+                 after->getFieldVL(sfConfidentialBalanceSpending));
+
+        bool const versionBefore = before->isFieldPresent(sfConfidentialBalanceVersion);
+        bool const versionAfter = after->isFieldPresent(sfConfidentialBalanceVersion);
+        bool const versionChanged = versionBefore != versionAfter ||
+            (versionBefore &&
+             before->getFieldU32(sfConfidentialBalanceVersion) !=
+                 after->getFieldU32(sfConfidentialBalanceVersion));
+
+        if (spendingChanged && !versionChanged)
+            data_[(*after)[sfMPTokenIssuanceID]].spendingChangedWithoutVersion = true;
+    }
+
+    if (before)
+    {
+        loadIssuance(*before, true);
+        loadMptAmount(*before, true);
+    }
+    if (after)
+    {
+        loadIssuance(*after, false);
+        loadMptAmount(*after, false);
+    }
+}
+
+bool
+ValidConfidentialMPT::finalize(
+    STTx const& tx,
+    TER const result,
+    XRPAmount const,
+    ReadView const& view,
+    beast::Journal const& j)
+{
+    if (!view.rules().enabled(featureConfidentialTransfer))
+        return true;
+
+    auto const type = tx.getTxnType();
+    bool const confidentialTx = isConfidentialMPTTransaction(type);
+
+    if (overflow_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: confidential MPT amount overflow";
+        return !isTesSuccess(result);
+    }
+
+    for (auto const& [id, d] : data_)
+    {
+        auto const oaAfter = d.oaAfter.value_or(d.oaBefore.value_or(0));
+        auto const coaAfter = d.coaAfter.value_or(d.coaBefore.value_or(0));
+        auto const oaBefore = d.oaBefore.value_or(0);
+        auto const coaBefore = d.coaBefore.value_or(0);
+
+        if (coaAfter > oaAfter)
+        {
+            JLOG(j.fatal()) << "Invariant failed: COA exceeds OA";
+            return false;
+        }
+
+        if (!isTesSuccess(result))
+            continue;
+
+        if (d.deletedConfidentialState)
+        {
+            JLOG(j.fatal()) << "Invariant failed: initialized confidential MPToken deleted";
+            return false;
+        }
+
+        if (d.encryptedFieldsInconsistent)
+        {
+            JLOG(j.fatal()) << "Invariant failed: inconsistent confidential MPToken fields";
+            return false;
+        }
+
+        if (d.spendingChangedWithoutVersion)
+        {
+            JLOG(j.fatal()) << "Invariant failed: confidential spending changed without version";
+            return false;
+        }
+
+        if (d.encryptedFieldsAfter)
+        {
+            auto const sleIssuance = view.read(keylet::mptIssuance(id));
+            if (!sleIssuance || !sleIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
+            {
+                JLOG(j.fatal()) << "Invariant failed: confidential MPToken fields without flag";
+                return false;
+            }
+        }
+
+        if (d.confidentialBefore.value_or(false) && d.confidentialAfter.has_value() &&
+            !*d.confidentialAfter)
+        {
+            JLOG(j.fatal()) << "Invariant failed: confidential MPT flag cleared";
+            return false;
+        }
+
+        auto const dCoa =
+            static_cast<std::int64_t>(coaAfter) - static_cast<std::int64_t>(coaBefore);
+        auto const dOa = static_cast<std::int64_t>(oaAfter) - static_cast<std::int64_t>(oaBefore);
+
+        if (type == ttCONFIDENTIAL_MPT_CONVERT || type == ttCONFIDENTIAL_MPT_CONVERT_BACK)
+        {
+            if (dCoa != -d.mptDelta)
+            {
+                JLOG(j.fatal()) << "Invariant failed: COA change not offset by MPTAmount";
+                return false;
+            }
+        }
+        else if (type == ttCONFIDENTIAL_MPT_SEND || type == ttCONFIDENTIAL_MPT_MERGE_INBOX)
+        {
+            if (dCoa != 0 || dOa != 0)
+            {
+                JLOG(j.fatal()) << "Invariant failed: Send/Merge changed OA or COA";
+                return false;
+            }
+        }
+        else if (type == ttCONFIDENTIAL_MPT_CLAWBACK)
+        {
+            if (dCoa != dOa || dCoa > 0)
+            {
+                JLOG(j.fatal()) << "Invariant failed: Clawback OA/COA mismatch";
+                return false;
+            }
+        }
+        else if (!confidentialTx && dCoa != 0)
+        {
+            JLOG(j.fatal()) << "Invariant failed: COA changed by non-confidential tx";
+            return false;
         }
     }
 

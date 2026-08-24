@@ -109,4 +109,33 @@ private:
         bool requireAuth) const;
 };
 
+/** XLS-0096 confidential balance accounting and ledger-state consistency. */
+class ValidConfidentialMPT
+{
+    struct IssuanceDelta
+    {
+        std::optional<std::uint64_t> oaBefore;
+        std::optional<std::uint64_t> oaAfter;
+        std::optional<std::uint64_t> coaBefore;
+        std::optional<std::uint64_t> coaAfter;
+        std::optional<bool> confidentialBefore;
+        std::optional<bool> confidentialAfter;
+        std::int64_t mptDelta{0};
+        bool encryptedFieldsAfter{false};
+        bool encryptedFieldsInconsistent{false};
+        bool spendingChangedWithoutVersion{false};
+        bool deletedConfidentialState{false};
+    };
+
+    hash_map<uint192, IssuanceDelta> data_;
+    bool overflow_{false};
+
+public:
+    void
+    visitEntry(bool, std::shared_ptr<SLE const> const&, std::shared_ptr<SLE const> const&);
+
+    bool
+    finalize(STTx const&, TER const, XRPAmount const, ReadView const&, beast::Journal const&);
+};
+
 }  // namespace xrpl

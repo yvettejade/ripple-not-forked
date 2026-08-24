@@ -35,10 +35,12 @@ JSS(AssetClass);                  // in: Oracle
 JSS(AssetPrice);                  // in: Oracle
 JSS(AuthAccount);                 // in: AMM Auction Slot
 JSS(AuthAccounts);                // in: AMM Auction Slot
+JSS(AuditorEncryptionKey);        // field.
 JSS(BaseAsset);                   // in: Oracle
 JSS(BidMax);                      // in: AMM Bid
 JSS(BidMin);                      // in: AMM Bid
 JSS(ClearFlag);                   // field.
+JSS(ConfidentialOutstandingAmount);  // field.
 JSS(Counterparty);                // field.
 JSS(CounterpartySignature);       // field.
 JSS(DeliverMax);                  // out: alias to Amount
@@ -48,8 +50,11 @@ JSS(EPrice);                      // in: AMM Deposit option
 JSS(Fee);                         // in/out: TransactionSign; field.
 JSS(Flags);                       // in/out: TransactionSign; field.
 JSS(Holder);                      // field.
+JSS(HolderEncryptionKey);         // field.
+JSS(ImmutableFlags);              // field.
 JSS(Invalid);                     //
 JSS(Issuer);                      // in: Credential transactions
+JSS(IssuerEncryptionKey);         // field.
 JSS(IssuingChainDoor);            // field.
 JSS(IssuingChainIssue);           // field.
 JSS(LastLedgerSequence);          // in: TransactionSign; field
@@ -89,6 +94,7 @@ JSS(TransferRate);                // in: TransferRate.
 JSS(TxnSignature);                // field.
 JSS(URI);                         // field.
 JSS(VoteSlots);                   // out: AMM Vote
+JSS(ZKProof);                     // field.
 JSS(aborted);                     // out: InboundLedger
 JSS(accepted);                    // out: LedgerToJson, OwnerInfo, SubmitTransaction
 JSS(accountState);                // out: LedgerToJson

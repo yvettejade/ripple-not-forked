@@ -64,12 +64,16 @@ words:
   - Britto
   - Btrfs
   - Buildx
+  - Bulletproof
+  - Bulletproofs
   - canonicality
   - changespq
   - checkme
   - choco
   - chrono
   - citardauq
+  - ciphertext
+  - ciphertexts
   - clawback
   - clawbacks
   - cmaketoolchain
@@ -79,6 +83,9 @@ words:
   - conanfile
   - conanrun
   - confs
+  - ConfidentialMPT
+  - ConfidentialTransfer
+  - ConvertBack
   - connectability
   - coro
   - coros
@@ -92,6 +99,7 @@ words:
   - currenttxhash
   - daria
   - dcmake
+  - DLEQ
   - dearmor
   - dedented
   - deleteme
@@ -107,6 +115,8 @@ words:
   - enabled
   - enablerepo
   - endmacro
+  - ElGamal
+  - EncZero
   - exceptioned
   - EXPECT_STREQ
   - Falco
@@ -156,6 +166,7 @@ words:
   - LOCALGOOD
   - logwstream
   - lseq
+  - lsif
   - lsmf
   - ltype
   - mathbunnyru
@@ -205,6 +216,7 @@ words:
   - nudb
   - nullptr
   - nunl
+  - NUMS
   - Nyffenegger
   - onlatest
   - ostr
@@ -212,10 +224,12 @@ words:
   - partitioner
   - paychan
   - paychans
+  - Pedersen
   - permdex
   - perminute
   - permissioned
   - pointee
+  - PoK
   - populator
   - preauth
   - preauthorization
@@ -249,6 +263,7 @@ words:
   - sahyadri
   - Satoshi
   - scons
+  - Schnorr
   - secp
   - sendq
   - seqit

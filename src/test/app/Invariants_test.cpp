@@ -52,6 +52,7 @@
 #include <xrpl/tx/Transactor.h>
 #include <xrpl/tx/applySteps.h>
 #include <xrpl/tx/invariants/DirectoryInvariant.h>
+#include <xrpl/tx/invariants/MPTInvariant.h>
 #include <xrpl/tx/invariants/VaultInvariant.h>
 
 #include <algorithm>
@@ -4509,6 +4510,71 @@ class Invariants_test : public beast::unit_test::Suite
                             return true;
                         });
                 }
+            }
+        }
+
+        {
+            Env env{*this, defaultAmendments() | featureConfidentialTransfer};
+            Account const issuer("confidentialIssuer");
+            Account const holder("confidentialHolder");
+            env.fund(XRP(1'000), issuer, holder);
+            env.close();
+
+            OpenView view{*env.current()};
+            auto const id = makeMptID(1, issuer);
+            auto issuance = std::make_shared<SLE>(keylet::mptIssuance(id));
+            issuance->setFieldU32(sfFlags, lsfMPTCanHoldConfidentialBalance);
+            view.rawInsert(issuance);
+
+            auto makeToken = [&] {
+                auto token = std::make_shared<SLE>(keylet::mptoken(id, holder));
+                token->setAccountID(sfAccount, holder);
+                token->setFieldH192(sfMPTokenIssuanceID, id);
+                token->setFieldU64(sfMPTAmount, 1);
+                token->setFieldVL(sfHolderEncryptionKey, Blob(33, 1));
+                token->setFieldVL(sfConfidentialBalanceSpending, Blob(66, 2));
+                token->setFieldVL(sfConfidentialBalanceInbox, Blob(66, 3));
+                token->setFieldVL(sfIssuerEncryptedBalance, Blob(66, 4));
+                token->setFieldU32(sfConfidentialBalanceVersion, 0);
+                return token;
+            };
+
+            auto const tx = STTx{ttACCOUNT_SET, [](STObject&) {}};
+            auto expectFailure = [&](ValidConfidentialMPT& invariant, std::string const& log) {
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                BEAST_EXPECT(!invariant.finalize(tx, tesSUCCESS, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(sink.messages().str().find(log) != std::string::npos);
+            };
+
+            {
+                auto const before = makeToken();
+                auto after = std::make_shared<SLE>(*before, before->key());
+                after->makeFieldAbsent(sfIssuerEncryptedBalance);
+                ValidConfidentialMPT invariant;
+                invariant.visitEntry(false, before, after);
+                expectFailure(invariant, "inconsistent confidential MPToken fields");
+            }
+            {
+                auto const before = makeToken();
+                auto after = std::make_shared<SLE>(*before, before->key());
+                after->setFieldVL(sfConfidentialBalanceSpending, Blob(66, 5));
+                ValidConfidentialMPT invariant;
+                invariant.visitEntry(false, before, after);
+                expectFailure(invariant, "confidential spending changed without version");
+            }
+            {
+                auto const before = issuance;
+                auto const after = std::make_shared<SLE>(keylet::mptIssuance(id));
+                ValidConfidentialMPT invariant;
+                invariant.visitEntry(false, before, after);
+                expectFailure(invariant, "confidential MPT flag cleared");
+            }
+            {
+                auto const before = makeToken();
+                ValidConfidentialMPT invariant;
+                invariant.visitEntry(true, before, nullptr);
+                expectFailure(invariant, "initialized confidential MPToken deleted");
             }
         }
     }

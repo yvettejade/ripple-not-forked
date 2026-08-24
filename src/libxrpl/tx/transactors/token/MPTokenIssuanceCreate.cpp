@@ -37,6 +37,11 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfMutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    if ((ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) ||
+         ctx.tx.isFieldPresent(sfImmutableFlags)) &&
+        !ctx.rules.enabled(featureConfidentialTransfer))
+        return false;
+
     return true;
 }
 
@@ -70,6 +75,10 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
         // must also be set.
         if (fee > 0u && !ctx.tx.isFlag(tfMPTCanTransfer))
             return temMALFORMED;
+
+        // Confidential amounts cannot carry a percentage transfer fee.
+        if (fee > 0u && ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance))
+            return temBAD_TRANSFER_FEE;
     }
 
     if (auto const domain = ctx.tx[~sfDomainID])
@@ -86,6 +95,13 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
     {
         if (metadata->empty() || metadata->length() > kMaxMpTokenMetadataLength)
             return temMALFORMED;
+    }
+
+    if (auto const immutableFlags = ctx.tx[~sfImmutableFlags])
+    {
+        if ((*immutableFlags == 0u) ||
+            ((*immutableFlags & tifMPTokenIssuanceCreateImmutableMask) != 0u))
+            return temINVALID_FLAG;
     }
 
     // Check if maximumAmount is within unsigned 63 bit range
@@ -147,6 +163,9 @@ MPTokenIssuanceCreate::create(ApplyView& view, beast::Journal journal, MPTCreate
         if (args.mutableFlags)
             (*mptIssuance)[sfMutableFlags] = *args.mutableFlags;
 
+        if (args.immutableFlags)
+            (*mptIssuance)[sfImmutableFlags] = *args.immutableFlags;
+
         if (args.referenceHolding)
         {
             // Defensive: the holding must already exist and be of an
@@ -190,6 +209,7 @@ MPTokenIssuanceCreate::doApply()
             .metadata = tx[~sfMPTokenMetadata],
             .domainId = tx[~sfDomainID],
             .mutableFlags = tx[~sfMutableFlags],
+            .immutableFlags = tx[~sfImmutableFlags],
         });
     return result ? tesSUCCESS : result.error();
 }
