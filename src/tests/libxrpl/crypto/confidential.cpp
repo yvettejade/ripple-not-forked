@@ -322,11 +322,142 @@ TEST(ConfidentialProofs, ClawbackPositiveAndNegative)
     ASSERT_TRUE(encrypt(issuerPk, m, r2, ct2));
     EXPECT_FALSE(verifyClawbackProof(issuerPk, ct2, m, proof));
 
-    // Zero amount clawback
+    // Zero-amount clawbacks are not valid XLS-0096 transactions.
     Ciphertext z;
     ASSERT_TRUE(encrypt(issuerPk, 0, r, z));
     SchnorrProof zProof;
-    ASSERT_TRUE(createClawbackProof(issuerSk, issuerPk, z, 0, zProof));
-    EXPECT_TRUE(verifyClawbackProof(issuerPk, z, 0, zProof));
-    EXPECT_FALSE(verifyClawbackProof(issuerPk, z, 1, zProof));
+    EXPECT_FALSE(createClawbackProof(issuerSk, issuerPk, z, 0, zProof));
+    EXPECT_FALSE(verifyClawbackProof(issuerPk, z, 0, zProof));
+}
+
+TEST(ConfidentialProofs, SendCompactSigma)
+{
+    Scalar senderSk;
+    Scalar destinationSk;
+    Scalar issuerSk;
+    CompressedPoint senderPk;
+    CompressedPoint destinationPk;
+    CompressedPoint issuerPk;
+    ASSERT_TRUE(keyPair(senderSk, senderPk));
+    ASSERT_TRUE(keyPair(destinationSk, destinationPk));
+    ASSERT_TRUE(keyPair(issuerSk, issuerPk));
+
+    Scalar amount;
+    Scalar balance;
+    Scalar encryptionRandomness;
+    Scalar balanceRandomness;
+    Scalar balanceBlinding;
+    ASSERT_TRUE(scalarFromUint64(17, amount));
+    ASSERT_TRUE(scalarFromUint64(91, balance));
+    ASSERT_TRUE(randomNonZeroScalar(encryptionRandomness));
+    ASSERT_TRUE(randomNonZeroScalar(balanceRandomness));
+    ASSERT_TRUE(randomNonZeroScalar(balanceBlinding));
+
+    Ciphertext senderAmount;
+    Ciphertext destinationAmount;
+    Ciphertext issuerAmount;
+    Ciphertext balanceCiphertext;
+    ASSERT_TRUE(encrypt(senderPk, 17, encryptionRandomness, senderAmount));
+    ASSERT_TRUE(encrypt(
+        destinationPk, 17, encryptionRandomness, destinationAmount));
+    ASSERT_TRUE(encrypt(issuerPk, 17, encryptionRandomness, issuerAmount));
+    ASSERT_TRUE(encrypt(senderPk, 91, balanceRandomness, balanceCiphertext));
+
+    CompressedPoint amountCommitment;
+    CompressedPoint balanceCommitment;
+    ASSERT_TRUE(pedersenCommit(
+        amount, encryptionRandomness, amountCommitment));
+    ASSERT_TRUE(
+        pedersenCommit(balance, balanceBlinding, balanceCommitment));
+
+    SendSigmaStatement statement{
+        .recipientPublicKeys = {senderPk, destinationPk, issuerPk},
+        .senderPublicKey = senderPk,
+        .sharedCiphertext = senderAmount.R,
+        .encryptedAmounts = {
+            senderAmount.S, destinationAmount.S, issuerAmount.S},
+        .amountCommitment = amountCommitment,
+        .balanceCommitment = balanceCommitment,
+        .balanceCiphertext = balanceCiphertext};
+    SendSigmaWitness witness{
+        .amount = amount,
+        .encryptionRandomness = encryptionRandomness,
+        .balance = balance,
+        .balanceBlinding = balanceBlinding,
+        .senderSecret = senderSk};
+    std::array<std::uint8_t, 32> context{};
+    context.fill(0x42);
+
+    SendSigmaProof proof;
+    ASSERT_TRUE(createSendSigmaProof(
+        statement, witness, proof, makeSlice(context)));
+    Scalar challenge;
+    EXPECT_TRUE(verifySendSigmaProof(
+        statement, proof, makeSlice(context), &challenge));
+    EXPECT_FALSE(scalarIsZero(challenge));
+
+    auto badProof = proof;
+    badProof.back() ^= 1;
+    EXPECT_FALSE(
+        verifySendSigmaProof(statement, badProof, makeSlice(context)));
+
+    auto badContext = context;
+    badContext.front() ^= 1;
+    EXPECT_FALSE(
+        verifySendSigmaProof(statement, proof, makeSlice(badContext)));
+
+    auto badStatement = statement;
+    badStatement.encryptedAmounts[1] = senderAmount.S;
+    EXPECT_FALSE(
+        verifySendSigmaProof(badStatement, proof, makeSlice(context)));
+}
+
+TEST(ConfidentialProofs, ConvertBackCompactSigma)
+{
+    Scalar holderSk;
+    CompressedPoint holderPk;
+    ASSERT_TRUE(keyPair(holderSk, holderPk));
+
+    Scalar balance;
+    Scalar balanceRandomness;
+    Scalar balanceBlinding;
+    ASSERT_TRUE(scalarFromUint64(200, balance));
+    ASSERT_TRUE(randomNonZeroScalar(balanceRandomness));
+    ASSERT_TRUE(randomNonZeroScalar(balanceBlinding));
+
+    Ciphertext balanceCiphertext;
+    CompressedPoint balanceCommitment;
+    ASSERT_TRUE(
+        encrypt(holderPk, 200, balanceRandomness, balanceCiphertext));
+    ASSERT_TRUE(
+        pedersenCommit(balance, balanceBlinding, balanceCommitment));
+
+    BalanceSigmaStatement statement{
+        .senderPublicKey = holderPk,
+        .balanceCiphertext = balanceCiphertext,
+        .balanceCommitment = balanceCommitment};
+    BalanceSigmaWitness witness{
+        .balance = balance,
+        .balanceBlinding = balanceBlinding,
+        .senderSecret = holderSk};
+    std::array<std::uint8_t, 32> context{};
+    context.fill(0x24);
+
+    BalanceSigmaProof proof;
+    ASSERT_TRUE(createBalanceSigmaProof(
+        statement, witness, proof, makeSlice(context)));
+    EXPECT_TRUE(
+        verifyBalanceSigmaProof(statement, proof, makeSlice(context)));
+
+    auto bad = proof;
+    bad[31] ^= 1;
+    EXPECT_FALSE(
+        verifyBalanceSigmaProof(statement, bad, makeSlice(context)));
+
+    Scalar otherBlind;
+    ASSERT_TRUE(randomNonZeroScalar(otherBlind));
+    ASSERT_TRUE(
+        pedersenCommit(balance, otherBlind, statement.balanceCommitment));
+    EXPECT_FALSE(
+        verifyBalanceSigmaProof(statement, proof, makeSlice(context)));
 }

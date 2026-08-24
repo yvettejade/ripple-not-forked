@@ -21,7 +21,8 @@ using namespace crypto::confidential;
 NotTEC
 ConfidentialMPTClawback::preflight(PreflightContext const& ctx)
 {
-    if (ctx.tx[sfMPTAmount] > kMaxMpTokenAmount)
+    if (ctx.tx[sfMPTAmount] == 0 ||
+        ctx.tx[sfMPTAmount] > kMaxMpTokenAmount)
         return temBAD_AMOUNT;
     if (ctx.tx[sfZKProof].size() != kSchnorrProofBytes)
         return temMALFORMED;
@@ -45,6 +46,8 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
         !token->isFieldPresent(sfIssuerEncryptedBalance) ||
         !token->isFieldPresent(sfHolderEncryptionKey))
         return tecNO_PERMISSION;
+    if (amount > issuance->getFieldU64(sfConfidentialOutstandingAmount))
+        return tecINSUFFICIENT_FUNDS;
 
     CompressedPoint issuerPk;
     Ciphertext issuerCt;
@@ -53,11 +56,9 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
     if (proofBlob.size() != proof.size())
         return temMALFORMED;
     std::copy(proofBlob.begin(), proofBlob.end(), proof.begin());
-    auto const context = confidential_mpt::proofContext(
-        static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CLAWBACK),
-        holder,
-        id,
-        token->at(sfConfidentialBalanceVersion));
+    // Updated XLS-0096 intentionally binds Clawback to Holder || 0 rather
+    // than the holder-controlled confidential balance version.
+    auto const context = confidential_mpt::proofContext(ctx.tx, holder, 0);
     if (!parseCompressedPoint(
             makeSlice(issuance->getFieldVL(sfIssuerEncryptionKey)), issuerPk) ||
         !parseCiphertext(

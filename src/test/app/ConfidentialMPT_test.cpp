@@ -267,6 +267,8 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT),
             alice.id(),
             tester.issuanceID(),
+            env.seq(alice),
+            alice.id(),
             0);
         SchnorrProof pok{};
         BEAST_EXPECT(createSchnorrProofOfKnowledge(
@@ -328,9 +330,11 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             issuerMirror));
         auto const clawExtra = confidential_mpt::proofContext(
             static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CLAWBACK),
-            alice.id(),
+            issuer.id(),
             tester.issuanceID(),
-            merged->at(sfConfidentialBalanceVersion));
+            env.seq(issuer),
+            alice.id(),
+            0);
         SchnorrProof claw{};
         BEAST_EXPECT(createClawbackProof(
             issuerSk, issuerPk, issuerMirror, 50, claw, makeSlice(clawExtra)));
@@ -406,11 +410,15 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT),
             alice.id(),
             tester.issuanceID(),
+            env.seq(alice),
+            alice.id(),
             0);
         auto const bobExtra = confidential_mpt::proofContext(
             static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT),
             bob.id(),
             tester.issuanceID(),
+            env.seq(bob),
+            bob.id(),
             0);
         SchnorrProof alicePok{};
         SchnorrProof bobPok{};

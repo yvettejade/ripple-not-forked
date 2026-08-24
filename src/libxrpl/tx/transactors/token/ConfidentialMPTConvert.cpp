@@ -113,11 +113,11 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
         SchnorrProof schnorr;
         auto const proof = *ctx.tx[~sfZKProof];
         std::copy(proof.begin(), proof.end(), schnorr.begin());
-        auto const context = confidential_mpt::proofContext(
-            static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT),
-            account,
-            id,
-            0);
+        // The updated proof document does not define Convert's TxSpecific
+        // value. Use Account || 0, matching its self-conversion semantics and
+        // the uniform context shape used by ConvertBack.
+        auto const context =
+            confidential_mpt::proofContext(ctx.tx, account, 0);
         if (!parseCompressedPoint(*suppliedKey, publicKey) ||
             !verifySchnorrProofOfKnowledge(
                 publicKey, schnorr, makeSlice(context)))

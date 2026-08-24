@@ -6,6 +6,7 @@
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
+#include <xrpl/protocol/digest.h>
 #include <xrpl/tx/Transactor.h>
 
 #include <algorithm>
@@ -102,22 +103,51 @@ proofContext(
     std::uint16_t transactionType,
     AccountID const& account,
     MPTID const& issuanceID,
+    std::uint32_t sequenceOrTicket,
+    AccountID const& transactionSpecificAccount,
     std::uint32_t version)
 {
-    // XLS-0096 requires domain binding but did not define byte order or replace
-    // its non-MPT Currency element. This was raised; big-endian type, account,
-    // issuance ID, and version are used.
-    std::vector<std::uint8_t> out;
-    out.reserve(2 + account.size() + issuanceID.size() + 4);
-    out.push_back(static_cast<std::uint8_t>(transactionType >> 8));
-    out.push_back(static_cast<std::uint8_t>(transactionType));
-    out.insert(out.end(), account.begin(), account.end());
-    out.insert(out.end(), issuanceID.begin(), issuanceID.end());
-    out.push_back(static_cast<std::uint8_t>(version >> 24));
-    out.push_back(static_cast<std::uint8_t>(version >> 16));
-    out.push_back(static_cast<std::uint8_t>(version >> 8));
-    out.push_back(static_cast<std::uint8_t>(version));
-    return out;
+    // The updated proof document fixes field order but not integer encoding.
+    // Use the XRPL convention: unsigned transaction type, sequence/ticket, and
+    // version encoded big-endian; account and issuance IDs use canonical bytes.
+    std::vector<std::uint8_t> transcript;
+    transcript.reserve(
+        2 + account.size() + issuanceID.size() + 4 +
+        transactionSpecificAccount.size() + 4);
+    auto appendU32 = [&](std::uint32_t value) {
+        transcript.push_back(static_cast<std::uint8_t>(value >> 24));
+        transcript.push_back(static_cast<std::uint8_t>(value >> 16));
+        transcript.push_back(static_cast<std::uint8_t>(value >> 8));
+        transcript.push_back(static_cast<std::uint8_t>(value));
+    };
+    transcript.push_back(static_cast<std::uint8_t>(transactionType >> 8));
+    transcript.push_back(static_cast<std::uint8_t>(transactionType));
+    transcript.insert(transcript.end(), account.begin(), account.end());
+    transcript.insert(transcript.end(), issuanceID.begin(), issuanceID.end());
+    appendU32(sequenceOrTicket);
+    transcript.insert(
+        transcript.end(),
+        transactionSpecificAccount.begin(),
+        transactionSpecificAccount.end());
+    appendU32(version);
+
+    auto const id = sha512Half(makeSlice(transcript));
+    return {id.begin(), id.end()};
+}
+
+std::vector<std::uint8_t>
+proofContext(
+    STTx const& tx,
+    AccountID const& transactionSpecificAccount,
+    std::uint32_t version)
+{
+    return proofContext(
+        static_cast<std::uint16_t>(tx.getTxnType()),
+        tx[sfAccount],
+        tx[sfMPTokenIssuanceID],
+        tx.getSeqValue(),
+        transactionSpecificAccount,
+        version);
 }
 
 void

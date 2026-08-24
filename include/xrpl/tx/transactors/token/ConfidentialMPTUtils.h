@@ -48,6 +48,14 @@ proofContext(
     std::uint16_t transactionType,
     AccountID const& account,
     MPTID const& issuanceID,
+    std::uint32_t sequenceOrTicket,
+    AccountID const& transactionSpecificAccount,
+    std::uint32_t version);
+
+[[nodiscard]] std::vector<std::uint8_t>
+proofContext(
+    STTx const& tx,
+    AccountID const& transactionSpecificAccount,
     std::uint32_t version);
 
 void
