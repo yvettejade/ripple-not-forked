@@ -146,7 +146,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         jv[sfHolderEncryptedAmount] = hex(holderCt);
         jv[sfIssuerEncryptedAmount] = hex(issuerCt);
         jv[sfBlindingFactor] = hex(blinding);
-        jv[sfZKProof] = hex(proof);
+        jv[sfZKProof] = strHex(proof);
         return jv;
     }
 
@@ -307,6 +307,41 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         BEAST_EXPECT(issuance->at(sfOutstandingAmount) == 1'000);
         BEAST_EXPECT(token->at(sfConfidentialBalanceVersion) == 0);
 
+        auto setConfidentialOutstanding = [&](std::uint64_t value) {
+            env.app().getOpenLedger().modify(
+                [&](OpenView& view, beast::Journal) {
+                    Sandbox sandbox(&view, TapNone);
+                    auto sle =
+                        sandbox.peek(keylet::mptIssuance(tester.issuanceID()));
+                    if (!sle)
+                        return false;
+                    sle->setFieldU64(sfConfidentialOutstandingAmount, value);
+                    sandbox.update(sle);
+                    sandbox.apply(view);
+                    return true;
+                });
+        };
+        setConfidentialOutstanding(1'000);
+        auto const ceilingBlind = scalar(7);
+        Ciphertext ceilingHolder{};
+        Ciphertext ceilingIssuer{};
+        BEAST_EXPECT(encrypt(holderPk, 1, ceilingBlind, ceilingHolder));
+        BEAST_EXPECT(encrypt(issuerPk, 1, ceilingBlind, ceilingIssuer));
+        json::Value ceilingConvert;
+        ceilingConvert[sfAccount] = alice.human();
+        ceilingConvert[sfTransactionType] = "ConfidentialMPTConvert";
+        ceilingConvert[sfMPTokenIssuanceID] =
+            to_string(tester.issuanceID());
+        ceilingConvert[sfMPTAmount] = "1";
+        ceilingConvert[sfHolderEncryptedAmount] = hex(ceilingHolder);
+        ceilingConvert[sfIssuerEncryptedAmount] = hex(ceilingIssuer);
+        ceilingConvert[sfBlindingFactor] = hex(ceilingBlind);
+        env(
+            ceilingConvert,
+            proofFee(env),
+            Ter(tecINSUFFICIENT_FUNDS));
+        setConfidentialOutstanding(50);
+
         Ciphertext spending{};
         Ciphertext expectedZero{};
         BEAST_EXPECT(parseCiphertext(
@@ -356,7 +391,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             clawbackTx(issuer, issuer),
             proofFee(env),
             Ter(temMALFORMED));
-        env(clawbackTx(alice, bob), proofFee(env), Ter(temMALFORMED));
+        env(clawbackTx(bob, alice), proofFee(env), Ter(temMALFORMED));
         env(
             clawbackTx(issuer, missing),
             proofFee(env),
@@ -382,7 +417,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
                 claw.data()) == 0);
 
         auto clawback = clawbackTx(issuer, alice);
-        clawback[sfZKProof] = hex(claw);
+        clawback[sfZKProof] = strHex(claw);
         env(clawback, proofFee(env));
         env.close();
 

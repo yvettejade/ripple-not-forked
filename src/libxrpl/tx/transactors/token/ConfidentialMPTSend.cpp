@@ -154,7 +154,7 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
                                     Slice key) {
         auto credited = confidential_mpt::addCiphertexts(
             makeSlice(receiver->getFieldVL(balanceField)),
-            ctx.tx[amountField]);
+            makeSlice(ctx.tx.getFieldVL(amountField)));
         CompressedPoint publicKey;
         Ciphertext zero;
         CiphertextBlob zeroBlob;

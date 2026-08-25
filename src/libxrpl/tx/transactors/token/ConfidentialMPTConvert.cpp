@@ -13,8 +13,6 @@
 
 #include <utility/mpt_utility.h>
 
-#include <algorithm>
-
 namespace xrpl {
 
 using namespace crypto::confidential;
