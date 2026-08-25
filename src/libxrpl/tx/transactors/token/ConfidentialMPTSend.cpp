@@ -1,7 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
 
 #include <xrpl/crypto/confidential/ElGamal.h>
-#include <xrpl/crypto/confidential/Proofs.h>
 #include <xrpl/ledger/helpers/CredentialHelpers.h>
 #include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Indexes.h>
@@ -135,7 +134,8 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         sender->getFieldVL(sfConfidentialBalanceSpending);
     auto const amountCommitment = ctx.tx.getFieldVL(sfAmountCommitment);
     auto const balanceCommitment = ctx.tx.getFieldVL(sfBalanceCommitment);
-    if (mpt_verify_send_proof(
+    if (context.size() != kMPT_HALF_SHA_SIZE ||
+        mpt_verify_send_proof(
             proof.data(),
             participants.data(),
             auditorRequired ? 4 : 3,
@@ -143,6 +143,42 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
             amountCommitment.data(),
             balanceCommitment.data(),
             context.data()) != 0)
+        return tecBAD_PROOF;
+
+    Scalar challenge;
+    if (!parseNonZeroScalar(
+            Slice(proof.data(), kScalarBytes), challenge))
+        return tecBAD_PROOF;
+    auto creditAndRerandomize = [&](SField const& balanceField,
+                                    SField const& amountField,
+                                    Slice key) {
+        auto credited = confidential_mpt::addCiphertexts(
+            makeSlice(receiver->getFieldVL(balanceField)),
+            ctx.tx[amountField]);
+        CompressedPoint publicKey;
+        Ciphertext zero;
+        CiphertextBlob zeroBlob;
+        if (!credited || !parseCompressedPoint(key, publicKey) ||
+            !encrypt(publicKey, 0, challenge, zero) ||
+            !serializeCiphertext(zero, zeroBlob))
+            return false;
+        return confidential_mpt::addCiphertexts(
+                   makeSlice(*credited), makeSlice(zeroBlob))
+            .has_value();
+    };
+    if (!creditAndRerandomize(
+            sfConfidentialBalanceInbox,
+            sfDestinationEncryptedAmount,
+            makeSlice(receiver->getFieldVL(sfHolderEncryptionKey))) ||
+        !creditAndRerandomize(
+            sfIssuerEncryptedBalance,
+            sfIssuerEncryptedAmount,
+            makeSlice(issuance->getFieldVL(sfIssuerEncryptionKey))) ||
+        (auditorRequired &&
+         !creditAndRerandomize(
+             sfAuditorEncryptedBalance,
+             sfAuditorEncryptedAmount,
+             makeSlice(issuance->getFieldVL(sfAuditorEncryptionKey)))))
         return tecBAD_PROOF;
     return tesSUCCESS;
 }

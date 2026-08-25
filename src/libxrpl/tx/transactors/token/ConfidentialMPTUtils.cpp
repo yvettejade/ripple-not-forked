@@ -9,6 +9,8 @@
 #include <xrpl/protocol/digest.h>
 #include <xrpl/tx/Transactor.h>
 
+#include <utility/mpt_utility.h>
+
 #include <algorithm>
 #include <limits>
 
@@ -107,32 +109,58 @@ proofContext(
     AccountID const& transactionSpecificAccount,
     std::uint32_t version)
 {
-    // The updated proof document fixes field order but not integer encoding.
-    // Use the XRPL convention: unsigned transaction type, sequence/ticket, and
-    // version encoded big-endian; account and issuance IDs use canonical bytes.
-    std::vector<std::uint8_t> transcript;
-    transcript.reserve(
-        2 + account.size() + issuanceID.size() + 4 +
-        transactionSpecificAccount.size() + 4);
-    auto appendU32 = [&](std::uint32_t value) {
-        transcript.push_back(static_cast<std::uint8_t>(value >> 24));
-        transcript.push_back(static_cast<std::uint8_t>(value >> 16));
-        transcript.push_back(static_cast<std::uint8_t>(value >> 8));
-        transcript.push_back(static_cast<std::uint8_t>(value));
-    };
-    transcript.push_back(static_cast<std::uint8_t>(transactionType >> 8));
-    transcript.push_back(static_cast<std::uint8_t>(transactionType));
-    transcript.insert(transcript.end(), account.begin(), account.end());
-    transcript.insert(transcript.end(), issuanceID.begin(), issuanceID.end());
-    appendU32(sequenceOrTicket);
-    transcript.insert(
-        transcript.end(),
+    account_id accountBytes{};
+    account_id specificAccountBytes{};
+    mpt_issuance_id issuanceBytes{};
+    std::copy(account.begin(), account.end(), accountBytes.bytes);
+    std::copy(
         transactionSpecificAccount.begin(),
-        transactionSpecificAccount.end());
-    appendU32(version);
+        transactionSpecificAccount.end(),
+        specificAccountBytes.bytes);
+    std::copy(issuanceID.begin(), issuanceID.end(), issuanceBytes.bytes);
 
-    auto const id = sha512Half(makeSlice(transcript));
-    return {id.begin(), id.end()};
+    std::vector<std::uint8_t> context(kMPT_HALF_SHA_SIZE);
+    int result = -1;
+    switch (transactionType)
+    {
+        case ttCONFIDENTIAL_MPT_CONVERT:
+            result = mpt_get_convert_context_hash(
+                accountBytes,
+                issuanceBytes,
+                sequenceOrTicket,
+                context.data());
+            break;
+        case ttCONFIDENTIAL_MPT_CONVERT_BACK:
+            result = mpt_get_convert_back_context_hash(
+                accountBytes,
+                issuanceBytes,
+                sequenceOrTicket,
+                version,
+                context.data());
+            break;
+        case ttCONFIDENTIAL_MPT_SEND:
+            result = mpt_get_send_context_hash(
+                accountBytes,
+                issuanceBytes,
+                sequenceOrTicket,
+                specificAccountBytes,
+                version,
+                context.data());
+            break;
+        case ttCONFIDENTIAL_MPT_CLAWBACK:
+            result = mpt_get_clawback_context_hash(
+                accountBytes,
+                issuanceBytes,
+                sequenceOrTicket,
+                specificAccountBytes,
+                context.data());
+            break;
+        default:
+            break;
+    }
+    if (result != 0)
+        return {};
+    return context;
 }
 
 std::vector<std::uint8_t>

@@ -9,7 +9,8 @@
 #include <xrpl/basics/strHex.h>
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/crypto/confidential/ElGamal.h>
-#include <xrpl/crypto/confidential/Proofs.h>
+#include <xrpl/ledger/OpenView.h>
+#include <xrpl/ledger/Sandbox.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/SField.h>
@@ -107,12 +108,6 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
     }
 
     static std::string
-    hex(SchnorrProof const& proof)
-    {
-        return strHex(proof);
-    }
-
-    static std::string
     dummyProof(std::size_t bytes)
     {
         return strHex(std::string(bytes, '\x01'));
@@ -140,7 +135,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         Ciphertext const& holderCt,
         Ciphertext const& issuerCt,
         Scalar const& blinding,
-        SchnorrProof const& proof)
+        std::array<std::uint8_t, kMPT_SCHNORR_PROOF_SIZE> const& proof)
     {
         json::Value jv;
         jv[sfAccount] = account.human();
@@ -246,7 +241,9 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         Env env(*this, features);
         Account const issuer{"issuer"};
         Account const alice{"alice"};
-        MPTTester tester(env, issuer, {.holders = {alice}});
+        Account const bob{"bob"};
+        Account const missing{"missing"};
+        MPTTester tester(env, issuer, {.holders = {alice, bob}});
         tester.create(
             {.pay =
                  std::pair<std::vector<Account>, std::uint64_t>{{alice}, 1'000},
@@ -281,9 +278,13 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             env.seq(alice),
             alice.id(),
             0);
-        SchnorrProof pok{};
-        BEAST_EXPECT(createSchnorrProofOfKnowledge(
-            holderSk, holderPk, pok, makeSlice(extra)));
+        std::array<std::uint8_t, kMPT_SCHNORR_PROOF_SIZE> pok{};
+        BEAST_EXPECT(
+            mpt_get_convert_proof(
+                holderPk.data(),
+                holderSk.data(),
+                extra.data(),
+                pok.data()) == 0);
 
         env(convertTx(
                 alice,
@@ -339,6 +340,28 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         BEAST_EXPECT(parseCiphertext(
             makeSlice(merged->getFieldVL(sfIssuerEncryptedBalance)),
             issuerMirror));
+
+        auto clawbackTx = [&](Account const& account, Account const& holder) {
+            json::Value clawback;
+            clawback[sfAccount] = account.human();
+            clawback[sfTransactionType] = "ConfidentialMPTClawback";
+            clawback[sfHolder] = holder.human();
+            clawback[sfMPTokenIssuanceID] = to_string(tester.issuanceID());
+            clawback[sfMPTAmount] = "50";
+            clawback[sfZKProof] =
+                dummyProof(SECP256K1_COMPACT_CLAWBACK_PROOF_SIZE);
+            return clawback;
+        };
+        env(
+            clawbackTx(issuer, issuer),
+            proofFee(env),
+            Ter(temMALFORMED));
+        env(clawbackTx(alice, bob), proofFee(env), Ter(temMALFORMED));
+        env(
+            clawbackTx(issuer, missing),
+            proofFee(env),
+            Ter(tecNO_TARGET));
+
         auto const clawExtra = confidential_mpt::proofContext(
             static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CLAWBACK),
             issuer.id(),
@@ -346,16 +369,19 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             env.seq(issuer),
             alice.id(),
             0);
-        SchnorrProof claw{};
-        BEAST_EXPECT(createClawbackProof(
-            issuerSk, issuerPk, issuerMirror, 50, claw, makeSlice(clawExtra)));
+        std::array<std::uint8_t, SECP256K1_COMPACT_CLAWBACK_PROOF_SIZE>
+            claw{};
+        auto const issuerMirrorBlob = blob(issuerMirror);
+        BEAST_EXPECT(
+            mpt_get_clawback_proof(
+                issuerSk.data(),
+                issuerPk.data(),
+                clawExtra.data(),
+                50,
+                issuerMirrorBlob.data(),
+                claw.data()) == 0);
 
-        json::Value clawback;
-        clawback[sfAccount] = issuer.human();
-        clawback[sfTransactionType] = "ConfidentialMPTClawback";
-        clawback[sfHolder] = alice.human();
-        clawback[sfMPTokenIssuanceID] = to_string(tester.issuanceID());
-        clawback[sfMPTAmount] = "50";
+        auto clawback = clawbackTx(issuer, alice);
         clawback[sfZKProof] = hex(claw);
         env(clawback, proofFee(env));
         env.close();
@@ -431,12 +457,20 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             env.seq(bob),
             bob.id(),
             0);
-        SchnorrProof alicePok{};
-        SchnorrProof bobPok{};
-        BEAST_EXPECT(createSchnorrProofOfKnowledge(
-            aliceSk, alicePk, alicePok, makeSlice(aliceExtra)));
-        BEAST_EXPECT(createSchnorrProofOfKnowledge(
-            bobSk, bobPk, bobPok, makeSlice(bobExtra)));
+        std::array<std::uint8_t, kMPT_SCHNORR_PROOF_SIZE> alicePok{};
+        std::array<std::uint8_t, kMPT_SCHNORR_PROOF_SIZE> bobPok{};
+        BEAST_EXPECT(
+            mpt_get_convert_proof(
+                alicePk.data(),
+                aliceSk.data(),
+                aliceExtra.data(),
+                alicePok.data()) == 0);
+        BEAST_EXPECT(
+            mpt_get_convert_proof(
+                bobPk.data(),
+                bobSk.data(),
+                bobExtra.data(),
+                bobPok.data()) == 0);
 
         env(convertTx(
                 alice,
@@ -554,6 +588,43 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         sendProof.back() ^= 1;
         send[sfZKProof] = strHex(sendProof);
         env(send, proofFee(env), Ter(tecBAD_PROOF));
+
+        sendProof = makeSendProof();
+        Scalar challenge{};
+        std::copy_n(sendProof.begin(), challenge.size(), challenge.begin());
+        Ciphertext rerandomization{};
+        Ciphertext credited{};
+        BEAST_EXPECT(encrypt(bobPk, 0, challenge, rerandomization));
+        BEAST_EXPECT(
+            ciphertextAdd(destinationAmount, rerandomization, credited));
+        auto cancellingInbox = blob(credited);
+        cancellingInbox[0] ^= 1;
+        cancellingInbox[kCompressedPointBytes] ^= 1;
+        auto const bobBeforeCredit =
+            env.le(keylet::mptoken(tester.issuanceID(), bob.id()));
+        BEAST_EXPECT(bobBeforeCredit);
+        auto const originalInbox =
+            bobBeforeCredit->getFieldVL(sfConfidentialBalanceInbox);
+        auto setBobInbox = [&](Slice value) {
+            env.app().getOpenLedger().modify(
+                [&](OpenView& view, beast::Journal) {
+                    Sandbox sandbox(&view, TapNone);
+                    auto token =
+                        sandbox.peek(keylet::mptoken(tester.issuanceID(), bob.id()));
+                    if (!token)
+                        return false;
+                    token->setFieldVL(
+                        sfConfidentialBalanceInbox,
+                        Blob(value.begin(), value.end()));
+                    sandbox.update(token);
+                    sandbox.apply(view);
+                    return true;
+                });
+        };
+        setBobInbox(makeSlice(cancellingInbox));
+        send[sfZKProof] = strHex(sendProof);
+        env(send, proofFee(env), Ter(tecBAD_PROOF));
+        setBobInbox(makeSlice(originalInbox));
 
         sendProof = makeSendProof();
         send[sfZKProof] = strHex(sendProof);

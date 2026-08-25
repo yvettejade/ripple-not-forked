@@ -2,7 +2,6 @@
 
 #include <xrpl/basics/Slice.h>
 #include <xrpl/crypto/confidential/ElGamal.h>
-#include <xrpl/crypto/confidential/Proofs.h>
 #include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -11,6 +10,8 @@
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTUtils.h>
+
+#include <utility/mpt_utility.h>
 
 #include <algorithm>
 
@@ -27,7 +28,7 @@ ConfidentialMPTConvert::preflight(PreflightContext const& ctx)
         return temMALFORMED;
     if (holderKey && holderKey->size() != kCompressedPointBytes)
         return temMALFORMED;
-    if (proof && proof->size() != kSchnorrProofBytes)
+    if (proof && proof->size() != kMPT_SCHNORR_PROOF_SIZE)
         return temMALFORMED;
     if (ctx.tx[sfMPTAmount] > kMaxMpTokenAmount)
         return temBAD_AMOUNT;
@@ -60,17 +61,16 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (!issuance->isFlag(lsfMPTCanHoldConfidentialBalance) ||
         !issuance->isFieldPresent(sfIssuerEncryptionKey))
         return tecNO_PERMISSION;
-    if (isFrozen(ctx.view, account, MPTIssue{id}))
-        return tecLOCKED;
-    if (auto const ter = requireAuth(ctx.view, MPTIssue{id}, account);
-        !isTesSuccess(ter))
-        return ter;
-
     auto const auditorRequired =
         issuance->isFieldPresent(sfAuditorEncryptionKey);
     if (auditorRequired != ctx.tx.isFieldPresent(sfAuditorEncryptedAmount))
         return tecNO_PERMISSION;
     if (token->at(sfMPTAmount) < amount)
+        return tecINSUFFICIENT_FUNDS;
+    auto const confidential =
+        issuance->getFieldU64(sfConfidentialOutstandingAmount);
+    auto const outstanding = issuance->at(sfOutstandingAmount);
+    if (amount > outstanding || confidential > outstanding - amount)
         return tecINSUFFICIENT_FUNDS;
 
     auto const suppliedKey = ctx.tx[~sfHolderEncryptionKey];
@@ -109,18 +109,12 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
 
     if (suppliedKey)
     {
-        CompressedPoint publicKey;
-        SchnorrProof schnorr;
         auto const proof = *ctx.tx[~sfZKProof];
-        std::copy(proof.begin(), proof.end(), schnorr.begin());
-        // The updated proof document does not define Convert's TxSpecific
-        // value. Use Account || 0, matching its self-conversion semantics and
-        // the uniform context shape used by ConvertBack.
         auto const context =
             confidential_mpt::proofContext(ctx.tx, account, 0);
-        if (!parseCompressedPoint(*suppliedKey, publicKey) ||
-            !verifySchnorrProofOfKnowledge(
-                publicKey, schnorr, makeSlice(context)))
+        if (context.size() != kMPT_HALF_SHA_SIZE ||
+            mpt_verify_convert_proof(
+                proof.data(), suppliedKey->data(), context.data()) != 0)
             return tecBAD_PROOF;
     }
 

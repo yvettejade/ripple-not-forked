@@ -98,7 +98,8 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     auto const balanceCiphertext =
         token->getFieldVL(sfConfidentialBalanceSpending);
     auto const balanceCommitment = ctx.tx.getFieldVL(sfBalanceCommitment);
-    if (mpt_verify_convert_back_proof(
+    if (context.size() != kMPT_HALF_SHA_SIZE ||
+        mpt_verify_convert_back_proof(
             proof.data(),
             holderKey.data(),
             balanceCiphertext.data(),
