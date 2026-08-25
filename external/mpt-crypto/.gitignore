@@ -1,0 +1,10 @@
+build/
+.DS_Store
+cmake-build-*/
+.idea/
+.venv
+.vscode/
+
+# Emscripten build artifacts (cover the built .js/.mjs/.wasm outputs)
+emcc_build/
+emcc_out/
