@@ -194,6 +194,14 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
     if (isTesSuccess(checkTxPermission(sle, tx)))
         return tesSUCCESS;
 
+    // Granular permissions only cover lock/unlock. Key registration and other
+    // issuance mutations require transaction-level MPTokenIssuanceSet.
+    if (tx.isFieldPresent(sfDomainID) || tx.isFieldPresent(sfMPTokenMetadata) ||
+        tx.isFieldPresent(sfTransferFee) || tx.isFieldPresent(sfMutableFlags) ||
+        tx.isFieldPresent(sfIssuerEncryptionKey) ||
+        tx.isFieldPresent(sfAuditorEncryptionKey))
+        return terNO_DELEGATE_PERMISSION;
+
     // this is added in case more flags will be added for MPTokenIssuanceSet
     // in the future. Currently unreachable.
     if ((tx.getFlags() & tfMPTokenIssuanceSetMask) != 0u)
@@ -206,6 +214,9 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
         return terNO_DELEGATE_PERMISSION;
 
     if (tx.isFlag(tfMPTUnlock) && !granularPermissions.contains(MPTokenIssuanceUnlock))
+        return terNO_DELEGATE_PERMISSION;
+
+    if (!tx.isFlag(tfMPTLock) && !tx.isFlag(tfMPTUnlock))
         return terNO_DELEGATE_PERMISSION;
 
     return tesSUCCESS;

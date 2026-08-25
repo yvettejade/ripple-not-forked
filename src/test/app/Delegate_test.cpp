@@ -1672,6 +1672,71 @@ class Delegate_test : public beast::unit_test::Suite
             env.close();
             mpt.set({.account = alice, .flags = tfMPTLock | tfFullyCanonicalSig, .delegate = bob});
         }
+
+        // lock/unlock granular permission cannot mutate issuance or register
+        // confidential keys
+        {
+            Env env(*this);
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(100000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.fund = false});
+            env.close();
+            mpt.create(
+                {.flags = tfMPTCanLock | tfMPTCanHoldConfidentialBalance,
+                 .mutableFlags = tmfMPTCanMutateMetadata});
+            env.close();
+
+            env(delegate::set(alice, bob, {"MPTokenIssuanceLock", "MPTokenIssuanceUnlock"}));
+            env.close();
+
+            std::string const issuerKey(33, '\x02');
+            std::string const auditorKey(33, '\x03');
+            mpt.set(
+                {.account = alice,
+                 .issuerEncryptionKey = issuerKey,
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+            mpt.set(
+                {.account = alice,
+                 .auditorEncryptionKey = auditorKey,
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+            mpt.set(
+                {.account = alice,
+                 .issuerEncryptionKey = issuerKey,
+                 .auditorEncryptionKey = auditorKey,
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+            mpt.set(
+                {.account = alice,
+                 .metadata = "test",
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+            {
+                auto const sle = env.le(keylet::mptIssuance(mpt.issuanceID()));
+                BEAST_EXPECT(sle);
+                BEAST_EXPECT(!sle->isFieldPresent(sfIssuerEncryptionKey));
+                BEAST_EXPECT(!sle->isFieldPresent(sfAuditorEncryptionKey));
+                BEAST_EXPECT(!sle->isFieldPresent(sfPendingAuditorEncryptionKey));
+            }
+
+            mpt.set({.account = alice, .flags = tfMPTLock, .delegate = bob});
+            mpt.set({.account = alice, .flags = tfMPTUnlock, .delegate = bob});
+
+            env(delegate::set(alice, bob, {"MPTokenIssuanceSet"}));
+            env.close();
+            mpt.set({.account = alice, .issuerEncryptionKey = issuerKey, .delegate = bob});
+            mpt.set({.account = alice, .auditorEncryptionKey = auditorKey, .delegate = bob});
+            {
+                auto const sle = env.le(keylet::mptIssuance(mpt.issuanceID()));
+                BEAST_EXPECT(sle);
+                BEAST_EXPECT(sle->isFieldPresent(sfIssuerEncryptionKey));
+                BEAST_EXPECT(sle->isFieldPresent(sfAuditorEncryptionKey));
+            }
+        }
     }
 
     void

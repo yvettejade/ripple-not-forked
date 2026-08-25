@@ -1427,6 +1427,104 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
     }
 
     void
+    testDelegateCannotRegisterKeys(FeatureBitset features)
+    {
+        testcase("lock-only delegate cannot register confidential keys");
+        using namespace jtx;
+        Account const gw("gwDel");
+        Account const alice("aliceDel");
+        Account const lockDelegate("lockDelegate");
+        Env env(*this, features);
+        MPTTester mpt(env, gw, {.holders = {alice}});
+        mpt.create(
+            {.pay = {{std::vector<Account>{alice}, 50}},
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock});
+
+        auto const issuer = makeKey();
+        auto const auditor = makeKey();
+        auto const attacker = makeKey();
+        auto const aliceKey = makeKey();
+        auto const id = mpt.issuanceID();
+        auto rawKey = [](CompressedPoint const& key) {
+            return std::string(
+                reinterpret_cast<char const*>(key.data()), key.size());
+        };
+
+        env.fund(XRP(1000), lockDelegate);
+        env(delegate::set(gw, lockDelegate, {"MPTokenIssuanceLock"}));
+        env.close();
+
+        mpt.set(
+            {.account = gw,
+             .issuerEncryptionKey = rawKey(attacker.pk),
+             .delegate = lockDelegate,
+             .err = terNO_DELEGATE_PERMISSION});
+        {
+            auto const issuance = env.le(keylet::mptIssuance(id));
+            BEAST_EXPECT(!issuance->isFieldPresent(sfIssuerEncryptionKey));
+            BEAST_EXPECT(!issuance->isFieldPresent(sfAuditorEncryptionKey));
+        }
+
+        mpt.set(
+            {.account = gw,
+             .issuerEncryptionKey = rawKey(issuer.pk),
+             .auditorEncryptionKey = rawKey(auditor.pk)});
+
+        {
+            auto const r = mustRandomScalar();
+            json::Value jv;
+            jv[jss::TransactionType] = jss::ConfidentialMPTConvert;
+            jv[jss::Account] = alice.human();
+            jv[sfMPTokenIssuanceID] = to_string(id);
+            jv[sfMPTAmount] = "10";
+            jv[sfHolderEncryptedAmount] = hexCipher(mustEncrypt(aliceKey.pk, 10, r));
+            jv[sfIssuerEncryptedAmount] = hexCipher(mustEncrypt(issuer.pk, 10, r));
+            jv[sfAuditorEncryptedAmount] = hexCipher(mustEncrypt(auditor.pk, 10, r));
+            jv[sfBlindingFactor] = to_string(scalarToUint(r));
+            jv[sfHolderEncryptionKey] = hexPoint(aliceKey.pk);
+            auto const context = confidential::transactionContextIDConvert(
+                static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT),
+                Slice(alice.id().data(), alice.id().size()),
+                Slice(id.data(), id.size()),
+                env.seq(alice));
+            confidential::SchnorrRegisterProof proof{};
+            BEAST_EXPECT(confidential::proveSchnorrRegister(
+                aliceKey.sk, aliceKey.pk, Slice(context.data(), context.size()), proof));
+            jv[sfZKProof] = hexOf(proof);
+            env(jv, Fee(XRP(1)));
+            BEAST_EXPECT(env.ter() == tesSUCCESS);
+        }
+        {
+            auto const issuance = env.le(keylet::mptIssuance(id));
+            BEAST_EXPECT((*issuance)[sfConfidentialHolderCount] == 1);
+        }
+
+        mpt.set(
+            {.account = gw,
+             .auditorEncryptionKey = rawKey(attacker.pk),
+             .delegate = lockDelegate,
+             .err = terNO_DELEGATE_PERMISSION});
+        {
+            auto const issuance = env.le(keylet::mptIssuance(id));
+            BEAST_EXPECT(!issuance->isFieldPresent(sfPendingAuditorEncryptionKey));
+            BEAST_EXPECT(
+                (*issuance)[sfAuditorEncryptionKey] ==
+                Slice(auditor.pk.data(), auditor.pk.size()));
+        }
+
+        {
+            json::Value merge;
+            merge[jss::TransactionType] = jss::ConfidentialMPTMergeInbox;
+            merge[jss::Account] = alice.human();
+            merge[sfMPTokenIssuanceID] = to_string(id);
+            env(merge, Fee(XRP(1)));
+            BEAST_EXPECT(env.ter() == tesSUCCESS);
+        }
+
+        mpt.set({.account = gw, .flags = tfMPTLock, .delegate = lockDelegate});
+    }
+
+    void
     testConfidentialInvariants(FeatureBitset features)
     {
         testcase("ValidConfidentialMPT invariant failures");
@@ -1616,6 +1714,7 @@ public:
         testNegativePaths(all);
         testAuditorAndLedger(all);
         testAuditorRotation(all);
+        testDelegateCannotRegisterKeys(all);
         testConfidentialInvariants(all);
     }
 };
