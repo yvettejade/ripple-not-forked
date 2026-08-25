@@ -11,7 +11,10 @@
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTUtils.h>
 
+#include <utility/mpt_utility.h>
+
 #include <algorithm>
+#include <array>
 
 namespace xrpl {
 
@@ -92,84 +95,56 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         !isTesSuccess(err))
         return err;
 
-    Ciphertext senderAmount;
-    Ciphertext destinationAmount;
-    Ciphertext issuerAmount;
-    Ciphertext senderBalance;
-    CompressedPoint senderKey;
-    CompressedPoint destinationKey;
-    CompressedPoint issuerKey;
-    CompressedPoint amountCommitment;
-    CompressedPoint balanceCommitment;
-    if (!parseCiphertext(
-            makeSlice(ctx.tx.getFieldVL(sfSenderEncryptedAmount)),
-            senderAmount) ||
-        !parseCiphertext(
-            makeSlice(ctx.tx.getFieldVL(sfDestinationEncryptedAmount)),
-            destinationAmount) ||
-        !parseCiphertext(
-            makeSlice(ctx.tx.getFieldVL(sfIssuerEncryptedAmount)),
-            issuerAmount) ||
-        !parseCiphertext(
-            makeSlice(sender->getFieldVL(sfConfidentialBalanceSpending)),
-            senderBalance) ||
-        !parseCompressedPoint(
-            makeSlice(sender->getFieldVL(sfHolderEncryptionKey)), senderKey) ||
-        !parseCompressedPoint(
+    std::array<mpt_confidential_participant, 4> participants{};
+    auto setParticipant = [&](std::size_t index, Slice key, Slice ciphertext) {
+        if (key.size() != kMPT_PUBKEY_SIZE ||
+            ciphertext.size() != kMPT_ELGAMAL_TOTAL_SIZE)
+            return false;
+        std::copy(key.begin(), key.end(), participants[index].pubkey);
+        std::copy(
+            ciphertext.begin(),
+            ciphertext.end(),
+            participants[index].ciphertext);
+        return true;
+    };
+    if (!setParticipant(
+            0,
+            makeSlice(sender->getFieldVL(sfHolderEncryptionKey)),
+            ctx.tx[sfSenderEncryptedAmount]) ||
+        !setParticipant(
+            1,
             makeSlice(receiver->getFieldVL(sfHolderEncryptionKey)),
-            destinationKey) ||
-        !parseCompressedPoint(
-            makeSlice(issuance->getFieldVL(sfIssuerEncryptionKey)), issuerKey) ||
-        !parseCompressedPoint(ctx.tx[sfAmountCommitment], amountCommitment) ||
-        !parseCompressedPoint(ctx.tx[sfBalanceCommitment], balanceCommitment))
+            ctx.tx[sfDestinationEncryptedAmount]) ||
+        !setParticipant(
+            2,
+            makeSlice(issuance->getFieldVL(sfIssuerEncryptionKey)),
+            ctx.tx[sfIssuerEncryptedAmount]) ||
+        (auditorRequired &&
+         !setParticipant(
+             3,
+             makeSlice(issuance->getFieldVL(sfAuditorEncryptionKey)),
+             ctx.tx[sfAuditorEncryptedAmount])))
         return tecBAD_PROOF;
 
-    SendSigmaStatement statement{
-        .recipientPublicKeys = {senderKey, destinationKey, issuerKey},
-        .senderPublicKey = senderKey,
-        .sharedCiphertext = senderAmount.R,
-        .encryptedAmounts = {
-            senderAmount.S, destinationAmount.S, issuerAmount.S},
-        .amountCommitment = amountCommitment,
-        .balanceCommitment = balanceCommitment,
-        .balanceCiphertext = senderBalance};
-    if (senderAmount.R != destinationAmount.R ||
-        senderAmount.R != issuerAmount.R)
-        return tecBAD_PROOF;
-
-    if (auditorRequired)
-    {
-        Ciphertext auditorAmount;
-        CompressedPoint auditorKey;
-        if (!parseCiphertext(
-                makeSlice(ctx.tx.getFieldVL(sfAuditorEncryptedAmount)),
-                auditorAmount) ||
-            !parseCompressedPoint(
-                makeSlice(issuance->getFieldVL(sfAuditorEncryptionKey)),
-                auditorKey) ||
-            auditorAmount.R != senderAmount.R)
-            return tecBAD_PROOF;
-        statement.recipientPublicKeys.push_back(auditorKey);
-        statement.encryptedAmounts.push_back(auditorAmount.S);
-    }
-
-    SendSigmaProof sigma;
-    auto const proof = ctx.tx.getFieldVL(sfZKProof);
-    std::copy_n(proof.begin(), sigma.size(), sigma.begin());
     auto const context = confidential_mpt::proofContext(
         ctx.tx,
         destination,
         sender->at(sfConfidentialBalanceVersion));
-    if (!verifySendSigmaProof(
-            statement, sigma, makeSlice(context)))
+    auto const proof = ctx.tx.getFieldVL(sfZKProof);
+    auto const senderBalance =
+        sender->getFieldVL(sfConfidentialBalanceSpending);
+    auto const amountCommitment = ctx.tx.getFieldVL(sfAmountCommitment);
+    auto const balanceCommitment = ctx.tx.getFieldVL(sfBalanceCommitment);
+    if (mpt_verify_send_proof(
+            proof.data(),
+            participants.data(),
+            auditorRequired ? 4 : 3,
+            senderBalance.data(),
+            amountCommitment.data(),
+            balanceCommitment.data(),
+            context.data()) != 0)
         return tecBAD_PROOF;
-
-    // The updated document fully specifies the compact sigma proof above, but
-    // still only cites standard Bulletproofs without fixing generator
-    // derivation or serialization. Its required 754-byte encoding is
-    // incompatible with the maintained secp256k1-zkp encoding, so the range
-    // proof remains fail-closed rather than accepting an invented transcript.
-    return tecBAD_PROOF;
+    return tesSUCCESS;
 }
 
 XRPAmount

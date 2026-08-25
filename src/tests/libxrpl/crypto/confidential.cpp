@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <secp256k1.h>
+#include <utility/mpt_utility.h>
 
 #include <array>
 #include <cstring>
@@ -460,4 +461,22 @@ TEST(ConfidentialProofs, ConvertBackCompactSigma)
         pedersenCommit(balance, otherBlind, statement.balanceCommitment));
     EXPECT_FALSE(
         verifyBalanceSigmaProof(statement, proof, makeSlice(context)));
+}
+
+TEST(ConfidentialProofs, MptCryptoPedersenCompatibility)
+{
+    Scalar value;
+    Scalar blinding;
+    ASSERT_TRUE(scalarFromUint64(123, value));
+    ASSERT_TRUE(randomNonZeroScalar(blinding));
+
+    CompressedPoint inTree;
+    ASSERT_TRUE(pedersenCommit(value, blinding, inTree));
+
+    std::array<std::uint8_t, kMPT_PEDERSEN_COMMIT_SIZE> library{};
+    ASSERT_EQ(
+        mpt_get_pedersen_commitment(
+            123, blinding.data(), library.data()),
+        0);
+    EXPECT_TRUE(std::equal(inTree.begin(), inTree.end(), library.begin()));
 }

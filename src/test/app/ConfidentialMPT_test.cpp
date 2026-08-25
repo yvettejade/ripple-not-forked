@@ -19,7 +19,9 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTUtils.h>
 
 #include <secp256k1.h>
+#include <utility/mpt_utility.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -93,6 +95,15 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         if (!serializeCiphertext(ciphertext, blob))
             return {};
         return strHex(blob);
+    }
+
+    static CiphertextBlob
+    blob(Ciphertext const& ciphertext)
+    {
+        CiphertextBlob out{};
+        if (!serializeCiphertext(ciphertext, out))
+            Throw<std::runtime_error>("Could not serialize ciphertext");
+        return out;
     }
 
     static std::string
@@ -363,10 +374,10 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
     }
 
     void
-    testConvertBackAndSendFailClosed(FeatureBitset const& features)
+    testSendAndConvertBackProofs(FeatureBitset const& features)
     {
         using namespace test::jtx;
-        testcase("convertback and send fail closed");
+        testcase("send and convertback library proofs");
 
         Env env(*this, features);
         Account const issuer{"issuer"};
@@ -449,11 +460,168 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         env(merge, proofFee(env));
         env.close();
 
+        auto participant = [](CompressedPoint const& key, Ciphertext const& ct) {
+            mpt_confidential_participant out{};
+            auto const serialized = blob(ct);
+            std::copy(key.begin(), key.end(), out.pubkey);
+            std::copy(
+                serialized.begin(), serialized.end(), out.ciphertext);
+            return out;
+        };
+        auto const sendBlind = scalar(8);
+        Ciphertext senderAmount{};
+        Ciphertext destinationAmount{};
+        Ciphertext sendIssuerAmount{};
+        BEAST_EXPECT(encrypt(alicePk, 10, sendBlind, senderAmount));
+        BEAST_EXPECT(encrypt(bobPk, 10, sendBlind, destinationAmount));
+        BEAST_EXPECT(
+            encrypt(issuerPk, 10, sendBlind, sendIssuerAmount));
+        std::array<mpt_confidential_participant, 3> participants{
+            participant(alicePk, senderAmount),
+            participant(bobPk, destinationAmount),
+            participant(issuerPk, sendIssuerAmount)};
+
+        std::array<std::uint8_t, kMPT_PEDERSEN_COMMIT_SIZE>
+            amountCommitment{};
+        std::array<std::uint8_t, kMPT_PEDERSEN_COMMIT_SIZE>
+            balanceCommitment{};
+        auto const balanceBlind = scalar(9);
+        BEAST_EXPECT(
+            mpt_get_pedersen_commitment(
+                10, sendBlind.data(), amountCommitment.data()) == 0);
+        BEAST_EXPECT(
+            mpt_get_pedersen_commitment(
+                40, balanceBlind.data(), balanceCommitment.data()) == 0);
+
+        auto const aliceBeforeSend =
+            env.le(keylet::mptoken(tester.issuanceID(), alice.id()));
+        BEAST_EXPECT(aliceBeforeSend);
+        mpt_pedersen_proof_params balanceParams{};
+        balanceParams.amount = 40;
+        std::copy(
+            balanceCommitment.begin(),
+            balanceCommitment.end(),
+            balanceParams.pedersen_commitment);
+        std::copy(
+            balanceBlind.begin(),
+            balanceBlind.end(),
+            balanceParams.blinding_factor);
+        auto const spending =
+            aliceBeforeSend->getFieldVL(sfConfidentialBalanceSpending);
+        std::copy(
+            spending.begin(), spending.end(), balanceParams.ciphertext);
+
+        auto makeSendProof = [&] {
+            auto const context = confidential_mpt::proofContext(
+                static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_SEND),
+                alice.id(),
+                tester.issuanceID(),
+                env.seq(alice),
+                bob.id(),
+                aliceBeforeSend->at(sfConfidentialBalanceVersion));
+            std::array<std::uint8_t, confidential_mpt::kSendProofBytes>
+                proof{};
+            std::size_t proofLength = proof.size();
+            BEAST_EXPECT(
+                mpt_get_confidential_send_proof(
+                    aliceSk.data(),
+                    alicePk.data(),
+                    10,
+                    participants.data(),
+                    participants.size(),
+                    sendBlind.data(),
+                    context.data(),
+                    amountCommitment.data(),
+                    &balanceParams,
+                    proof.data(),
+                    &proofLength) == 0);
+            BEAST_EXPECT(proofLength == proof.size());
+            return proof;
+        };
+
+        json::Value send;
+        send[sfAccount] = alice.human();
+        send[sfDestination] = bob.human();
+        send[sfTransactionType] = "ConfidentialMPTSend";
+        send[sfMPTokenIssuanceID] = to_string(tester.issuanceID());
+        send[sfSenderEncryptedAmount] = hex(senderAmount);
+        send[sfDestinationEncryptedAmount] = hex(destinationAmount);
+        send[sfIssuerEncryptedAmount] = hex(sendIssuerAmount);
+        send[sfBalanceCommitment] = strHex(balanceCommitment);
+        send[sfAmountCommitment] = strHex(amountCommitment);
+
+        auto sendProof = makeSendProof();
+        sendProof.back() ^= 1;
+        send[sfZKProof] = strHex(sendProof);
+        env(send, proofFee(env), Ter(tecBAD_PROOF));
+
+        sendProof = makeSendProof();
+        send[sfZKProof] = strHex(sendProof);
+        env(send, proofFee(env));
+        env.close();
+
+        auto const aliceAfterSend =
+            env.le(keylet::mptoken(tester.issuanceID(), alice.id()));
+        auto const bobAfterSend =
+            env.le(keylet::mptoken(tester.issuanceID(), bob.id()));
+        BEAST_EXPECT(aliceAfterSend);
+        BEAST_EXPECT(bobAfterSend);
+        BEAST_EXPECT(
+            aliceAfterSend->at(sfConfidentialBalanceVersion) == 2);
+
         Ciphertext backCt{};
         Ciphertext backIssuer{};
-        auto const backBlind = scalar(7);
+        auto const backBlind = scalar(10);
         BEAST_EXPECT(encrypt(alicePk, 10, backBlind, backCt));
         BEAST_EXPECT(encrypt(issuerPk, 10, backBlind, backIssuer));
+        auto const convertBackBalanceBlind = scalar(11);
+        std::array<std::uint8_t, kMPT_PEDERSEN_COMMIT_SIZE>
+            convertBackCommitment{};
+        BEAST_EXPECT(
+            mpt_get_pedersen_commitment(
+                30,
+                convertBackBalanceBlind.data(),
+                convertBackCommitment.data()) == 0);
+        mpt_pedersen_proof_params convertBackParams{};
+        convertBackParams.amount = 30;
+        std::copy(
+            convertBackCommitment.begin(),
+            convertBackCommitment.end(),
+            convertBackParams.pedersen_commitment);
+        std::copy(
+            convertBackBalanceBlind.begin(),
+            convertBackBalanceBlind.end(),
+            convertBackParams.blinding_factor);
+        auto const spendingAfterSend =
+            aliceAfterSend->getFieldVL(sfConfidentialBalanceSpending);
+        std::copy(
+            spendingAfterSend.begin(),
+            spendingAfterSend.end(),
+            convertBackParams.ciphertext);
+        auto makeConvertBackProof = [&] {
+            auto const context = confidential_mpt::proofContext(
+                static_cast<std::uint16_t>(
+                    ttCONFIDENTIAL_MPT_CONVERT_BACK),
+                alice.id(),
+                tester.issuanceID(),
+                env.seq(alice),
+                alice.id(),
+                aliceAfterSend->at(sfConfidentialBalanceVersion));
+            std::array<
+                std::uint8_t,
+                confidential_mpt::kConvertBackProofBytes>
+                proof{};
+            BEAST_EXPECT(
+                mpt_get_convert_back_proof(
+                    aliceSk.data(),
+                    alicePk.data(),
+                    context.data(),
+                    10,
+                    &convertBackParams,
+                    proof.data()) == 0);
+            return proof;
+        };
+
         json::Value convertBack;
         convertBack[sfAccount] = alice.human();
         convertBack[sfTransactionType] = "ConfidentialMPTConvertBack";
@@ -462,24 +630,39 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         convertBack[sfHolderEncryptedAmount] = hex(backCt);
         convertBack[sfIssuerEncryptedAmount] = hex(backIssuer);
         convertBack[sfBlindingFactor] = hex(backBlind);
-        convertBack[sfBalanceCommitment] = kGenerator;
-        convertBack[sfZKProof] = dummyProof(816);
+        convertBack[sfBalanceCommitment] =
+            strHex(convertBackCommitment);
+
+        auto convertBackProof = makeConvertBackProof();
+        convertBackProof.back() ^= 1;
+        convertBack[sfZKProof] = strHex(convertBackProof);
         env(convertBack, proofFee(env), Ter(tecBAD_PROOF));
 
-        json::Value send;
-        send[sfAccount] = alice.human();
-        send[sfDestination] = bob.human();
-        send[sfTransactionType] = "ConfidentialMPTSend";
-        send[sfMPTokenIssuanceID] = to_string(tester.issuanceID());
-        send[sfSenderEncryptedAmount] = validCiphertextHex();
-        send[sfDestinationEncryptedAmount] = validCiphertextHex();
-        send[sfIssuerEncryptedAmount] = validCiphertextHex();
-        send[sfBalanceCommitment] = kGenerator;
-        send[sfAmountCommitment] = kGenerator;
-        send[sfZKProof] = dummyProof(946);
-        env(send, proofFee(env), Ter(tecBAD_PROOF));
+        convertBackProof = makeConvertBackProof();
+        convertBack[sfZKProof] = strHex(convertBackProof);
+        env(convertBack, proofFee(env));
+        env.close();
 
-        send[sfAccount] = issuer.human();
+        auto const aliceAfterConvertBack =
+            env.le(keylet::mptoken(tester.issuanceID(), alice.id()));
+        auto const issuanceAfter =
+            env.le(keylet::mptIssuance(tester.issuanceID()));
+        BEAST_EXPECT(aliceAfterConvertBack);
+        BEAST_EXPECT(issuanceAfter);
+        BEAST_EXPECT(aliceAfterConvertBack->at(sfMPTAmount) == 470);
+        BEAST_EXPECT(
+            aliceAfterConvertBack->at(sfConfidentialBalanceVersion) == 3);
+        BEAST_EXPECT(
+            issuanceAfter->getFieldU64(sfConfidentialOutstandingAmount) ==
+            30);
+
+        convertBackProof.back() ^= 1;
+        convertBack[sfZKProof] = strHex(
+            convertBackProof.begin(), convertBackProof.end() - 1);
+        env(convertBack, proofFee(env), Ter(temMALFORMED));
+
+        send[sfZKProof] =
+            strHex(sendProof.begin(), sendProof.end() - 1);
         env(send, proofFee(env), Ter(temMALFORMED));
     }
 
@@ -522,7 +705,7 @@ public:
         testIssuanceConfiguration(features);
         testMalformedTransactions(features);
         testConvertMergeClawback(features);
-        testConvertBackAndSendFailClosed(features);
+        testSendAndConvertBackProofs(features);
         testProofFee(features);
     }
 };

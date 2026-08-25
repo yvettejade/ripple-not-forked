@@ -2,10 +2,13 @@
 
 #include <libxrpl/crypto/confidential/Detail.h>
 
+#include <secp256k1_mpt.h>
+
 #include <openssl/crypto.h>
 #include <openssl/sha.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string_view>
 
@@ -278,12 +281,16 @@ challengeClawback(
 CompressedPoint const&
 pedersenGenerator() noexcept
 {
-    // libsecp256k1-zkp's standard generator H: SHA256 of the uncompressed
-    // DER encoding of secp256k1 G, lifted to the curve.
-    static constexpr CompressedPoint h{
-        0x02, 0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b,
-        0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28,
-        0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0};
+    // Consensus generator from mpt-crypto: hash-to-curve using
+    // "MPT_BULLETPROOF_V1_NUMS" and label "H".
+    static CompressedPoint const h = [] {
+        CompressedPoint serialized{};
+        secp256k1_pubkey generator;
+        if (secp256k1_mpt_get_h_generator(detail::context(), &generator) != 1 ||
+            !detail::serializePubkey(generator, serialized))
+            std::abort();
+        return serialized;
+    }();
     return h;
 }
 

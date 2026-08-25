@@ -2,7 +2,6 @@
 
 #include <xrpl/basics/Slice.h>
 #include <xrpl/crypto/confidential/ElGamal.h>
-#include <xrpl/crypto/confidential/Proofs.h>
 #include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -12,7 +11,7 @@
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTUtils.h>
 
-#include <algorithm>
+#include <utility/mpt_utility.h>
 
 namespace xrpl {
 
@@ -90,38 +89,24 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
              makeSlice(issuance->getFieldVL(sfAuditorEncryptionKey)))))
         return tecBAD_PROOF;
 
-    CompressedPoint holderKey;
-    CompressedPoint balanceCommitment;
-    Ciphertext balanceCiphertext;
-    if (!parseCompressedPoint(
-            makeSlice(token->getFieldVL(sfHolderEncryptionKey)), holderKey) ||
-        !parseCompressedPoint(
-            ctx.tx[sfBalanceCommitment], balanceCommitment) ||
-        !parseCiphertext(
-            makeSlice(token->getFieldVL(sfConfidentialBalanceSpending)),
-            balanceCiphertext))
-        return tecBAD_PROOF;
-
-    BalanceSigmaProof sigma;
     auto const proof = ctx.tx.getFieldVL(sfZKProof);
-    std::copy_n(proof.begin(), sigma.size(), sigma.begin());
     auto const context = confidential_mpt::proofContext(
         ctx.tx,
         account,
         token->at(sfConfidentialBalanceVersion));
-    if (!verifyBalanceSigmaProof(
-            {.senderPublicKey = holderKey,
-             .balanceCiphertext = balanceCiphertext,
-             .balanceCommitment = balanceCommitment},
-            sigma,
-            makeSlice(context)))
+    auto const holderKey = token->getFieldVL(sfHolderEncryptionKey);
+    auto const balanceCiphertext =
+        token->getFieldVL(sfConfidentialBalanceSpending);
+    auto const balanceCommitment = ctx.tx.getFieldVL(sfBalanceCommitment);
+    if (mpt_verify_convert_back_proof(
+            proof.data(),
+            holderKey.data(),
+            balanceCiphertext.data(),
+            balanceCommitment.data(),
+            amount,
+            context.data()) != 0)
         return tecBAD_PROOF;
-
-    // The updated document specifies the compact balance sigma proof above.
-    // It still leaves the 688-byte Bulletproof's generator derivation and wire
-    // encoding to a citation, and that encoding is incompatible with the
-    // maintained secp256k1-zkp implementation. Keep the range check fail-closed.
-    return tecBAD_PROOF;
+    return tesSUCCESS;
 }
 
 XRPAmount
