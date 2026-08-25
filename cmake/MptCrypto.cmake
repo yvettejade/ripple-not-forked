@@ -13,7 +13,6 @@ target_sources(
         "${MPT_CRYPTO_ROOT}/src/bulletproof_aggregated.c"
         "${MPT_CRYPTO_ROOT}/src/commitments.c"
         "${MPT_CRYPTO_ROOT}/src/elgamal.c"
-        "${MPT_CRYPTO_ROOT}/src/bsgs_dlp.c"
         "${MPT_CRYPTO_ROOT}/src/mpt_scalar.c"
         "${MPT_CRYPTO_ROOT}/src/proof_pok_sk.c"
         "${MPT_CRYPTO_ROOT}/src/proof_compact_standard.c"
@@ -55,5 +54,4 @@ add_mpt_crypto_test(test_mpt_utility test_mpt_utility.cpp)
 add_mpt_crypto_test(test_compact_standard test_compact_standard.c)
 add_mpt_crypto_test(test_compact_clawback test_compact_clawback.c)
 add_mpt_crypto_test(test_compact_convertback test_compact_convertback.c)
-add_mpt_crypto_test(test_ct_tweak_mul test_ct_tweak_mul.c)
-add_mpt_crypto_test(test_bsgs_dlp test_bsgs_dlp.c)
+# test_bsgs_dlp and test_ct_tweak_mul need libsecp256k1 private headers.

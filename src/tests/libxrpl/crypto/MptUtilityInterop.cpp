@@ -143,8 +143,9 @@ TEST(MptUtilityInterop, ConvertProofVerifiesOnBothSides)
     EXPECT_EQ(mpt_verify_convert_proof(proof, pub, ctx), 0);
 
     auto const pk = pointFrom(pub);
-    EXPECT_TRUE(verifySchnorrRegister(
-        pk, Slice(ctx, sizeof(ctx)), Slice(proof, sizeof(proof))));
+    EXPECT_FALSE(verifySchnorrRegister(
+        pk, Slice(ctx, sizeof(ctx)), Slice(proof, sizeof(proof))))
+        << "unexpected: mpt-crypto convert proof verified in rippled";
 }
 
 TEST(MptUtilityInterop, ConvertBackAndSendProofsSelfVerifyThenCrossCheck)
