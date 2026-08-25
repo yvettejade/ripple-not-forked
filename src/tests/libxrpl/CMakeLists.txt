@@ -28,7 +28,7 @@ target_link_libraries(xrpl.test.basics PRIVATE xrpl.imports.test)
 add_dependencies(xrpl.tests xrpl.test.basics)
 
 xrpl_add_test(crypto)
-target_link_libraries(xrpl.test.crypto PRIVATE xrpl.imports.test mpt-crypto)
+target_link_libraries(xrpl.test.crypto PRIVATE xrpl.imports.test)
 add_dependencies(xrpl.tests xrpl.test.crypto)
 
 xrpl_add_test(json)
