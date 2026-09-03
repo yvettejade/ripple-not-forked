@@ -140,7 +140,8 @@ inline constexpr FlagValue tfUniversalMask = ~tfUniversal;
         TF_FLAG(tfMPTCanEscrow, lsfMPTCanEscrow)                                                                                                               \
         TF_FLAG(tfMPTCanTrade, lsfMPTCanTrade)                                                                                                                 \
         TF_FLAG(tfMPTCanTransfer, lsfMPTCanTransfer)                                                                                                           \
-        TF_FLAG(tfMPTCanClawback, lsfMPTCanClawback),                                                                                                          \
+        TF_FLAG(tfMPTCanClawback, lsfMPTCanClawback)                                                                                                           \
+        TF_FLAG(tfMPTCanHoldConfidentialBalance, lsfMPTCanHoldConfidentialBalance),                                                                            \
         MASK_ADJ(0))                                                                                                                                           \
                                                                                                                                                                \
     TRANSACTION(MPTokenAuthorize,                                                                                                                              \
@@ -149,7 +150,8 @@ inline constexpr FlagValue tfUniversalMask = ~tfUniversal;
                                                                                                                                                                \
     TRANSACTION(MPTokenIssuanceSet,                                                                                                                            \
         TF_FLAG(tfMPTLock, 0x00000001)                                                                                                                         \
-        TF_FLAG(tfMPTUnlock, 0x00000002),                                                                                                                      \
+        TF_FLAG(tfMPTUnlock, 0x00000002)                                                                                                                       \
+        TF_FLAG(tfMPTSetCanHoldConfidentialBalance, 0x00000100),                                                                                               \
         MASK_ADJ(0))                                                                                                                                           \
                                                                                                                                                                \
     TRANSACTION(NFTokenCreateOffer,                                                                                                                            \
@@ -353,6 +355,11 @@ inline constexpr FlagValue tmfMPTokenIssuanceCreateMutableMask =
     ~(tmfMPTCanMutateCanLock | tmfMPTCanMutateRequireAuth | tmfMPTCanMutateCanEscrow |
       tmfMPTCanMutateCanTrade | tmfMPTCanMutateCanTransfer | tmfMPTCanMutateCanClawback |
       tmfMPTCanMutateMetadata | tmfMPTCanMutateTransferFee);
+
+// MPTokenIssuanceCreate ImmutableFlags (XLS-0096).
+inline constexpr FlagValue tifMPTCanHoldConfidentialBalance = lsifMPTCanHoldConfidentialBalance;
+inline constexpr FlagValue tifMPTokenIssuanceCreateImmutableMask =
+    ~tifMPTCanHoldConfidentialBalance;
 
 // MPTokenIssuanceSet MutableFlags:
 // Set or Clear flags.

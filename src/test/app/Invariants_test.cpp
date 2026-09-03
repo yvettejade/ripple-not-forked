@@ -4513,6 +4513,342 @@ class Invariants_test : public beast::unit_test::Suite
         }
     }
 
+
+    void
+    testConfidentialMPT()
+    {
+        using namespace test::jtx;
+        testcase << "Confidential MPT";
+
+        Blob const dummyCt(66, 0x02);
+        Blob const dummyPk(33, 0x02);
+
+        // COA must not exceed OA.
+        doInvariantCheck(
+            {{"invalid Confidential MPT ledger state"}},
+            [](Account const& a1, Account const&, ApplyContext& ac) {
+                auto const sle = ac.view().peek(keylet::account(a1.id()));
+                if (!sle)
+                    return false;
+
+                MPTIssue const mpt{makeMptID(1, AccountID(0x4985601))};
+                auto sleNew = std::make_shared<SLE>(keylet::mptIssuance(mpt.getMptID()));
+                sleNew->setFieldU64(sfOutstandingAmount, 10);
+                sleNew->setFieldU64(sfConfidentialOutstandingAmount, 11);
+                sleNew->setFieldU32(sfFlags, lsfMPTCanHoldConfidentialBalance);
+                ac.view().insert(sleNew);
+                return true;
+            });
+
+        // Spending/inbox/issuer ciphertext fields must appear together.
+        doInvariantCheck(
+            {{"invalid Confidential MPT ledger state"}},
+            [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                auto const sle = ac.view().peek(keylet::account(a1.id()));
+                if (!sle)
+                    return false;
+
+                MPTIssue const mpt{makeMptID(1, AccountID(0x4985601))};
+                auto sleIssuance = std::make_shared<SLE>(keylet::mptIssuance(mpt.getMptID()));
+                sleIssuance->setFieldU64(sfOutstandingAmount, 10);
+                sleIssuance->setFieldU32(sfFlags, lsfMPTCanHoldConfidentialBalance);
+                ac.view().insert(sleIssuance);
+
+                auto sleMpt = std::make_shared<SLE>(keylet::mptoken(mpt.getMptID(), a2));
+                sleMpt->setAccountID(sfAccount, a2.id());
+                sleMpt->setFieldH192(sfMPTokenIssuanceID, mpt.getMptID());
+                sleMpt->setFieldVL(sfHolderEncryptionKey, dummyPk);
+                sleMpt->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                // Inbox and issuer mirror intentionally omitted.
+                ac.view().insert(sleMpt);
+                return true;
+            });
+
+        // Encrypted balance state requires the holder's registered key.
+        doInvariantCheck(
+            {{"invalid Confidential MPT ledger state"}},
+            [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                if (!ac.view().peek(keylet::account(a1.id())))
+                    return false;
+
+                MPTIssue const mpt{makeMptID(1, AccountID(0x4985601))};
+                auto sleIssuance =
+                    std::make_shared<SLE>(keylet::mptIssuance(mpt.getMptID()));
+                sleIssuance->setFieldU64(sfOutstandingAmount, 10);
+                sleIssuance->setFieldU32(
+                    sfFlags, lsfMPTCanHoldConfidentialBalance);
+                ac.view().insert(sleIssuance);
+
+                auto sleMpt =
+                    std::make_shared<SLE>(keylet::mptoken(mpt.getMptID(), a2));
+                sleMpt->setAccountID(sfAccount, a2.id());
+                sleMpt->setFieldH192(
+                    sfMPTokenIssuanceID, mpt.getMptID());
+                sleMpt->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                sleMpt->setFieldVL(sfConfidentialBalanceInbox, dummyCt);
+                sleMpt->setFieldVL(sfIssuerEncryptedBalance, dummyCt);
+                sleMpt->setFieldU32(sfConfidentialBalanceVersion, 1);
+                // HolderEncryptionKey intentionally omitted.
+                ac.view().insert(sleMpt);
+                return true;
+            });
+
+        // Confidential holder state requires the issuance confidential flag.
+        doInvariantCheck(
+            {{"confidential balance without issuance flag"}},
+            [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                auto const sle = ac.view().peek(keylet::account(a1.id()));
+                if (!sle)
+                    return false;
+
+                MPTIssue const mpt{makeMptID(1, AccountID(0x4985601))};
+                auto sleIssuance = std::make_shared<SLE>(keylet::mptIssuance(mpt.getMptID()));
+                sleIssuance->setFieldU64(sfOutstandingAmount, 10);
+                // No lsfMPTCanHoldConfidentialBalance.
+                ac.view().insert(sleIssuance);
+
+                auto sleMpt = std::make_shared<SLE>(keylet::mptoken(mpt.getMptID(), a2));
+                sleMpt->setAccountID(sfAccount, a2.id());
+                sleMpt->setFieldH192(sfMPTokenIssuanceID, mpt.getMptID());
+                sleMpt->setFieldVL(sfHolderEncryptionKey, dummyPk);
+                sleMpt->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                sleMpt->setFieldVL(sfConfidentialBalanceInbox, dummyCt);
+                sleMpt->setFieldVL(sfIssuerEncryptedBalance, dummyCt);
+                sleMpt->setFieldU32(sfConfidentialBalanceVersion, 1);
+                ac.view().insert(sleMpt);
+                return true;
+            });
+
+        // Changing the spending ciphertext without advancing its version is
+        // invalid (xls-0096 §7.4).
+        //
+        // OpenLedger::modify/rawReplace only mutates the open view's state
+        // table; env.close() discards those edits. Apply confidential fields
+        // after close so they remain visible via env.current().
+        {
+            testcase << "Confidential MPT spending version";
+            MPTID id;
+            Env env{*this, defaultAmendments()};
+            Account const a1{"A1"};
+            Account const a2{"A2"};
+            env.fund(XRP(1000), a1, a2);
+
+            Account const issuer{"confVersionIssuer"};
+            env.fund(XRP(1'000), issuer);
+            MPTTester mpt(env, issuer, {.holders = {a2}, .fund = false});
+            mpt.create(
+                {.maxAmt = 100,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{a2}, 10}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            id = mpt.issuanceID();
+            env.close();
+
+            bool const modified = env.app().getOpenLedger().modify(
+                [&](OpenView& view, beast::Journal) {
+                    auto const sle = view.read(keylet::mptoken(id, a2));
+                    if (!sle)
+                        return false;
+                    auto replacement = std::make_shared<SLE>(*sle, sle->key());
+                    replacement->setFieldVL(sfHolderEncryptionKey, dummyPk);
+                    replacement->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                    replacement->setFieldVL(sfConfidentialBalanceInbox, dummyCt);
+                    replacement->setFieldVL(sfIssuerEncryptedBalance, dummyCt);
+                    replacement->setFieldU32(sfConfidentialBalanceVersion, 1);
+                    view.rawReplace(replacement);
+                    return true;
+                });
+            auto const initialized = env.le(keylet::mptoken(id, a2));
+            BEAST_EXPECT(
+                modified && initialized &&
+                initialized->isFieldPresent(sfConfidentialBalanceSpending));
+
+            doInvariantCheck(
+                std::move(env),
+                a1,
+                a2,
+                {{"invalid Confidential MPT ledger state"}},
+                [&](Account const&, Account const& holder, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, holder));
+                    if (!sle)
+                        return false;
+                    Blob changedCt(66, 0x03);
+                    sle->setFieldVL(sfConfidentialBalanceSpending, changedCt);
+                    ac.view().update(sle);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttCONFIDENTIAL_MPT_SEND, [](STObject&) {}},
+                {tecINVARIANT_FAILED, tefINVARIANT_FAILED});
+        }
+
+        // A confidentially initialized MPToken cannot be deleted (xls-0096
+        // §7.4), even when its encrypted balance represents zero.
+        //
+        // Same close/rawReplace ordering constraint as the spending-version
+        // case above: confidential fields must survive into env.current().
+        {
+            testcase << "Confidential MPT initialized delete";
+            MPTID id;
+            Env env{*this, defaultAmendments()};
+            Account const a1{"A1"};
+            Account const a2{"A2"};
+            env.fund(XRP(1000), a1, a2);
+
+            Account const issuer{"confDeleteIssuer"};
+            env.fund(XRP(1'000), issuer);
+            MPTTester mpt(env, issuer, {.holders = {a2}, .fund = false});
+            mpt.create(
+                {.maxAmt = 100,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{a2}, 10}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            id = mpt.issuanceID();
+            env.close();
+
+            bool const modified = env.app().getOpenLedger().modify(
+                [&](OpenView& view, beast::Journal) {
+                    auto const sle = view.read(keylet::mptoken(id, a2));
+                    if (!sle)
+                        return false;
+                    auto replacement = std::make_shared<SLE>(*sle, sle->key());
+                    replacement->setFieldVL(sfHolderEncryptionKey, dummyPk);
+                    replacement->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                    replacement->setFieldVL(sfConfidentialBalanceInbox, dummyCt);
+                    replacement->setFieldVL(sfIssuerEncryptedBalance, dummyCt);
+                    replacement->setFieldU32(sfConfidentialBalanceVersion, 1);
+                    view.rawReplace(replacement);
+                    return true;
+                });
+            auto const initialized = env.le(keylet::mptoken(id, a2));
+            BEAST_EXPECT(
+                modified && initialized &&
+                initialized->isFieldPresent(sfConfidentialBalanceSpending));
+
+            doInvariantCheck(
+                std::move(env),
+                a1,
+                a2,
+                {{"invalid Confidential MPT ledger state"}},
+                [&](Account const&, Account const& holder, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, holder));
+                    if (!sle)
+                        return false;
+                    ac.view().erase(sle);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttMPTOKEN_AUTHORIZE, [](STObject&) {}},
+                {tecINVARIANT_FAILED, tefINVARIANT_FAILED});
+        }
+
+        // Send and MergeInbox are supply-neutral (xls-0096 §8.4/§9.3).
+        for (auto const txType :
+             {ttCONFIDENTIAL_MPT_SEND, ttCONFIDENTIAL_MPT_MERGE_INBOX})
+        {
+            testcase << "Confidential MPT supply neutrality "
+                     << static_cast<std::uint16_t>(txType);
+            doInvariantCheck(
+                {{"confidential transfer changed supply"}},
+                [](Account const& a1, Account const&, ApplyContext& ac) {
+                    MPTIssue const mpt{
+                        makeMptID(1, AccountID(0x4985601))};
+                    auto sleIssuance = std::make_shared<SLE>(
+                        keylet::mptIssuance(mpt.getMptID()));
+                    sleIssuance->setFieldU64(sfOutstandingAmount, 1);
+                    sleIssuance->setFieldU64(
+                        sfConfidentialOutstandingAmount, 1);
+                    sleIssuance->setFieldU32(
+                        sfFlags, lsfMPTCanHoldConfidentialBalance);
+                    ac.view().insert(sleIssuance);
+                    return ac.view().peek(keylet::account(a1.id())) != nullptr;
+                },
+                XRPAmount{},
+                STTx{txType, [](STObject&) {}});
+        }
+
+        // Convert / ConvertBack require ΔOA == 0 and ΔCOA == -ΔMPTAmount
+        // (xls-0096 §6.5 / §10.5). Injecting a COA-only delta must fail.
+        for (auto const txType :
+             {ttCONFIDENTIAL_MPT_CONVERT, ttCONFIDENTIAL_MPT_CONVERT_BACK})
+        {
+            testcase << "Confidential MPT conversion accounting "
+                     << static_cast<std::uint16_t>(txType);
+            doInvariantCheck(
+                {{"invalid confidential conversion"}},
+                [](Account const& a1, Account const&, ApplyContext& ac) {
+                    MPTIssue const mpt{
+                        makeMptID(1, AccountID(0x4985601))};
+                    auto sleIssuance = std::make_shared<SLE>(
+                        keylet::mptIssuance(mpt.getMptID()));
+                    sleIssuance->setFieldU64(sfOutstandingAmount, 1);
+                    sleIssuance->setFieldU64(
+                        sfConfidentialOutstandingAmount, 1);
+                    sleIssuance->setFieldU32(
+                        sfFlags, lsfMPTCanHoldConfidentialBalance);
+                    ac.view().insert(sleIssuance);
+                    return ac.view().peek(keylet::account(a1.id())) != nullptr;
+                },
+                XRPAmount{},
+                STTx{txType, [](STObject&) {}});
+        }
+
+        // Clawback requires ΔCOA < 0, ΔCOA == ΔOA, and ΔMPTAmount == 0
+        // (xls-0096 §11.4). A COA increase (or OA-neutral insert) must fail.
+        {
+            testcase << "Confidential MPT clawback accounting";
+            doInvariantCheck(
+                {{"invalid confidential clawback accounting"}},
+                [](Account const& a1, Account const&, ApplyContext& ac) {
+                    MPTIssue const mpt{
+                        makeMptID(1, AccountID(0x4985601))};
+                    auto sleIssuance = std::make_shared<SLE>(
+                        keylet::mptIssuance(mpt.getMptID()));
+                    sleIssuance->setFieldU64(sfOutstandingAmount, 1);
+                    sleIssuance->setFieldU64(
+                        sfConfidentialOutstandingAmount, 1);
+                    sleIssuance->setFieldU32(
+                        sfFlags, lsfMPTCanHoldConfidentialBalance);
+                    ac.view().insert(sleIssuance);
+                    return ac.view().peek(keylet::account(a1.id())) != nullptr;
+                },
+                XRPAmount{},
+                STTx{ttCONFIDENTIAL_MPT_CLAWBACK, [](STObject&) {}});
+        }
+
+        // When an auditor key is configured, every confidential MPToken must
+        // carry sfAuditorEncryptedBalance (xls-0096 §5.3 / §13.2.1).
+        {
+            testcase << "Confidential MPT missing auditor mirror";
+            doInvariantCheck(
+                {{"auditor key set but auditor balance missing"}},
+                [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                    MPTIssue const mpt{
+                        makeMptID(1, AccountID(0x4985601))};
+                    auto sleIssuance = std::make_shared<SLE>(
+                        keylet::mptIssuance(mpt.getMptID()));
+                    sleIssuance->setFieldU64(sfOutstandingAmount, 10);
+                    sleIssuance->setFieldU32(
+                        sfFlags, lsfMPTCanHoldConfidentialBalance);
+                    sleIssuance->setFieldVL(sfAuditorEncryptionKey, dummyPk);
+                    ac.view().insert(sleIssuance);
+
+                    auto sleMpt = std::make_shared<SLE>(
+                        keylet::mptoken(mpt.getMptID(), a2));
+                    sleMpt->setAccountID(sfAccount, a2.id());
+                    sleMpt->setFieldH192(sfMPTokenIssuanceID, mpt.getMptID());
+                    sleMpt->setFieldVL(sfHolderEncryptionKey, dummyPk);
+                    sleMpt->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                    sleMpt->setFieldVL(sfConfidentialBalanceInbox, dummyCt);
+                    sleMpt->setFieldVL(sfIssuerEncryptedBalance, dummyCt);
+                    sleMpt->setFieldU32(sfConfidentialBalanceVersion, 1);
+                    // Auditor mirror intentionally omitted.
+                    ac.view().insert(sleMpt);
+                    return ac.view().peek(keylet::account(a1.id())) != nullptr;
+                });
+        }
+    }
+
     void
     testAMM()
     {
@@ -4911,6 +5247,7 @@ public:
         testValidLoanBroker();
         testVault();
         testMPT();
+        testConfidentialMPT();
         testInvariantOverwrite(defaultAmendments());
         testInvariantOverwrite(defaultAmendments() - fixCleanup3_1_3);
         testVaultComputeCoarsestScale();

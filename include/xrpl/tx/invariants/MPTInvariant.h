@@ -54,6 +54,7 @@ class ValidMPTPayment
     struct MPTData
     {
         std::array<std::int64_t, 2> outstanding{};
+        std::array<std::int64_t, 2> confidential{};
         // sum (MPT after - MPT before)
         std::int64_t mptAmount{0};
     };
@@ -107,6 +108,28 @@ private:
         MPTID const& mptid,
         AccountID const& holder,
         bool requireAuth) const;
+};
+
+/** Enforce XLS-0096 confidential-balance field and accounting invariants. */
+class ValidConfidentialMPT
+{
+    struct State
+    {
+        std::int64_t confidentialDelta = 0;
+        std::int64_t outstandingDelta = 0;
+        std::int64_t publicDelta = 0;
+    };
+
+    hash_map<MPTID, State> state_;
+    std::vector<std::pair<MPTID, AccountID>> confidentialHoldings_;
+    bool invalid_ = false;
+
+public:
+    void
+    visitEntry(bool, std::shared_ptr<SLE const> const&, std::shared_ptr<SLE const> const&);
+
+    [[nodiscard]] bool
+    finalize(STTx const&, TER const, XRPAmount const, ReadView const&, beast::Journal const&) const;
 };
 
 }  // namespace xrpl

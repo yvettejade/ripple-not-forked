@@ -37,6 +37,17 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfMutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    if (ctx.tx.isFieldPresent(sfImmutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
+        return false;
+
+    // xls-0096 §6.1 says IssuerEncryptionKey is required to *use* confidential
+    // transfers; §12.3 / §12.4.2.3 intentionally allow enabling the flag first
+    // and uploading keys in a later MPTokenIssuanceSet (or in the same Set).
+    // Do not require keys at Create/flag-enable time.
+    if (ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) &&
+        !ctx.rules.enabled(featureConfidentialTransfer))
+        return false;
+
     return true;
 }
 
@@ -61,9 +72,17 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
         ((*mutableFlags == 0u) || ((*mutableFlags & tmfMPTokenIssuanceCreateMutableMask) != 0u)))
         return temINVALID_FLAG;
 
+    if (auto const immutableFlags = ctx.tx[~sfImmutableFlags]; immutableFlags &&
+        ((*immutableFlags == 0u) ||
+         ((*immutableFlags & tifMPTokenIssuanceCreateImmutableMask) != 0u)))
+        return temINVALID_FLAG;
+
     if (auto const fee = ctx.tx[~sfTransferFee])
     {
         if (fee > kMaxTransferFee)
+            return temBAD_TRANSFER_FEE;
+
+        if (fee > 0u && ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance))
             return temBAD_TRANSFER_FEE;
 
         // If a non-zero TransferFee is set then the tfTransferable flag
@@ -147,6 +166,9 @@ MPTokenIssuanceCreate::create(ApplyView& view, beast::Journal journal, MPTCreate
         if (args.mutableFlags)
             (*mptIssuance)[sfMutableFlags] = *args.mutableFlags;
 
+        if (args.immutableFlags)
+            (*mptIssuance)[sfImmutableFlags] = *args.immutableFlags;
+
         if (args.referenceHolding)
         {
             // Defensive: the holding must already exist and be of an
@@ -190,6 +212,7 @@ MPTokenIssuanceCreate::doApply()
             .metadata = tx[~sfMPTokenMetadata],
             .domainId = tx[~sfDomainID],
             .mutableFlags = tx[~sfMutableFlags],
+            .immutableFlags = tx[~sfImmutableFlags],
         });
     return result ? tesSUCCESS : result.error();
 }

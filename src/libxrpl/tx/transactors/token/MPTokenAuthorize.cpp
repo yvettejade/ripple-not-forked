@@ -63,6 +63,14 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
             if (!sleMpt)
                 return tecOBJECT_NOT_FOUND;
 
+            if (ctx.view.rules().enabled(featureConfidentialTransfer) &&
+                (sleMpt->isFieldPresent(sfHolderEncryptionKey) ||
+                 sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
+                 sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
+                 sleMpt->isFieldPresent(sfIssuerEncryptedBalance) ||
+                 sleMpt->isFieldPresent(sfAuditorEncryptedBalance)))
+                return tecHAS_OBLIGATIONS;
+
             if ((*sleMpt)[sfMPTAmount] != 0)
             {
                 auto const sleMptIssuance =
