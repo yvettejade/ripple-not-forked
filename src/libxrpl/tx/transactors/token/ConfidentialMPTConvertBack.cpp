@@ -321,6 +321,11 @@ ConfidentialMPTConvertBack::doApply()
     auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
     if (coa < amount)
         return tecINTERNAL;  // LCOV_EXCL_LINE
+    // SPEC INCONSISTENCY (xls-0096 §10.5 vs §10.7):
+    // §10.5 decreases only ConfidentialOutstandingAmount (COA) and increases the
+    // holder's public MPTAmount — OutstandingAmount (OA) is unchanged, which matches
+    // the OA = public + confidential invariant. §10.7's edge-case narrative incorrectly
+    // states "OA ↓". This implementation follows §10.5 and leaves OA untouched.
     // SoeDefault: ValueProxy removes the field when the value is 0.
     (*sleIssuance)[sfConfidentialOutstandingAmount] = coa - amount;
 
