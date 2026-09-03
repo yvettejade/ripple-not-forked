@@ -40,6 +40,7 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -515,6 +516,38 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             return;
         send[sfZKProof] = joinedHex(*sigma, *range);
         env(send, credentials::Ids({credentialID}), Ter(tecBAD_CREDENTIALS));
+
+        // Accepted credentials are still rejected once expired.
+        char const expiredCredentialType[] = "confidential-mpt-expired";
+        auto expiredCredentialTx =
+            credentials::create(alice, issuer, expiredCredentialType);
+        expiredCredentialTx[sfExpiration.jsonName] =
+            env.current()->header().parentCloseTime.time_since_epoch().count() + 20;
+        env(expiredCredentialTx);
+        env.close();
+        auto const expiredCredential =
+            credentials::ledgerEntry(env, alice, issuer, expiredCredentialType);
+        auto const expiredCredentialID =
+            expiredCredential[jss::result][jss::index].asString();
+        env(credentials::accept(alice, issuer, expiredCredentialType));
+        env.close();
+        env(deposit::authCredentials(bob, {{issuer, expiredCredentialType}}));
+        env.close(std::chrono::seconds{30});
+
+        sendCtx = sendContext(alice, issuanceID, env.seq(alice), bob, aliceVersion);
+        sigma = cm::proveSendSigma(sendInput, sendWitness, asSlice(sendCtx));
+        range = cm::proveAggregatedBulletproof(
+            *amountCommitment,
+            *remainderCommitment,
+            amount,
+            sendRandomness,
+            aliceBalance - amount,
+            remainderBlinding,
+            asSlice(sendCtx));
+        if (!BEAST_EXPECT(sigma && range))
+            return;
+        send[sfZKProof] = joinedHex(*sigma, *range);
+        env(send, credentials::Ids({expiredCredentialID}), Ter(tecEXPIRED));
 
         // Once accepted and preauthorized by credential type, DepositAuth allows Send.
         env(credentials::accept(alice, issuer, credentialType));
