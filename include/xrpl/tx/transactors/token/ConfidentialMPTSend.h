@@ -20,8 +20,7 @@ public:
     static constexpr std::size_t kAggregatedBulletproofBytes = 754;
 
     /** Compact sigma (192) + aggregated Bulletproof (754). */
-    static constexpr std::size_t kZKProofBytes =
-        kSendSigmaProofBytes + kAggregatedBulletproofBytes;
+    static constexpr std::size_t kZKProofBytes = kSendSigmaProofBytes + kAggregatedBulletproofBytes;
 
     explicit ConfidentialMPTSend(ApplyContext& ctx) : Transactor(ctx)
     {

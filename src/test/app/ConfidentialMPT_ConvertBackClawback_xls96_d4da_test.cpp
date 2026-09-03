@@ -19,9 +19,8 @@
 
 /** Focused preflight coverage for ConfidentialMPTConvertBack + Clawback (XLS-0096).
 
-    ConvertBack apply-path success needs a 688-byte Bulletproof verifier that is
-    intentionally not fabricated (see ConfidentialMPTConvertBack.cpp). These
-    cases cover amendment gating and preflight structural checks only.
+    ConvertBack/Clawback preflight coverage (amendment gating and field checks).
+    Range-proof verification is exercised in xrpl.crypto.ConfidentialMPT.
 */
 
 #include <test/jtx.h>
@@ -31,6 +30,7 @@
 #include <xrpl/basics/strHex.h>
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/crypto/confidential_mpt.h>
+#include <xrpl/json/json_value.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/TER.h>
@@ -42,8 +42,7 @@
 
 namespace xrpl {
 
-class ConfidentialMPT_ConvertBackClawback_xls96_d4da_test
-    : public beast::unit_test::suite
+class ConfidentialMPT_ConvertBackClawback_xls96_d4da_test : public beast::unit_test::Suite
 {
     static std::string
     hexZeros(std::size_t byteLen)
@@ -70,7 +69,15 @@ class ConfidentialMPT_ConvertBackClawback_xls96_d4da_test
         return strHex(Slice{one.data(), one.size()});
     }
 
-    static Json::Value
+    static std::string
+    validCiphertextHex()
+    {
+        // Well-formed C1||C2 for preflight parse only (not a real encryption).
+        auto const p = validPointHex();
+        return p + p;
+    }
+
+    static json::Value
     makeConvertBackJson(
         test::jtx::Account const& account,
         uint192 const& issuanceID,
@@ -78,20 +85,20 @@ class ConfidentialMPT_ConvertBackClawback_xls96_d4da_test
         std::size_t zkBytes = confidential_mpt::kConvertBackSigmaBytes +
             ConfidentialMPTConvertBack::kBulletproofBytes)
     {
-        Json::Value jv;
+        json::Value jv;
         jv[jss::TransactionType] = jss::ConfidentialMPTConvertBack;
         jv[jss::Account] = account.human();
         jv[sfMPTokenIssuanceID] = to_string(issuanceID);
-        jv[sfMPTAmount] = Json::UInt(amount);
-        jv[sfHolderEncryptedAmount] = hexZeros(confidential_mpt::kCiphertextBytes);
-        jv[sfIssuerEncryptedAmount] = hexZeros(confidential_mpt::kCiphertextBytes);
+        jv[sfMPTAmount] = json::UInt(amount);
+        jv[sfHolderEncryptedAmount] = validCiphertextHex();
+        jv[sfIssuerEncryptedAmount] = validCiphertextHex();
         jv[sfBlindingFactor] = validScalarHex();
         jv[sfBalanceCommitment] = validPointHex();
         jv[sfZKProof] = hexZeros(zkBytes);
         return jv;
     }
 
-    static Json::Value
+    static json::Value
     makeClawbackJson(
         test::jtx::Account const& issuer,
         test::jtx::Account const& holder,
@@ -99,12 +106,12 @@ class ConfidentialMPT_ConvertBackClawback_xls96_d4da_test
         std::uint64_t amount = 1,
         std::size_t zkBytes = confidential_mpt::kClawbackProofBytes)
     {
-        Json::Value jv;
+        json::Value jv;
         jv[jss::TransactionType] = jss::ConfidentialMPTClawback;
         jv[jss::Account] = issuer.human();
         jv[sfHolder] = holder.human();
         jv[sfMPTokenIssuanceID] = to_string(issuanceID);
-        jv[sfMPTAmount] = Json::UInt(amount);
+        jv[sfMPTAmount] = json::UInt(amount);
         jv[sfZKProof] = hexZeros(zkBytes);
         return jv;
     }

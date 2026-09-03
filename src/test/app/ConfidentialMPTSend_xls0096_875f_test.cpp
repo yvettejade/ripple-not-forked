@@ -19,9 +19,8 @@
 
 /** Focused preflight coverage for ConfidentialMPTSend (XLS-0096).
 
-    Full apply-path proofs require an aggregated Bulletproof verifier that is
-    not present locally (see ConfidentialMPTSend.cpp). These cases exercise
-    amendment gating and preflight field checks only.
+    Preflight coverage for amendment gating and field checks. Aggregated
+    Bulletproof prove/verify is covered in xrpl.crypto.ConfidentialMPT.
 */
 
 #include <test/jtx.h>

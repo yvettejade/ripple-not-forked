@@ -3,6 +3,7 @@
 #include <xrpl/basics/Blob.h>
 #include <xrpl/basics/Slice.h>
 #include <xrpl/crypto/confidential_mpt.h>
+#include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -15,23 +16,16 @@
 #include <xrpl/protocol/digest.h>
 #include <xrpl/tx/Transactor.h>
 
-#include <cstring>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
-#include <string_view>
 
 namespace xrpl {
 namespace {
 
 namespace cm = confidential_mpt;
-
-/*
- * Concurrent crypto (<xrpl/crypto/confidential_mpt.h>; task text: ConfidentialMPT.h):
- *   isValidCompressedPoint, parseCiphertext, ciphertextC1/C2,
- *   verifyClawback, ClawbackPublicInput, encryptZero.
- */
 
 [[nodiscard]] Slice
 asSlice(uint256 const& value)
@@ -47,29 +41,6 @@ toPoint(Slice const data)
     cm::Point point{};
     std::memcpy(point.data(), data.data(), cm::kPointBytes);
     return point;
-}
-
-[[nodiscard]] std::optional<cm::Scalar>
-toScalar(Slice const data)
-{
-    if (!cm::isValidScalar(data))
-        return std::nullopt;
-    cm::Scalar scalar{};
-    std::memcpy(scalar.data(), data.data(), cm::kScalarBytes);
-    return scalar;
-}
-
-/** Canonical EncZero for an MPT confidential balance under `pk`. */
-[[nodiscard]] std::optional<cm::Ciphertext>
-mptEncryptedZero(cm::Point const& pk, AccountID const& account, MPTID const& issuanceID)
-{
-    static constexpr std::string_view kTag = "EncZero";
-    auto const digest =
-        sha512Half(Slice{kTag.data(), kTag.size()}, account, issuanceID);
-    auto const r = toScalar(asSlice(digest));
-    if (!r)
-        return std::nullopt;
-    return cm::encryptZero(pk, *r);
 }
 
 /** TransactionContextID for Clawback (Updated_ConfidentialMPT §5.6). */
@@ -169,8 +140,7 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
         return tecINSUFFICIENT_FUNDS;
 
     auto const issuerPk = toPoint((*sleIssuance)[sfIssuerEncryptionKey]);
-    auto const issuerBal =
-        cm::parseCiphertext((*sleMpt)[sfIssuerEncryptedBalance]);
+    auto const issuerBal = cm::parseCiphertext((*sleMpt)[sfIssuerEncryptedBalance]);
     if (!issuerPk || !issuerBal)
         return tecBAD_PROOF;
 
@@ -205,8 +175,9 @@ ConfidentialMPTClawback::doApply()
     if (!holderPk || !issuerPk)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    auto const zeroHolder = mptEncryptedZero(*holderPk, holder, issuanceID);
-    auto const zeroIssuer = mptEncryptedZero(*issuerPk, holder, issuanceID);
+    auto const issuer = (*sleIssuance)[sfIssuer];
+    auto const zeroHolder = confidentialMPTEncryptedZero(*holderPk, holder, issuer, issuanceID);
+    auto const zeroIssuer = confidentialMPTEncryptedZero(*issuerPk, holder, issuer, issuanceID);
     if (!zeroHolder || !zeroIssuer)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
@@ -220,7 +191,8 @@ ConfidentialMPTClawback::doApply()
         auto const auditorPk = toPoint((*sleIssuance)[sfAuditorEncryptionKey]);
         if (!auditorPk)
             return tecINTERNAL;  // LCOV_EXCL_LINE
-        auto const zeroAuditor = mptEncryptedZero(*auditorPk, holder, issuanceID);
+        auto const zeroAuditor =
+            confidentialMPTEncryptedZero(*auditorPk, holder, issuer, issuanceID);
         if (!zeroAuditor)
             return tecINTERNAL;  // LCOV_EXCL_LINE
         sleMpt->setFieldVL(sfAuditorEncryptedBalance, makeSlice(*zeroAuditor));

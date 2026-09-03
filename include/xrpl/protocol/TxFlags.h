@@ -349,15 +349,17 @@ inline constexpr FlagValue tmfMPTCanMutateCanEscrow = lsmfMPTCanMutateCanEscrow;
 inline constexpr FlagValue tmfMPTCanMutateCanTrade = lsmfMPTCanMutateCanTrade;
 inline constexpr FlagValue tmfMPTCanMutateCanTransfer = lsmfMPTCanMutateCanTransfer;
 inline constexpr FlagValue tmfMPTCanMutateCanClawback = lsmfMPTCanMutateCanClawback;
-inline constexpr FlagValue tmfMPTCanMutateCanHoldConfidentialBalance =
-    lsmfMPTCanMutateCanHoldConfidentialBalance;
 inline constexpr FlagValue tmfMPTCanMutateMetadata = lsmfMPTCanMutateMetadata;
 inline constexpr FlagValue tmfMPTCanMutateTransferFee = lsmfMPTCanMutateTransferFee;
 inline constexpr FlagValue tmfMPTokenIssuanceCreateMutableMask =
     ~(tmfMPTCanMutateCanLock | tmfMPTCanMutateRequireAuth | tmfMPTCanMutateCanEscrow |
       tmfMPTCanMutateCanTrade | tmfMPTCanMutateCanTransfer | tmfMPTCanMutateCanClawback |
-      tmfMPTCanMutateCanHoldConfidentialBalance | tmfMPTCanMutateMetadata |
-      tmfMPTCanMutateTransferFee);
+      tmfMPTCanMutateMetadata | tmfMPTCanMutateTransferFee);
+
+// MPTokenIssuanceCreate ImmutableFlags (XLS-0096).
+inline constexpr FlagValue tifMPTCanHoldConfidentialBalance = lsifMPTCanHoldConfidentialBalance;
+inline constexpr FlagValue tifMPTokenIssuanceCreateImmutableMask =
+    ~tifMPTCanHoldConfidentialBalance;
 
 // MPTokenIssuanceSet MutableFlags:
 // Set or Clear flags.

@@ -3,6 +3,7 @@
 #include <xrpl/basics/Blob.h>
 #include <xrpl/basics/Slice.h>
 #include <xrpl/crypto/confidential_mpt.h>
+#include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -15,11 +16,10 @@
 #include <xrpl/protocol/digest.h>
 #include <xrpl/tx/Transactor.h>
 
-#include <cstring>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
-#include <string_view>
 
 namespace xrpl {
 namespace {
@@ -52,26 +52,17 @@ toScalar(Slice const data)
     return out;
 }
 
-/** Canonical EncZero under `pk` for an MPT confidential balance.
- *
- * Spec EncZero domain is Account || Issuer || Currency. MPT holder balances
- * are keyed only by MPTokenIssuanceID (no Issuer+Currency pair), so that
- * issuance ID is the token-domain input here.
- *
- * Interface assumption: preferred crypto helper would be
- * `encryptedZero(Point, AccountID, MPTID)`. Until provided, derive r via
- * SHA-512-Half and call `encryptZero`.
- */
-[[nodiscard]] std::optional<cm::Ciphertext>
-mptEncryptedZero(cm::Point const& pk, AccountID const& account, MPTID const& issuanceID)
+[[nodiscard]] uint256
+makeConvertContext(STTx const& tx)
 {
-    static constexpr std::string_view kTag = "EncZero";
-    auto const digest =
-        sha512Half(Slice{kTag.data(), kTag.size()}, account, issuanceID);
-    auto const r = toScalar(u256Slice(digest));
-    if (!r)
-        return std::nullopt;
-    return cm::encryptZero(pk, *r);
+    // The supplemental proof document requires TransactionContextID here but
+    // does not define Convert's TxSpecific component. Bind the fields common
+    // to Equation (40), including the sequence/ticket replay domain.
+    return sha512Half(
+        static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT),
+        tx.getAccountID(sfAccount),
+        tx[sfMPTokenIssuanceID],
+        tx.getSeqProxy().value());
 }
 
 [[nodiscard]] bool
@@ -100,11 +91,12 @@ creditField(
     cm::Ciphertext const& delta,
     cm::Point const& pk,
     AccountID const& account,
+    AccountID const& issuer,
     MPTID const& issuanceID)
 {
     if (!sle.isFieldPresent(field))
     {
-        auto zero = mptEncryptedZero(pk, account, issuanceID);
+        auto zero = confidentialMPTEncryptedZero(pk, account, issuer, issuanceID);
         if (!zero)
             return tecINTERNAL;  // LCOV_EXCL_LINE
         auto sum = cm::ciphertextAdd(*zero, delta);
@@ -148,7 +140,7 @@ ConfidentialMPTConvert::preflight(PreflightContext const& ctx)
 
     if (hasKey)
     {
-        auto const key = makeSlice(ctx.tx.getFieldVL(sfHolderEncryptionKey));
+        auto const key = ctx.tx[sfHolderEncryptionKey];
         if (key.size() != cm::kPointBytes || !cm::isValidCompressedPoint(key))
             return temMALFORMED;
         if (ctx.tx.getFieldVL(sfZKProof).size() != cm::kKeyRegProofBytes)
@@ -224,8 +216,8 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (!hasTxKey && !hasRegisteredKey)
         return tecNO_PERMISSION;
 
-    auto const holderKey = hasTxKey ? makeSlice(ctx.tx.getFieldVL(sfHolderEncryptionKey))
-                                    : makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey));
+    auto const holderKey =
+        hasTxKey ? ctx.tx[sfHolderEncryptionKey] : (*sleMpt)[sfHolderEncryptionKey];
     auto const holderPk = toPoint(holderKey);
     auto const issuerPk = toPoint(makeSlice(sleIssuance->getFieldVL(sfIssuerEncryptionKey)));
     if (!holderPk)
@@ -253,18 +245,12 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
 
     if (auditorPk &&
         !amountCiphertextValid(
-            *auditorPk,
-            makeSlice(ctx.tx.getFieldVL(sfAuditorEncryptedAmount)),
-            amount,
-            *blinding))
+            *auditorPk, makeSlice(ctx.tx.getFieldVL(sfAuditorEncryptedAmount)), amount, *blinding))
         return tecBAD_PROOF;
 
     if (hasTxKey)
     {
-        auto const context = sha512Half(
-            Slice{cm::kDomainKeyReg.data(), cm::kDomainKeyReg.size()},
-            account,
-            issuanceID);
+        auto const context = makeConvertContext(ctx.tx);
         if (!cm::verifyKeyRegistration(
                 *holderPk, makeSlice(ctx.tx.getFieldVL(sfZKProof)), u256Slice(context)))
             return tecBAD_PROOF;
@@ -288,14 +274,15 @@ ConfidentialMPTConvert::doApply()
 
     if (account == (*sleIssuance)[sfIssuer])
         return tefINTERNAL;  // LCOV_EXCL_LINE
+    auto const issuer = (*sleIssuance)[sfIssuer];
 
     bool const initializing = !sleMpt->isFieldPresent(sfConfidentialBalanceSpending) &&
         !sleMpt->isFieldPresent(sfConfidentialBalanceInbox) &&
         !sleMpt->isFieldPresent(sfIssuerEncryptedBalance);
 
     auto const holderKey = tx.isFieldPresent(sfHolderEncryptionKey)
-        ? makeSlice(tx.getFieldVL(sfHolderEncryptionKey))
-        : makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey));
+        ? tx[sfHolderEncryptionKey]
+        : (*sleMpt)[sfHolderEncryptionKey];
     auto const holderPk = toPoint(holderKey);
     auto const issuerPk = toPoint(makeSlice(sleIssuance->getFieldVL(sfIssuerEncryptionKey)));
     auto const holderDelta = cm::parseCiphertext(makeSlice(tx.getFieldVL(sfHolderEncryptedAmount)));
@@ -308,7 +295,7 @@ ConfidentialMPTConvert::doApply()
 
     if (initializing)
     {
-        auto spendingZero = mptEncryptedZero(*holderPk, account, issuanceID);
+        auto spendingZero = confidentialMPTEncryptedZero(*holderPk, account, issuer, issuanceID);
         if (!spendingZero)
             return tecINTERNAL;  // LCOV_EXCL_LINE
         sleMpt->setFieldVL(sfConfidentialBalanceSpending, makeSlice(*spendingZero));
@@ -321,19 +308,25 @@ ConfidentialMPTConvert::doApply()
             *holderDelta,
             *holderPk,
             account,
+            issuer,
             issuanceID);
         !isTesSuccess(ter))
         return ter;
 
     if (auto const ter = creditField(
-            *sleMpt, sfIssuerEncryptedBalance, *issuerDelta, *issuerPk, account, issuanceID);
+            *sleMpt,
+            sfIssuerEncryptedBalance,
+            *issuerDelta,
+            *issuerPk,
+            account,
+            issuer,
+            issuanceID);
         !isTesSuccess(ter))
         return ter;
 
     if (tx.isFieldPresent(sfAuditorEncryptedAmount))
     {
-        auto const auditorPk =
-            toPoint(makeSlice(sleIssuance->getFieldVL(sfAuditorEncryptionKey)));
+        auto const auditorPk = toPoint(makeSlice(sleIssuance->getFieldVL(sfAuditorEncryptionKey)));
         auto const auditorDelta =
             cm::parseCiphertext(makeSlice(tx.getFieldVL(sfAuditorEncryptedAmount)));
         if (!auditorPk || !auditorDelta)
@@ -344,6 +337,7 @@ ConfidentialMPTConvert::doApply()
                 *auditorDelta,
                 *auditorPk,
                 account,
+                issuer,
                 issuanceID);
             !isTesSuccess(ter))
             return ter;
@@ -354,7 +348,7 @@ ConfidentialMPTConvert::doApply()
         return tecINTERNAL;  // LCOV_EXCL_LINE
     sleMpt->setFieldU64(sfMPTAmount, publicBalance - amount);
 
-    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].value_or(0);
+    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
     if (coa > kMaxMpTokenAmount - amount)
         return tecINTERNAL;  // LCOV_EXCL_LINE
     sleIssuance->setFieldU64(sfConfidentialOutstandingAmount, coa + amount);

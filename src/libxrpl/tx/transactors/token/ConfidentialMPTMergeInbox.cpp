@@ -3,6 +3,7 @@
 #include <xrpl/basics/Blob.h>
 #include <xrpl/basics/Slice.h>
 #include <xrpl/crypto/confidential_mpt.h>
+#include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -11,26 +12,18 @@
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/protocol/TER.h>
 #include <xrpl/protocol/TxFlags.h>
-#include <xrpl/protocol/digest.h>
 #include <xrpl/tx/Transactor.h>
 
-#include <cstring>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
-#include <string_view>
 
 namespace xrpl {
 namespace {
 
 namespace cm = confidential_mpt;
-
-[[nodiscard]] Slice
-u256Slice(uint256 const& value)
-{
-    return Slice{value.data(), value.size()};
-}
 
 [[nodiscard]] std::optional<cm::Point>
 toPoint(Slice const data)
@@ -40,38 +33,6 @@ toPoint(Slice const data)
     cm::Point out{};
     std::memcpy(out.data(), data.data(), cm::kPointBytes);
     return out;
-}
-
-[[nodiscard]] std::optional<cm::Scalar>
-toScalar(Slice const data)
-{
-    if (!cm::isValidScalar(data))
-        return std::nullopt;
-    cm::Scalar out{};
-    std::memcpy(out.data(), data.data(), cm::kScalarBytes);
-    return out;
-}
-
-/** Canonical EncZero under `pk` for an MPT confidential balance.
- *
- * Spec EncZero domain is Account || Issuer || Currency. MPT holder balances
- * are keyed only by MPTokenIssuanceID (no Issuer+Currency pair), so that
- * issuance ID is the token-domain input here.
- *
- * Interface assumption: preferred crypto helper would be
- * `encryptedZero(Point, AccountID, MPTID)`. Until provided, derive r via
- * SHA-512-Half and call `encryptZero`.
- */
-[[nodiscard]] std::optional<cm::Ciphertext>
-mptEncryptedZero(cm::Point const& pk, AccountID const& account, MPTID const& issuanceID)
-{
-    static constexpr std::string_view kTag = "EncZero";
-    auto const digest =
-        sha512Half(Slice{kTag.data(), kTag.size()}, account, issuanceID);
-    auto const r = toScalar(u256Slice(digest));
-    if (!r)
-        return std::nullopt;
-    return cm::encryptZero(pk, *r);
 }
 
 }  // namespace
@@ -157,8 +118,7 @@ ConfidentialMPTMergeInbox::doApply()
 
     auto const holderPk = toPoint((*sleMpt)[sfHolderEncryptionKey]);
     auto const inbox = cm::parseCiphertext((*sleMpt)[sfConfidentialBalanceInbox]);
-    auto const spending =
-        cm::parseCiphertext((*sleMpt)[sfConfidentialBalanceSpending]);
+    auto const spending = cm::parseCiphertext((*sleMpt)[sfConfidentialBalanceSpending]);
     if (!holderPk || !inbox || !spending)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
@@ -168,7 +128,8 @@ ConfidentialMPTMergeInbox::doApply()
     if (!merged)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    auto const resetInbox = mptEncryptedZero(*holderPk, account, issuanceID);
+    auto const resetInbox =
+        confidentialMPTEncryptedZero(*holderPk, account, (*sleIssuance)[sfIssuer], issuanceID);
     if (!resetInbox)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 

@@ -1,6 +1,3 @@
-#include <xrpl/protocol_autogen/transactions/ConfidentialMPTConvert.h>
-#include <xrpl/protocol_autogen/transactions/ConfidentialMPTMergeInbox.h>
-
 #include <xrpl/basics/Blob.h>
 #include <xrpl/basics/base_uint.h>
 #include <xrpl/beast/utility/Zero.h>
@@ -9,6 +6,8 @@
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/TER.h>
 #include <xrpl/protocol/TxFlags.h>
+#include <xrpl/protocol_autogen/transactions/ConfidentialMPTConvert.h>
+#include <xrpl/protocol_autogen/transactions/ConfidentialMPTMergeInbox.h>
 
 #include <gtest/gtest.h>
 #include <helpers/Account.h>
@@ -45,12 +44,7 @@ TEST(ConfidentialMPTConvertMergeInbox_Xls0096_Preflight_7f3a, ConvertKeyWithoutP
 
     Blob const ct = filled(confidential_mpt::kCiphertextBytes);
     transactions::ConfidentialMPTConvertBuilder builder{
-        alice,
-        uint192(1),
-        std::uint64_t{1},
-        ct,
-        ct,
-        nonzeroScalar()};
+        alice, uint192(1), std::uint64_t{1}, ct, ct, nonzeroScalar()};
     builder.setHolderEncryptionKey(filled(confidential_mpt::kPointBytes, 0x03));
     // sfZKProof intentionally omitted.
 

@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -78,30 +79,23 @@ makeSendTransactionContext(STTx const& tx, std::uint32_t cbsVersion)
 }
 
 /**
- * BLOCKER: No local aggregated Bulletproof range-proof verifier exists.
- *
- * `xrpl/crypto/confidential_mpt.h` intentionally does not validate range-proof
- * bytes (`ProofPrefixView::rangeProof` is returned untouched). There is no
- * `verifyAggregatedSendBulletproof` (or equivalent) in this tree, and this
- * transactor must not fake Bulletproof acceptance.
- *
- * Assumed future signature (not present):
- *   bool verifyAggregatedSendBulletproof(
- *       Point const& amountCommitment,
- *       Point const& remainderCommitment,  // PC_b - PC_m
- *       Slice rangeProof754) noexcept;
- *
- * Until that verifier exists, Send proofs always fail closed with tecBAD_PROOF.
+ * Aggregated Bulletproof over PC_m and PC_rem = PC_b - PC_m (754 bytes).
+ * Context is the same TransactionContextID used for the compact sigma proof.
  */
 [[nodiscard]] bool
 verifySendAggregatedBulletproof(
-    Point const& /*amountCommitment*/,
-    Point const& /*balanceCommitment*/,
-    Slice rangeProof) noexcept
+    Point const& amountCommitment,
+    Point const& balanceCommitment,
+    Slice rangeProof,
+    Slice context) noexcept
 {
     if (rangeProof.size() != ConfidentialMPTSend::kAggregatedBulletproofBytes)
         return false;
-    return false;
+    auto const rem = confidential_mpt::pointSub(balanceCommitment, amountCommitment);
+    if (!rem)
+        return false;
+    return confidential_mpt::verifyAggregatedBulletproof(
+        amountCommitment, *rem, rangeProof, context);
 }
 
 struct ParsedSendCrypto
@@ -209,8 +203,8 @@ verifySendProofsWithDestKey(
         return fail;
     }
 
-    auto const spending = confidential_mpt::parseCiphertext(
-        sleSenderMpt[sfConfidentialBalanceSpending]);
+    auto const spending =
+        confidential_mpt::parseCiphertext(sleSenderMpt[sfConfidentialBalanceSpending]);
     if (!spending)
     {
         JLOG(j.trace()) << "ConfidentialMPTSend: invalid spending balance ciphertext";
@@ -247,10 +241,9 @@ verifySendProofsWithDestKey(
     }
 
     if (!verifySendAggregatedBulletproof(
-            crypto.amountCommitment, crypto.balanceCommitment, crypto.rangeProof))
+            crypto.amountCommitment, crypto.balanceCommitment, crypto.rangeProof, toSlice(context)))
     {
-        JLOG(j.trace()) << "ConfidentialMPTSend: aggregated Bulletproof verification unavailable "
-                           "or failed (fail-closed)";
+        JLOG(j.trace()) << "ConfidentialMPTSend: aggregated Bulletproof verification failed";
         fail.ok = false;
         return fail;
     }
@@ -506,17 +499,15 @@ ConfidentialMPTSend::doApply()
 
     // --- Sender: debit spending + issuer (and auditor) mirrors; bump version ---
     {
-        auto const spending = confidential_mpt::parseCiphertext(
-            (*sleSenderMpt)[sfConfidentialBalanceSpending]);
+        auto const spending =
+            confidential_mpt::parseCiphertext((*sleSenderMpt)[sfConfidentialBalanceSpending]);
         auto const issuerBal =
             confidential_mpt::parseCiphertext((*sleSenderMpt)[sfIssuerEncryptedBalance]);
         if (!spending || !issuerBal)
             return tecBAD_PROOF;
 
-        auto const newSpending =
-            confidential_mpt::ciphertextSub(*spending, parsed->senderAmount);
-        auto const newIssuerBal =
-            confidential_mpt::ciphertextSub(*issuerBal, parsed->issuerAmount);
+        auto const newSpending = confidential_mpt::ciphertextSub(*spending, parsed->senderAmount);
+        auto const newIssuerBal = confidential_mpt::ciphertextSub(*issuerBal, parsed->issuerAmount);
         if (!newSpending || !newIssuerBal)
             return tecBAD_PROOF;
 
@@ -525,8 +516,8 @@ ConfidentialMPTSend::doApply()
 
         if (hasAuditorKey)
         {
-            auto const auditorBal = confidential_mpt::parseCiphertext(
-                (*sleSenderMpt)[sfAuditorEncryptedBalance]);
+            auto const auditorBal =
+                confidential_mpt::parseCiphertext((*sleSenderMpt)[sfAuditorEncryptedBalance]);
             if (!auditorBal || !parsed->auditorAmount)
                 return tecBAD_PROOF;
             auto const newAuditorBal =
@@ -537,7 +528,9 @@ ConfidentialMPTSend::doApply()
         }
 
         auto const version = sleSenderMpt->getFieldU32(sfConfidentialBalanceVersion);
-        sleSenderMpt->setFieldU32(sfConfidentialBalanceVersion, version + 1);
+        sleSenderMpt->setFieldU32(
+            sfConfidentialBalanceVersion,
+            version == std::numeric_limits<std::uint32_t>::max() ? 0 : version + 1);
         view().update(sleSenderMpt);
     }
 
@@ -578,8 +571,8 @@ ConfidentialMPTSend::doApply()
 
         if (hasAuditorKey)
         {
-            auto const auditorBal = confidential_mpt::parseCiphertext(
-                (*sleDestMpt)[sfAuditorEncryptedBalance]);
+            auto const auditorBal =
+                confidential_mpt::parseCiphertext((*sleDestMpt)[sfAuditorEncryptedBalance]);
             if (!auditorBal || !parsed->auditorAmount || !auditorPk)
                 return tecBAD_PROOF;
             auto const creditedAuditor =

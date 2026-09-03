@@ -37,9 +37,11 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfMutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    if (ctx.tx.isFieldPresent(sfImmutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
+        return false;
+
     if (ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) &&
-        !(ctx.rules.enabled(featureConfidentialTransfer) &&
-          ctx.rules.enabled(featureDynamicMPT)))
+        !ctx.rules.enabled(featureConfidentialTransfer))
         return false;
 
     return true;
@@ -64,6 +66,11 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
     // specified.
     if (auto const mutableFlags = ctx.tx[~sfMutableFlags]; mutableFlags &&
         ((*mutableFlags == 0u) || ((*mutableFlags & tmfMPTokenIssuanceCreateMutableMask) != 0u)))
+        return temINVALID_FLAG;
+
+    if (auto const immutableFlags = ctx.tx[~sfImmutableFlags]; immutableFlags &&
+        ((*immutableFlags == 0u) ||
+         ((*immutableFlags & tifMPTokenIssuanceCreateImmutableMask) != 0u)))
         return temINVALID_FLAG;
 
     if (auto const fee = ctx.tx[~sfTransferFee])
@@ -155,6 +162,9 @@ MPTokenIssuanceCreate::create(ApplyView& view, beast::Journal journal, MPTCreate
         if (args.mutableFlags)
             (*mptIssuance)[sfMutableFlags] = *args.mutableFlags;
 
+        if (args.immutableFlags)
+            (*mptIssuance)[sfImmutableFlags] = *args.immutableFlags;
+
         if (args.referenceHolding)
         {
             // Defensive: the holding must already exist and be of an
@@ -198,6 +208,7 @@ MPTokenIssuanceCreate::doApply()
             .metadata = tx[~sfMPTokenMetadata],
             .domainId = tx[~sfDomainID],
             .mutableFlags = tx[~sfMutableFlags],
+            .immutableFlags = tx[~sfImmutableFlags],
         });
     return result ? tesSUCCESS : result.error();
 }

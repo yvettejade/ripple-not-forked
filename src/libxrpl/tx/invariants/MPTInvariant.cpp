@@ -460,19 +460,15 @@ ValidMPTPayment::finalize(
             (void)id;
             static constexpr auto kIBefore = static_cast<std::size_t>(Order::Before);
             static constexpr auto kIAfter = static_cast<std::size_t>(Order::After);
-            auto const confidentialDelta =
-                data.confidential[kIAfter] - data.confidential[kIBefore];
+            auto const confidentialDelta = data.confidential[kIAfter] - data.confidential[kIBefore];
             bool const addOverflows =
-                (data.mptAmount > 0 &&
-                 data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
+                (data.mptAmount > 0 && data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
                 (data.mptAmount < 0 &&
                  data.outstanding[kIBefore] < (-signedMax - data.mptAmount)) ||
                 (confidentialDelta > 0 &&
-                 data.outstanding[kIBefore] + data.mptAmount >
-                     (signedMax - confidentialDelta)) ||
+                 data.outstanding[kIBefore] + data.mptAmount > (signedMax - confidentialDelta)) ||
                 (confidentialDelta < 0 &&
-                 data.outstanding[kIBefore] + data.mptAmount <
-                     (-signedMax - confidentialDelta));
+                 data.outstanding[kIBefore] + data.mptAmount < (-signedMax - confidentialDelta));
             if (addOverflows ||
                 data.outstanding[kIAfter] !=
                     (data.outstanding[kIBefore] + data.mptAmount + confidentialDelta))
@@ -654,13 +650,11 @@ ValidConfidentialMPT::visitEntry(
         state.confidentialDelta +=
             static_cast<std::int64_t>(value(afterSle, sfConfidentialOutstandingAmount)) -
             static_cast<std::int64_t>(value(beforeSle, sfConfidentialOutstandingAmount));
-        state.outstandingDelta +=
-            static_cast<std::int64_t>(value(afterSle, sfOutstandingAmount)) -
+        state.outstandingDelta += static_cast<std::int64_t>(value(afterSle, sfOutstandingAmount)) -
             static_cast<std::int64_t>(value(beforeSle, sfOutstandingAmount));
 
         if (afterSle &&
-            value(afterSle, sfConfidentialOutstandingAmount) >
-                value(afterSle, sfOutstandingAmount))
+            value(afterSle, sfConfidentialOutstandingAmount) > value(afterSle, sfOutstandingAmount))
             invalid_ = true;
         return;
     }
@@ -669,16 +663,16 @@ ValidConfidentialMPT::visitEntry(
         return;
 
     auto const id = (*observed)[sfMPTokenIssuanceID];
-    state_[id].publicDelta +=
-        static_cast<std::int64_t>(value(afterSle, sfMPTAmount)) -
+    state_[id].publicDelta += static_cast<std::int64_t>(value(afterSle, sfMPTAmount)) -
         static_cast<std::int64_t>(value(beforeSle, sfMPTAmount));
 
     auto const hasConfidentialState = [](SLE const* sle) {
-        return sle && (sle->isFieldPresent(sfHolderEncryptionKey) ||
-                       sle->isFieldPresent(sfConfidentialBalanceSpending) ||
-                       sle->isFieldPresent(sfConfidentialBalanceInbox) ||
-                       sle->isFieldPresent(sfIssuerEncryptedBalance) ||
-                       sle->isFieldPresent(sfAuditorEncryptedBalance));
+        return sle &&
+            (sle->isFieldPresent(sfHolderEncryptionKey) ||
+             sle->isFieldPresent(sfConfidentialBalanceSpending) ||
+             sle->isFieldPresent(sfConfidentialBalanceInbox) ||
+             sle->isFieldPresent(sfIssuerEncryptedBalance) ||
+             sle->isFieldPresent(sfAuditorEncryptedBalance));
     };
     if (isDelete && hasConfidentialState(observed))
         invalid_ = true;
@@ -695,8 +689,8 @@ ValidConfidentialMPT::visitEntry(
     if (hasConfidentialState(afterSle))
         confidentialHoldings_.emplace_back(id, (*afterSle)[sfAccount]);
 
-    bool const spendingChanged =
-        beforeSle && beforeSle->isFieldPresent(sfConfidentialBalanceSpending) &&
+    bool const spendingChanged = beforeSle &&
+        beforeSle->isFieldPresent(sfConfidentialBalanceSpending) &&
         (!hasSpending ||
          beforeSle->getFieldVL(sfConfidentialBalanceSpending) !=
              afterSle->getFieldVL(sfConfidentialBalanceSpending));
@@ -741,8 +735,7 @@ ValidConfidentialMPT::finalize(
         {
             case ttCONFIDENTIAL_MPT_CONVERT:
             case ttCONFIDENTIAL_MPT_CONVERT_BACK:
-                if (state.outstandingDelta != 0 ||
-                    state.confidentialDelta != -state.publicDelta)
+                if (state.outstandingDelta != 0 || state.confidentialDelta != -state.publicDelta)
                 {
                     JLOG(j.fatal()) << "Invariant failed: invalid confidential conversion";
                     return false;

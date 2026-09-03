@@ -65,6 +65,7 @@ words:
   - Btrfs
   - Buildx
   - canonicality
+  - Chaum
   - changespq
   - checkme
   - choco
@@ -118,6 +119,7 @@ words:
   - funclets
   - gcov
   - gcovr
+  - Gamal
   - ghead
   - Gnutella
   - godexsoft
@@ -212,6 +214,7 @@ words:
   - partitioner
   - paychan
   - paychans
+  - Pedersen
   - permdex
   - perminute
   - permissioned
@@ -233,6 +236,8 @@ words:
   - queuable
   - Raphson
   - replayer
+  - rerand
+  - rerandomize
   - rerere
   - retriable
   - RIPD
@@ -249,6 +254,7 @@ words:
   - sahyadri
   - Satoshi
   - scons
+  - Schnorr
   - secp
   - sendq
   - seqit

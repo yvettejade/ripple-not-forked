@@ -70,6 +70,10 @@ isValidCompressedPoint(Slice data) noexcept;
 [[nodiscard]] bool
 isValidScalar(Slice data) noexcept;
 
+/** Reduce a 32-byte big-endian integer modulo the secp256k1 group order. */
+[[nodiscard]] std::optional<Scalar>
+reduceScalar(Slice data) noexcept;
+
 //------------------------------------------------------------------------------
 // Ciphertext parse / serialize
 //------------------------------------------------------------------------------
@@ -123,11 +127,7 @@ pedersenCommit(std::uint64_t m, Scalar const& r) noexcept;
 encryptAmount(Point const& pk, std::uint64_t m, Scalar const& r) noexcept;
 
 [[nodiscard]] bool
-verifyCiphertext(
-    Point const& pk,
-    Ciphertext const& ct,
-    std::uint64_t m,
-    Scalar const& r) noexcept;
+verifyCiphertext(Point const& pk, Ciphertext const& ct, std::uint64_t m, Scalar const& r) noexcept;
 
 //------------------------------------------------------------------------------
 // Homomorphic ciphertext ops / zero re-randomization
@@ -144,8 +144,7 @@ encryptZero(Point const& pk, Scalar const& r) noexcept;
 
 /** Homomorphically add Enc_pk(0; e) (Send inbox re-randomization). */
 [[nodiscard]] std::optional<Ciphertext>
-rerandomizeWithScalar(Ciphertext const& ct, Point const& pk, Scalar const& e)
-    noexcept;
+rerandomizeWithScalar(Ciphertext const& ct, Point const& pk, Scalar const& e) noexcept;
 
 //------------------------------------------------------------------------------
 // Proof-prefix split (range bytes verified by Bulletproof APIs below)
@@ -211,8 +210,7 @@ struct SendVerifyResult
 };
 
 [[nodiscard]] std::optional<std::array<std::uint8_t, kSendSigmaBytes>>
-proveSendSigma(SendPublicInput const& x, SendWitness const& w, Slice context)
-    noexcept;
+proveSendSigma(SendPublicInput const& x, SendWitness const& w, Slice context) noexcept;
 
 [[nodiscard]] SendVerifyResult
 verifySendSigma(SendPublicInput const& x, Slice proof, Slice context) noexcept;
@@ -243,10 +241,7 @@ proveConvertBackSigma(
     Slice context) noexcept;
 
 [[nodiscard]] bool
-verifyConvertBackSigma(
-    ConvertBackPublicInput const& x,
-    Slice proof,
-    Slice context) noexcept;
+verifyConvertBackSigma(ConvertBackPublicInput const& x, Slice proof, Slice context) noexcept;
 
 //------------------------------------------------------------------------------
 // Clawback compact Chaum–Pedersen — 64 bytes
@@ -261,8 +256,7 @@ struct ClawbackPublicInput
 };
 
 [[nodiscard]] std::optional<std::array<std::uint8_t, kClawbackProofBytes>>
-proveClawback(ClawbackPublicInput const& x, Scalar const& issuerSk, Slice context)
-    noexcept;
+proveClawback(ClawbackPublicInput const& x, Scalar const& issuerSk, Slice context) noexcept;
 
 [[nodiscard]] bool
 verifyClawback(ClawbackPublicInput const& x, Slice proof, Slice context) noexcept;
@@ -297,8 +291,7 @@ proveSingleBulletproof(
     Slice context) noexcept;
 
 [[nodiscard]] bool
-verifySingleBulletproof(Point const& commitment, Slice proof, Slice context)
-    noexcept;
+verifySingleBulletproof(Point const& commitment, Slice proof, Slice context) noexcept;
 
 /**
  * Prove 0 <= v0,v1 < 2^64 for V0 = v0·G + b0·H and V1 = v1·G + b1·H

@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -379,6 +380,92 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         expect(h1 == h2);
     }
 
+    void
+    testSingleBulletproof()
+    {
+        testcase("single 64-bit bulletproof");
+
+        std::string const ctx = "cb-bp-ctx";
+        auto check = [&](std::uint64_t rem) {
+            Scalar const rho = randScalar();
+            auto const PCrem = pedersenCommit(rem, rho);
+            expect(static_cast<bool>(PCrem));
+            auto const proof = proveSingleBulletproof(*PCrem, rem, rho, makeSlice(ctx));
+            expect(static_cast<bool>(proof));
+            expect(proof->size() == kSingleBulletproofBytes);
+            expect(proof->size() == 688);
+            expect(verifySingleBulletproof(*PCrem, makeSlice(*proof), makeSlice(ctx)));
+
+            // wrong context
+            expect(!verifySingleBulletproof(
+                *PCrem, makeSlice(*proof), makeSlice(std::string{"other"})));
+
+            // wrong commitment
+            auto const other = pedersenCommit(rem ^ 1ull, rho);
+            expect(static_cast<bool>(other));
+            expect(!verifySingleBulletproof(*other, makeSlice(*proof), makeSlice(ctx)));
+
+            // tamper one byte in a point region and a scalar region
+            auto tamp = *proof;
+            tamp[10] ^= 0x01;
+            expect(!verifySingleBulletproof(*PCrem, makeSlice(tamp), makeSlice(ctx)));
+            tamp = *proof;
+            tamp[16 * kPointBytes + 3] ^= 0x01;
+            expect(!verifySingleBulletproof(*PCrem, makeSlice(tamp), makeSlice(ctx)));
+
+            // wrong size
+            expect(!verifySingleBulletproof(
+                *PCrem, Slice{proof->data(), proof->size() - 1}, makeSlice(ctx)));
+        };
+
+        check(0);
+        check(1);
+        check(42);
+        check(std::numeric_limits<std::uint64_t>::max());
+    }
+
+    void
+    testAggregatedBulletproof()
+    {
+        testcase("aggregated two-value 64-bit bulletproof");
+
+        std::string const ctx = "send-bp-ctx";
+        auto check = [&](std::uint64_t amount, std::uint64_t rem) {
+            Scalar const r = randScalar();
+            Scalar const remBlind = randScalar();
+            auto const PCm = pedersenCommit(amount, r);
+            auto const PCrem = pedersenCommit(rem, remBlind);
+            expect(static_cast<bool>(PCm));
+            expect(static_cast<bool>(PCrem));
+
+            auto const proof =
+                proveAggregatedBulletproof(*PCm, *PCrem, amount, r, rem, remBlind, makeSlice(ctx));
+            expect(static_cast<bool>(proof));
+            expect(proof->size() == kAggregatedBulletproofBytes);
+            expect(proof->size() == 754);
+            expect(verifyAggregatedBulletproof(*PCm, *PCrem, makeSlice(*proof), makeSlice(ctx)));
+
+            expect(!verifyAggregatedBulletproof(
+                *PCm, *PCrem, makeSlice(*proof), makeSlice(std::string{"nope"})));
+
+            // swapped commitments
+            expect(!verifyAggregatedBulletproof(*PCrem, *PCm, makeSlice(*proof), makeSlice(ctx)));
+
+            auto tamp = *proof;
+            tamp[40] ^= 0xff;
+            expect(!verifyAggregatedBulletproof(*PCm, *PCrem, makeSlice(tamp), makeSlice(ctx)));
+
+            expect(!verifyAggregatedBulletproof(
+                *PCm, *PCrem, Slice{proof->data(), 700}, makeSlice(ctx)));
+        };
+
+        check(0, 0);
+        check(0, 99);
+        check(1, 0);
+        check(100, 400);
+        check(std::numeric_limits<std::uint64_t>::max(), std::numeric_limits<std::uint64_t>::max());
+    }
+
 public:
     void
     run() override
@@ -391,6 +478,8 @@ public:
         testConvertBackSigma();
         testClawback();
         testPedersenH();
+        testSingleBulletproof();
+        testAggregatedBulletproof();
     }
 };
 
