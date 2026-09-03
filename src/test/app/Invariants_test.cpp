@@ -4593,6 +4593,7 @@ class Invariants_test : public beast::unit_test::Suite
         // Changing the spending ciphertext without advancing its version is
         // invalid (xls-0096 §7.4).
         {
+            testcase << "Confidential MPT spending version";
             MPTID id;
             doInvariantCheck(
                 {{"invalid Confidential MPT ledger state"}},
@@ -4652,6 +4653,7 @@ class Invariants_test : public beast::unit_test::Suite
         // A confidentially initialized MPToken cannot be deleted (xls-0096
         // §7.4), even when its encrypted balance represents zero.
         {
+            testcase << "Confidential MPT initialized delete";
             MPTID id;
             doInvariantCheck(
                 {{"invalid Confidential MPT ledger state"}},
@@ -4710,6 +4712,8 @@ class Invariants_test : public beast::unit_test::Suite
         for (auto const txType :
              {ttCONFIDENTIAL_MPT_SEND, ttCONFIDENTIAL_MPT_MERGE_INBOX})
         {
+            testcase << "Confidential MPT supply neutrality "
+                     << static_cast<std::uint16_t>(txType);
             doInvariantCheck(
                 {{"confidential transfer changed supply"}},
                 [](Account const& a1, Account const&, ApplyContext& ac) {
