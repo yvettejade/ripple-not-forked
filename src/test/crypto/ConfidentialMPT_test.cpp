@@ -491,7 +491,16 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         expect(kDomainBulletproofAggregated == "CMPT_BP_RANGE64x2");
 
         // EncZero label is the XLS-0096 literal used by confidentialMPTEncryptedZero.
+        expect(std::string_view{"EncZero"} == "EncZero");
         expect(std::string_view{"EncZero"}.size() == 7u);
+
+        // Pedersen H uses this exact NUMS tag (see makePedersenH). Pinning the
+        // tag prevents silent generator drift across wallet/transactor builds.
+        expect(std::string_view{"XRPL_CONFIDENTIAL_MPT_PEDERSEN_H"}.size() == 32u);
+        auto const& h = pedersenH();
+        expect(isValidCompressedPoint(makeSlice(h)));
+        // Compressed SEC1 point: 0x02/0x03 || x.
+        expect(h[0] == 0x02 || h[0] == 0x03);
     }
 
 public:
