@@ -3469,15 +3469,16 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
                 scalar(5),
                 env.seq(bob)));
 
-            // Peek+update avoids SLE copy/applyTemplate, which throws if an
-            // explicit default TransferFee(0) is present on the source SLE.
+            // Mutate in place: SLE copy/applyTemplate throws if TransferFee is
+            // an explicit default (0). Clear then set non-zero.
             BEAST_EXPECT(env.app().getOpenLedger().modify(
                 [&](OpenView& view, beast::Journal) {
                     auto sle = view.peek(keylet::mptIssuance(issuanceID));
                     if (!sle)
                         return false;
+                    if (sle->isFieldPresent(sfTransferFee))
+                        sle->makeFieldAbsent(sfTransferFee);
                     sle->setFieldU16(sfTransferFee, 1);
-                    view.update(sle);
                     return true;
                 }));
 
