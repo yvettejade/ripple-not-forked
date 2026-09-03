@@ -133,9 +133,9 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
     if (sleMpt->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
         return tecLOCKED;
 
-    if (!cm::parseCiphertext(makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceInbox))) ||
-        !cm::parseCiphertext(makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending))) ||
-        !cm::isValidCompressedPoint(makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey))))
+    if (!cm::parseCiphertext((*sleMpt)[sfConfidentialBalanceInbox]) ||
+        !cm::parseCiphertext((*sleMpt)[sfConfidentialBalanceSpending]) ||
+        !cm::isValidCompressedPoint((*sleMpt)[sfHolderEncryptionKey]))
         return tecNO_PERMISSION;
 
     return tesSUCCESS;
@@ -155,11 +155,10 @@ ConfidentialMPTMergeInbox::doApply()
     if (account == (*sleIssuance)[sfIssuer])
         return tefINTERNAL;  // LCOV_EXCL_LINE
 
-    auto const holderPk = toPoint(makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey)));
-    auto const inbox =
-        cm::parseCiphertext(makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceInbox)));
+    auto const holderPk = toPoint((*sleMpt)[sfHolderEncryptionKey]);
+    auto const inbox = cm::parseCiphertext((*sleMpt)[sfConfidentialBalanceInbox]);
     auto const spending =
-        cm::parseCiphertext(makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)));
+        cm::parseCiphertext((*sleMpt)[sfConfidentialBalanceSpending]);
     if (!holderPk || !inbox || !spending)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
@@ -176,7 +175,7 @@ ConfidentialMPTMergeInbox::doApply()
     sleMpt->setFieldVL(sfConfidentialBalanceSpending, makeSlice(*merged));
     sleMpt->setFieldVL(sfConfidentialBalanceInbox, makeSlice(*resetInbox));
 
-    auto const version = (*sleMpt)[~sfConfidentialBalanceVersion].value_or(0);
+    auto const version = (*sleMpt)[~sfConfidentialBalanceVersion].valueOr(0);
     sleMpt->setFieldU32(
         sfConfidentialBalanceVersion,
         version == std::numeric_limits<std::uint32_t>::max() ? 0 : version + 1);

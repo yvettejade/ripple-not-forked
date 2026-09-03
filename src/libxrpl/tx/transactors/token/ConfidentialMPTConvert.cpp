@@ -114,7 +114,10 @@ creditField(
         return tesSUCCESS;
     }
 
-    auto const existing = cm::parseCiphertext(makeSlice(sle.getFieldVL(field)));
+    // Keep Blob alive: getFieldVL returns a temporary; makeSlice of that
+    // temporary must not outlive the Blob that owns the bytes.
+    Blob const existingBlob = sle.getFieldVL(field);
+    auto const existing = cm::parseCiphertext(makeSlice(existingBlob));
     if (!existing)
         return tecINTERNAL;  // LCOV_EXCL_LINE
     auto const sum = cm::ciphertextAdd(*existing, delta);

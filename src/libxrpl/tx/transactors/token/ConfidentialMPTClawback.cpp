@@ -64,7 +64,8 @@ toScalar(Slice const data)
 mptEncryptedZero(cm::Point const& pk, AccountID const& account, MPTID const& issuanceID)
 {
     static constexpr std::string_view kTag = "EncZero";
-    auto const digest = sha512Half(makeSlice(kTag), account, issuanceID);
+    auto const digest =
+        sha512Half(Slice{kTag.data(), kTag.size()}, account, issuanceID);
     auto const r = toScalar(asSlice(digest));
     if (!r)
         return std::nullopt;
@@ -103,7 +104,9 @@ ConfidentialMPTClawback::preflight(PreflightContext const& ctx)
     if (amount == 0 || amount > kMaxMpTokenAmount)
         return temBAD_AMOUNT;
 
-    auto const proof = makeSlice(ctx.tx.getFieldVL(sfZKProof));
+    // Use operator[] so Slice points into STTx-owned STBlob storage.
+    // makeSlice(getFieldVL(...)) dangles: getFieldVL returns a temporary Blob.
+    auto const proof = ctx.tx[sfZKProof];
     if (proof.size() != cm::kClawbackProofBytes)
         return temMALFORMED;
 
@@ -165,9 +168,9 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
     if (amount > outstanding)
         return tecINSUFFICIENT_FUNDS;
 
-    auto const issuerPk = toPoint(makeSlice(sleIssuance->getFieldVL(sfIssuerEncryptionKey)));
+    auto const issuerPk = toPoint((*sleIssuance)[sfIssuerEncryptionKey]);
     auto const issuerBal =
-        cm::parseCiphertext(makeSlice(sleMpt->getFieldVL(sfIssuerEncryptedBalance)));
+        cm::parseCiphertext((*sleMpt)[sfIssuerEncryptedBalance]);
     if (!issuerPk || !issuerBal)
         return tecBAD_PROOF;
 
@@ -178,7 +181,7 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
         .m = amount};
 
     auto const context = makeClawbackContext(ctx.tx);
-    if (!cm::verifyClawback(input, makeSlice(ctx.tx.getFieldVL(sfZKProof)), asSlice(context)))
+    if (!cm::verifyClawback(input, ctx.tx[sfZKProof], asSlice(context)))
         return tecBAD_PROOF;
 
     return tesSUCCESS;
@@ -197,8 +200,8 @@ ConfidentialMPTClawback::doApply()
     if (!sleIssuance || !sleMpt)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    auto const holderPk = toPoint(makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey)));
-    auto const issuerPk = toPoint(makeSlice(sleIssuance->getFieldVL(sfIssuerEncryptionKey)));
+    auto const holderPk = toPoint((*sleMpt)[sfHolderEncryptionKey]);
+    auto const issuerPk = toPoint((*sleIssuance)[sfIssuerEncryptionKey]);
     if (!holderPk || !issuerPk)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
@@ -214,8 +217,7 @@ ConfidentialMPTClawback::doApply()
     if (sleIssuance->isFieldPresent(sfAuditorEncryptionKey) &&
         sleMpt->isFieldPresent(sfAuditorEncryptedBalance))
     {
-        auto const auditorPk =
-            toPoint(makeSlice(sleIssuance->getFieldVL(sfAuditorEncryptionKey)));
+        auto const auditorPk = toPoint((*sleIssuance)[sfAuditorEncryptionKey]);
         if (!auditorPk)
             return tecINTERNAL;  // LCOV_EXCL_LINE
         auto const zeroAuditor = mptEncryptedZero(*auditorPk, holder, issuanceID);
@@ -224,7 +226,7 @@ ConfidentialMPTClawback::doApply()
         sleMpt->setFieldVL(sfAuditorEncryptedBalance, makeSlice(*zeroAuditor));
     }
 
-    auto const version = (*sleMpt)[~sfConfidentialBalanceVersion].value_or(0);
+    auto const version = (*sleMpt)[~sfConfidentialBalanceVersion].valueOr(0);
     sleMpt->setFieldU32(
         sfConfidentialBalanceVersion,
         version == std::numeric_limits<std::uint32_t>::max() ? 0 : version + 1);
@@ -232,7 +234,7 @@ ConfidentialMPTClawback::doApply()
     // Burn: reduce COA and OA. Do not create/credit an issuer MPToken balance.
     // Supplemental "public reserve" language is interpreted through XLS-33 OA
     // semantics (outstanding supply contracts when confidential value is burned).
-    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].value_or(0);
+    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
     auto const outstanding = (*sleIssuance)[sfOutstandingAmount];
     if (amount > coa || amount > outstanding)
         return tecINTERNAL;  // LCOV_EXCL_LINE

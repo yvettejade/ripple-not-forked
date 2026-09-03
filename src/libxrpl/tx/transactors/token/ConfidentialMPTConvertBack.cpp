@@ -15,8 +15,10 @@
 #include <xrpl/protocol/digest.h>
 #include <xrpl/tx/Transactor.h>
 
-#include <cstring>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -33,8 +35,7 @@ namespace cm = confidential_mpt;
  *   isValidCompressedPoint, isValidScalar, parseCiphertext,
  *   ciphertextC1/C2, verifyCiphertext, ciphertextSub, encryptZero,
  *   splitConvertBackProof, verifyConvertBackSigma, pointSub, pointMulBase,
- *   ConvertBackPublicInput.
- * Bulletproof verification is intentionally absent — see blocker below.
+ *   ConvertBackPublicInput, verifySingleBulletproof.
  */
 
 [[nodiscard]] Slice
@@ -97,22 +98,18 @@ makeConvertBackContext(STTx const& tx, std::uint32_t cbsVersion)
 }
 
 /**
- * BLOCKER: no 688-byte ConvertBack Bulletproof verifier exists.
- *
- * Spec requires verifying 0 <= b-m < 2^64 over PC_rem = PC_b - m·G. The crypto
- * module only splits ZKProof (`ProofPrefixView::rangeProof` untouched). Do not
- * fake acceptance.
- *
- * Assumed future signature (not present):
- *   bool verifyConvertBackBulletproof(Point const& remainderCommitment,
- *                                     Slice rangeProof688) noexcept;
+ * Single 64-bit Bulletproof over PC_rem = PC_b - m·G (688 bytes).
+ * Context matches the ConvertBack compact sigma TransactionContextID.
  */
 [[nodiscard]] bool
-verifyConvertBackBulletproof(cm::Point const& /*remainderCommitment*/, Slice rangeProof) noexcept
+verifyConvertBackBulletproof(
+    cm::Point const& remainderCommitment,
+    Slice rangeProof,
+    Slice context) noexcept
 {
     if (rangeProof.size() != ConfidentialMPTConvertBack::kBulletproofBytes)
         return false;
-    return false;
+    return cm::verifySingleBulletproof(remainderCommitment, rangeProof, context);
 }
 
 }  // namespace
@@ -127,6 +124,20 @@ NotTEC
 ConfidentialMPTConvertBack::preflight(PreflightContext const& ctx)
 {
     auto const amount = ctx.tx[sfMPTAmount];
+    // #region agent log
+    {
+        std::ofstream ofs("/opt/cursor/logs/debug.log", std::ios::app);
+        ofs << "{\"hypothesisId\":\"A\",\"location\":\"ConfidentialMPTConvertBack.cpp:preflight:"
+               "entry\",\"message\":\"convertback preflight enter\",\"data\":{\"amount\":"
+            << amount << ",\"hasAuditor\":"
+            << (ctx.tx.isFieldPresent(sfAuditorEncryptedAmount) ? "true" : "false")
+            << "},\"runId\":\"post-fix\",\"timestamp\":"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count()
+            << "}\n";
+    }
+    // #endregion
     if (amount == 0 || amount > kMaxMpTokenAmount)
         return temBAD_AMOUNT;
 
@@ -136,31 +147,167 @@ ConfidentialMPTConvertBack::preflight(PreflightContext const& ctx)
         return tesSUCCESS;
     };
 
-    if (auto const r = checkCt(makeSlice(ctx.tx.getFieldVL(sfHolderEncryptedAmount)));
-        !isTesSuccess(r))
+    // Use operator[] so Slice points into STTx-owned STBlob storage.
+    // makeSlice(getFieldVL(...)) dangles: getFieldVL returns a temporary Blob.
+    if (auto const r = checkCt(ctx.tx[sfHolderEncryptedAmount]); !isTesSuccess(r))
+    {
+        // #region agent log
+        {
+            std::ofstream ofs("/opt/cursor/logs/debug.log", std::ios::app);
+            ofs << "{\"hypothesisId\":\"D\",\"location\":\"ConfidentialMPTConvertBack.cpp:"
+                   "preflight:holderCt\",\"message\":\"holder ct rejected\",\"data\":{},"
+                   "\"runId\":\"post-fix\",\"timestamp\":"
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count()
+                << "}\n";
+        }
+        // #endregion
         return r;
-    if (auto const r = checkCt(makeSlice(ctx.tx.getFieldVL(sfIssuerEncryptedAmount)));
-        !isTesSuccess(r))
+    }
+    if (auto const r = checkCt(ctx.tx[sfIssuerEncryptedAmount]); !isTesSuccess(r))
+    {
+        // #region agent log
+        {
+            std::ofstream ofs("/opt/cursor/logs/debug.log", std::ios::app);
+            ofs << "{\"hypothesisId\":\"D\",\"location\":\"ConfidentialMPTConvertBack.cpp:"
+                   "preflight:issuerCt\",\"message\":\"issuer ct rejected\",\"data\":{},"
+                   "\"runId\":\"post-fix\",\"timestamp\":"
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count()
+                << "}\n";
+        }
+        // #endregion
         return r;
+    }
     if (ctx.tx.isFieldPresent(sfAuditorEncryptedAmount))
     {
-        if (auto const r = checkCt(makeSlice(ctx.tx.getFieldVL(sfAuditorEncryptedAmount)));
-            !isTesSuccess(r))
+        if (auto const r = checkCt(ctx.tx[sfAuditorEncryptedAmount]); !isTesSuccess(r))
             return r;
     }
 
-    if (!cm::isValidScalar(asSlice(ctx.tx[sfBlindingFactor])))
+    bool const blindOk = cm::isValidScalar(asSlice(ctx.tx[sfBlindingFactor]));
+    // #region agent log
+    {
+        std::ofstream ofs("/opt/cursor/logs/debug.log", std::ios::app);
+        ofs << "{\"hypothesisId\":\"C\",\"location\":\"ConfidentialMPTConvertBack.cpp:preflight:"
+               "blinding\",\"message\":\"blinding scalar\",\"data\":{\"blindOk\":"
+            << (blindOk ? "true" : "false")
+            << "},\"runId\":\"post-fix\",\"timestamp\":"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count()
+            << "}\n";
+    }
+    // #endregion
+    if (!blindOk)
         return temMALFORMED;
 
-    auto const commitment = makeSlice(ctx.tx.getFieldVL(sfBalanceCommitment));
+    // Intentionally keep dangling Slice for A/B log; gate on owned Slice.
+    auto const dangCommitment = makeSlice(ctx.tx.getFieldVL(sfBalanceCommitment));
+    auto const commitment = ctx.tx[sfBalanceCommitment];
+    bool const dangSizeOk = dangCommitment.size() == cm::kPointBytes;
+    bool const dangPointOk = cm::isValidCompressedPoint(dangCommitment);
+    bool const safeSizeOk = commitment.size() == cm::kPointBytes;
+    bool const safePointOk = cm::isValidCompressedPoint(commitment);
+    // #region agent log
+    {
+        std::ofstream ofs("/opt/cursor/logs/debug.log", std::ios::app);
+        ofs << "{\"hypothesisId\":\"A\",\"location\":\"ConfidentialMPTConvertBack.cpp:preflight:"
+               "commitment\",\"message\":\"commitment dangling vs safe\",\"data\":{"
+               "\"dangSize\":"
+            << dangCommitment.size() << ",\"dangSizeOk\":" << (dangSizeOk ? "true" : "false")
+            << ",\"dangPointOk\":" << (dangPointOk ? "true" : "false")
+            << ",\"safeSize\":" << commitment.size()
+            << ",\"safeSizeOk\":" << (safeSizeOk ? "true" : "false")
+            << ",\"safePointOk\":" << (safePointOk ? "true" : "false")
+            << "},\"runId\":\"post-fix\",\"timestamp\":"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count()
+            << "}\n";
+    }
+    // #endregion
     if (commitment.size() != cm::kPointBytes || !cm::isValidCompressedPoint(commitment))
+    {
+        // #region agent log
+        {
+            std::ofstream ofs("/opt/cursor/logs/debug.log", std::ios::app);
+            ofs << "{\"hypothesisId\":\"A\",\"location\":\"ConfidentialMPTConvertBack.cpp:"
+                   "preflight:commitmentFail\",\"message\":\"returning temMALFORMED on "
+                   "commitment\",\"data\":{},\"runId\":\"post-fix\",\"timestamp\":"
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count()
+                << "}\n";
+        }
+        // #endregion
         return temMALFORMED;
+    }
 
-    auto const split = cm::splitConvertBackProof(makeSlice(ctx.tx.getFieldVL(sfZKProof)));
+    // splitConvertBackProof returns Slices into the input; dangling input
+    // would leave sigma/rangeProof pointing at a destroyed temporary Blob.
+    auto const dangSplit =
+        cm::splitConvertBackProof(makeSlice(ctx.tx.getFieldVL(sfZKProof)));
+    auto const split = cm::splitConvertBackProof(ctx.tx[sfZKProof]);
+    bool const dangSplitOk =
+        dangSplit && dangSplit->sigma.size() == cm::kConvertBackSigmaBytes &&
+        dangSplit->rangeProof.size() == kBulletproofBytes;
+    bool const safeSplitOk =
+        split && split->sigma.size() == cm::kConvertBackSigmaBytes &&
+        split->rangeProof.size() == kBulletproofBytes;
+    // #region agent log
+    {
+        std::ofstream ofs("/opt/cursor/logs/debug.log", std::ios::app);
+        ofs << "{\"hypothesisId\":\"B\",\"location\":\"ConfidentialMPTConvertBack.cpp:preflight:"
+               "proof\",\"message\":\"proof split dangling vs safe\",\"data\":{"
+               "\"dangHasSplit\":"
+            << (dangSplit ? "true" : "false") << ",\"dangSigmaSize\":"
+            << (dangSplit ? dangSplit->sigma.size() : 0) << ",\"dangRangeSize\":"
+            << (dangSplit ? dangSplit->rangeProof.size() : 0)
+            << ",\"dangSplitOk\":" << (dangSplitOk ? "true" : "false")
+            << ",\"safeHasSplit\":" << (split ? "true" : "false")
+            << ",\"safeSigmaSize\":" << (split ? split->sigma.size() : 0)
+            << ",\"safeRangeSize\":" << (split ? split->rangeProof.size() : 0)
+            << ",\"safeSplitOk\":" << (safeSplitOk ? "true" : "false")
+            << "},\"runId\":\"post-fix\",\"timestamp\":"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count()
+            << "}\n";
+    }
+    // #endregion
     if (!split || split->sigma.size() != cm::kConvertBackSigmaBytes ||
         split->rangeProof.size() != kBulletproofBytes)
+    {
+        // #region agent log
+        {
+            std::ofstream ofs("/opt/cursor/logs/debug.log", std::ios::app);
+            ofs << "{\"hypothesisId\":\"B\",\"location\":\"ConfidentialMPTConvertBack.cpp:"
+                   "preflight:proofFail\",\"message\":\"returning temMALFORMED on proof\","
+                   "\"data\":{},\"runId\":\"post-fix\",\"timestamp\":"
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count()
+                << "}\n";
+        }
+        // #endregion
         return temMALFORMED;
+    }
 
+    // #region agent log
+    {
+        std::ofstream ofs("/opt/cursor/logs/debug.log", std::ios::app);
+        ofs << "{\"hypothesisId\":\"A\",\"location\":\"ConfidentialMPTConvertBack.cpp:preflight:"
+               "success\",\"message\":\"preflight returning tesSUCCESS\",\"data\":{},"
+               "\"runId\":\"post-fix\",\"timestamp\":"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count()
+            << "}\n";
+    }
+    // #endregion
     return tesSUCCESS;
 }
 
@@ -213,41 +360,31 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     if (sleMpt->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
         return tecLOCKED;
 
-    auto const holderPk = toPoint(makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey)));
-    auto const issuerPk = toPoint(makeSlice(sleIssuance->getFieldVL(sfIssuerEncryptionKey)));
+    auto const holderPk = toPoint((*sleMpt)[sfHolderEncryptionKey]);
+    auto const issuerPk = toPoint((*sleIssuance)[sfIssuerEncryptionKey]);
     auto const blinding = toScalar(asSlice(ctx.tx[sfBlindingFactor]));
     if (!holderPk || !issuerPk || !blinding)
         return tecBAD_PROOF;
 
     if (!verifyAmountCiphertext(
-            *holderPk,
-            makeSlice(ctx.tx.getFieldVL(sfHolderEncryptedAmount)),
-            amount,
-            *blinding) ||
+            *holderPk, ctx.tx[sfHolderEncryptedAmount], amount, *blinding) ||
         !verifyAmountCiphertext(
-            *issuerPk,
-            makeSlice(ctx.tx.getFieldVL(sfIssuerEncryptedAmount)),
-            amount,
-            *blinding))
+            *issuerPk, ctx.tx[sfIssuerEncryptedAmount], amount, *blinding))
         return tecBAD_PROOF;
 
     if (hasAuditorKey)
     {
-        auto const auditorPk =
-            toPoint(makeSlice(sleIssuance->getFieldVL(sfAuditorEncryptionKey)));
+        auto const auditorPk = toPoint((*sleIssuance)[sfAuditorEncryptionKey]);
         if (!auditorPk ||
             !verifyAmountCiphertext(
-                *auditorPk,
-                makeSlice(ctx.tx.getFieldVL(sfAuditorEncryptedAmount)),
-                amount,
-                *blinding))
+                *auditorPk, ctx.tx[sfAuditorEncryptedAmount], amount, *blinding))
             return tecBAD_PROOF;
     }
 
     auto const spending =
-        cm::parseCiphertext(makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)));
-    auto const commitment = toPoint(makeSlice(ctx.tx.getFieldVL(sfBalanceCommitment)));
-    auto const split = cm::splitConvertBackProof(makeSlice(ctx.tx.getFieldVL(sfZKProof)));
+        cm::parseCiphertext((*sleMpt)[sfConfidentialBalanceSpending]);
+    auto const commitment = toPoint(ctx.tx[sfBalanceCommitment]);
+    auto const split = cm::splitConvertBackProof(ctx.tx[sfZKProof]);
     if (!spending || !commitment || !split)
         return tecBAD_PROOF;
 
@@ -263,16 +400,21 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     if (!cm::verifyConvertBackSigma(input, split->sigma, asSlice(context)))
         return tecBAD_PROOF;
 
-    // PC_rem = PC_b - m·G (for a future Bulletproof verifier). Encoding m as a
-    // scalar is best-effort; the Bulletproof check fails closed regardless.
+    // PC_rem = PC_b - m·G. When m == 0, m·G is identity so rem == PC_b.
     cm::Point remainderCommitment = *commitment;
-    if (auto const amountPoint = cm::pointMulBase(scalarFromAmount(amount)))
+    if (amount != 0)
     {
-        if (auto const rem = cm::pointSub(*commitment, *amountPoint))
-            remainderCommitment = *rem;
+        auto const amountPoint = cm::pointMulBase(scalarFromAmount(amount));
+        if (!amountPoint)
+            return tecBAD_PROOF;
+        auto const rem = cm::pointSub(*commitment, *amountPoint);
+        if (!rem)
+            return tecBAD_PROOF;
+        remainderCommitment = *rem;
     }
 
-    if (!verifyConvertBackBulletproof(remainderCommitment, split->rangeProof))
+    if (!verifyConvertBackBulletproof(
+            remainderCommitment, split->rangeProof, asSlice(context)))
         return tecBAD_PROOF;
 
     return tesSUCCESS;
@@ -291,14 +433,12 @@ ConfidentialMPTConvertBack::doApply()
     if (!sleIssuance || !sleMpt)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    auto const holderCt =
-        cm::parseCiphertext(makeSlice(tx.getFieldVL(sfHolderEncryptedAmount)));
-    auto const issuerCt =
-        cm::parseCiphertext(makeSlice(tx.getFieldVL(sfIssuerEncryptedAmount)));
+    auto const holderCt = cm::parseCiphertext(tx[sfHolderEncryptedAmount]);
+    auto const issuerCt = cm::parseCiphertext(tx[sfIssuerEncryptedAmount]);
     auto const spending =
-        cm::parseCiphertext(makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)));
+        cm::parseCiphertext((*sleMpt)[sfConfidentialBalanceSpending]);
     auto const issuerBal =
-        cm::parseCiphertext(makeSlice(sleMpt->getFieldVL(sfIssuerEncryptedBalance)));
+        cm::parseCiphertext((*sleMpt)[sfIssuerEncryptedBalance]);
     if (!holderCt || !issuerCt || !spending || !issuerBal)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
@@ -313,10 +453,9 @@ ConfidentialMPTConvertBack::doApply()
     if (tx.isFieldPresent(sfAuditorEncryptedAmount) &&
         sleMpt->isFieldPresent(sfAuditorEncryptedBalance))
     {
-        auto const auditorCt =
-            cm::parseCiphertext(makeSlice(tx.getFieldVL(sfAuditorEncryptedAmount)));
+        auto const auditorCt = cm::parseCiphertext(tx[sfAuditorEncryptedAmount]);
         auto const auditorBal =
-            cm::parseCiphertext(makeSlice(sleMpt->getFieldVL(sfAuditorEncryptedBalance)));
+            cm::parseCiphertext((*sleMpt)[sfAuditorEncryptedBalance]);
         if (!auditorCt || !auditorBal)
             return tecINTERNAL;  // LCOV_EXCL_LINE
         auto const newAuditorBal = cm::ciphertextSub(*auditorBal, *auditorCt);
@@ -325,17 +464,17 @@ ConfidentialMPTConvertBack::doApply()
         sleMpt->setFieldVL(sfAuditorEncryptedBalance, makeSlice(*newAuditorBal));
     }
 
-    auto const publicBal = (*sleMpt)[~sfMPTAmount].value_or(0);
+    auto const publicBal = (*sleMpt)[~sfMPTAmount].valueOr(0);
     if (publicBal > kMaxMpTokenAmount - amount)
         return tecINTERNAL;  // LCOV_EXCL_LINE
     sleMpt->setFieldU64(sfMPTAmount, publicBal + amount);
 
-    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].value_or(0);
+    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
     if (coa < amount)
         return tecINTERNAL;  // LCOV_EXCL_LINE
     sleIssuance->setFieldU64(sfConfidentialOutstandingAmount, coa - amount);
 
-    auto const version = (*sleMpt)[~sfConfidentialBalanceVersion].value_or(0);
+    auto const version = (*sleMpt)[~sfConfidentialBalanceVersion].valueOr(0);
     sleMpt->setFieldU32(
         sfConfidentialBalanceVersion,
         version == std::numeric_limits<std::uint32_t>::max() ? 0 : version + 1);
