@@ -79,6 +79,26 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         return {secret, *publicKey};
     }
 
+    static bool
+    ciphertextEncodes(
+        cm::Ciphertext const& ciphertext,
+        cm::Scalar const& secret,
+        std::uint64_t amount)
+    {
+        auto const shared =
+            cm::pointMul(cm::ciphertextC1(ciphertext), secret);
+        if (!shared)
+            return false;
+        auto const c2 = cm::ciphertextC2(ciphertext);
+        if (amount == 0)
+            return *shared == c2;
+        auto const amountPoint = cm::pointMulBase(scalar(amount));
+        if (!amountPoint)
+            return false;
+        auto const expected = cm::pointAdd(*amountPoint, *shared);
+        return expected && *expected == c2;
+    }
+
     template <std::size_t N>
     static std::string
     hex(std::array<std::uint8_t, N> const& value)
@@ -5642,6 +5662,28 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             issuerEncryption,
             scalar(5),
             env.seq(bob)));
+        env.close();
+        {
+            auto const bobMpt0 = env.le(keylet::mptoken(issuanceID, bob.id()));
+            if (!BEAST_EXPECT(bobMpt0))
+                return;
+            auto const bobSpend0 =
+                cm::parseCiphertext((*bobMpt0)[sfConfidentialBalanceSpending]);
+            if (!BEAST_EXPECT(bobSpend0))
+                return;
+            // Convert initializes spending to domain EncZero and credits the
+            // convert amount into the inbox (not spending).
+            auto const encZero = confidentialMPTEncryptedZero(
+                bobEncryption.publicKey, bob.id(), issuer.id(), issuanceID);
+            auto const bobInbox0 =
+                cm::parseCiphertext((*bobMpt0)[sfConfidentialBalanceInbox]);
+            // creditField seeds a missing inbox as EncZero ⊕ delta, so the
+            // convert(0) inbox is Enc(0, r_enczero+5), not Enc(0, scalar(5)).
+            BEAST_EXPECT(encZero && bobSpend0 && *bobSpend0 == *encZero);
+            BEAST_EXPECT(
+                bobInbox0 &&
+                ciphertextEncodes(*bobInbox0, bobEncryption.secret, 0));
+        }
 
         auto const aliceMpt = env.le(keylet::mptoken(issuanceID, alice.id()));
         if (!BEAST_EXPECT(aliceMpt))
@@ -5735,6 +5777,8 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         setProof(sendTicket2);
         env(send, ticket::Use(sendTicket2));
         env.require(tickets(alice, 0));
+        // Commit the ticketed Send before the next transaction phase.
+        env.close();
 
         // Updated §4.7: ConvertBack proof also binds SequenceOrTicket.
         env(mergeTx(bob, issuanceID));
@@ -5745,6 +5789,9 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             cm::parseCiphertext((*bobMpt)[sfConfidentialBalanceSpending]);
         if (!BEAST_EXPECT(bobSpending))
             return;
+        // After Send(6)+Merge, spending must encrypt 6.
+        BEAST_EXPECT(
+            ciphertextEncodes(*bobSpending, bobEncryption.secret, amount));
         auto const withdrawRandomness = scalar(29);
         auto const withdrawBlinding = scalar(31);
         auto const holderWithdrawal =
@@ -6099,12 +6146,13 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         // clawback when the holder still has a non-zero confidential inbox.
         testcase(
             "requirement evidence: independent sigma/Bulletproof failures and "
-            "clawback with pending inbox");
+            "delegated clawback with pending inbox");
         using namespace test::jtx;
 
         auto features = testableAmendments();
         features.set(featureConfidentialTransfer);
         features.set(featureDynamicMPT);
+        features.set(featurePermissionDelegationV1_1);
 
         auto const corruptByte = [](std::string hexStr, std::size_t byteIndex) {
             auto const i = byteIndex * 2;
@@ -6370,12 +6418,14 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             BEAST_EXPECT((*aliceMpt)[sfMPTAmount] == amount);
         }
 
-        // --- Clawback while destination still holds unmerged inbox funds ---
+        // --- Delegated Clawback while destination holds unmerged inbox funds ---
         {
             Env env(*this, features);
             Account const issuer{"inboxClawIssuer"};
             Account const alice{"inboxClawAlice"};
             Account const bob{"inboxClawBob"};
+            Account const delegate{"inboxClawDelegate"};
+            env.fund(XRP(10'000), delegate);
             MPTTester mpt(env, issuer, {.holders = {alice, bob}});
             mpt.create(
                 {.maxAmt = 100,
@@ -6511,17 +6561,11 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             if (!BEAST_EXPECT(bobIssuer))
                 return;
 
-            auto const clawCtx =
-                clawbackContext(issuer, issuanceID, env.seq(issuer), bob);
             cm::ClawbackPublicInput const clawInput{
                 .issuerKey = issuerEncryption.publicKey,
                 .c1 = cm::ciphertextC1(*bobIssuer),
                 .c2 = cm::ciphertextC2(*bobIssuer),
                 .m = amount};
-            auto const clawProof = cm::proveClawback(
-                clawInput, issuerEncryption.secret, asSlice(clawCtx));
-            if (!BEAST_EXPECT(clawProof))
-                return;
 
             json::Value clawback;
             clawback[jss::TransactionType] = jss::ConfidentialMPTClawback;
@@ -6529,9 +6573,33 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             clawback[sfHolder] = bob.human();
             clawback[sfMPTokenIssuanceID] = to_string(issuanceID);
             clawback[sfMPTAmount] = std::to_string(amount);
-            clawback[sfZKProof] = hex(*clawProof);
             setConfidentialFee(clawback);
-            env(clawback);
+
+            // XLS-0096 §5.5: a delegate may act for the issuer, but only after
+            // receiving the transaction permission. Account remains the issuer;
+            // Delegate identifies and signs/pays as the authorized account.
+            auto makeClawProof = [&](std::uint32_t sequenceOrTicket) {
+                auto const context =
+                    clawbackContext(issuer, issuanceID, sequenceOrTicket, bob);
+                auto const proof = cm::proveClawback(
+                    clawInput, issuerEncryption.secret, asSlice(context));
+                if (!proof)
+                    Throw<std::runtime_error>(
+                        "Unable to create delegated Clawback proof");
+                return *proof;
+            };
+
+            clawback[sfZKProof] = hex(makeClawProof(env.seq(issuer)));
+            env(
+                clawback,
+                delegate::As(delegate),
+                Ter(terNO_DELEGATE_PERMISSION));
+
+            env(delegate::set(
+                issuer, delegate, {"ConfidentialMPTClawback"}));
+            env.close();
+            clawback[sfZKProof] = hex(makeClawProof(env.seq(issuer)));
+            env(clawback, delegate::As(delegate));
 
             auto const issuance = env.le(keylet::mptIssuance(issuanceID));
             bobMpt = env.le(keylet::mptoken(issuanceID, bob.id()));
