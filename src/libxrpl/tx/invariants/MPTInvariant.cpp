@@ -388,12 +388,14 @@ ValidMPTPayment::visitEntry(
         if (type == ltMPTOKEN_ISSUANCE)
         {
             auto const outstanding = sle[sfOutstandingAmount];
-            if (outstanding > kMaxMpTokenAmount)
+            auto const confidential = sle[~sfConfidentialOutstandingAmount].value_or(0);
+            if (outstanding > kMaxMpTokenAmount || confidential > kMaxMpTokenAmount)
             {
                 overflow_ = true;
                 return false;
             }
             data_[makeKey(sle)].outstanding[static_cast<std::size_t>(order)] = outstanding;
+            data_[makeKey(sle)].confidential[static_cast<std::size_t>(order)] = confidential;
         }
         else if (type == ltMPTOKEN)
         {
@@ -456,15 +458,20 @@ ValidMPTPayment::finalize(
             (void)id;
             static constexpr auto kIBefore = static_cast<std::size_t>(Order::Before);
             static constexpr auto kIAfter = static_cast<std::size_t>(Order::After);
+            auto const confidentialDelta =
+                data.confidential[kIAfter] - data.confidential[kIBefore];
+            auto const balanceDelta = data.mptAmount + confidentialDelta;
             bool const addOverflows =
-                (data.mptAmount > 0 && data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
-                (data.mptAmount < 0 && data.outstanding[kIBefore] < (-signedMax - data.mptAmount));
+                (balanceDelta > 0 &&
+                 data.outstanding[kIBefore] > (signedMax - balanceDelta)) ||
+                (balanceDelta < 0 &&
+                 data.outstanding[kIBefore] < (-signedMax - balanceDelta));
             if (addOverflows ||
-                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + data.mptAmount))
+                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + balanceDelta))
             {
                 JLOG(j.fatal()) << "Invariant failed: invalid OutstandingAmount balance "
                                 << data.outstanding[kIBefore] << " " << data.outstanding[kIAfter]
-                                << " " << data.mptAmount;
+                                << " " << data.mptAmount << " " << confidentialDelta;
                 return invariantPasses;
             }
         }
@@ -613,6 +620,145 @@ ValidMPTTransfer::finalize(
         }
     }
 
+    return true;
+}
+
+void
+ValidConfidentialMPT::visitEntry(
+    bool isDelete,
+    std::shared_ptr<SLE const> const& before,
+    std::shared_ptr<SLE const> const& after)
+{
+    auto const& current = after ? after : before;
+    if (!current)
+        return;
+
+    if (current->getType() == ltMPTOKEN_ISSUANCE)
+    {
+        auto const confidential = (*current)[~sfConfidentialOutstandingAmount].value_or(0);
+        if (confidential > (*current)[sfOutstandingAmount])
+            invalid_ = true;
+        auto const pending = current->isFieldPresent(sfPendingAuditorEncryptionKey);
+        auto const remaining = (*current)[~sfAuditorMigrationCount].value_or(0);
+        if (pending != (remaining != 0) ||
+            remaining > (*current)[sfConfidentialHolderCount] ||
+            (pending && !current->isFieldPresent(sfIssuerEncryptionKey)))
+            invalid_ = true;
+        return;
+    }
+
+    if (current->getType() != ltMPTOKEN)
+        return;
+
+    auto const hasConfidentialState = [](SLE const& sle) {
+        return sle.isFieldPresent(sfHolderEncryptionKey) ||
+            sle.isFieldPresent(sfConfidentialBalanceSpending) ||
+            sle.isFieldPresent(sfConfidentialBalanceInbox) ||
+            sle.isFieldPresent(sfIssuerEncryptedBalance) ||
+            sle.isFieldPresent(sfAuditorEncryptedBalance) ||
+            sle.isFieldPresent(sfAuditorKeyVersion) ||
+            sle.isFieldPresent(sfConfidentialBalanceVersion);
+    };
+    auto const hasRequiredState = [](SLE const& sle) {
+        return sle.isFieldPresent(sfHolderEncryptionKey) &&
+            sle.isFieldPresent(sfConfidentialBalanceSpending) &&
+            sle.isFieldPresent(sfConfidentialBalanceInbox) &&
+            sle.isFieldPresent(sfIssuerEncryptedBalance) &&
+            sle.isFieldPresent(sfConfidentialBalanceVersion);
+    };
+
+    if (hasConfidentialState(*current))
+    {
+        if (!hasRequiredState(*current))
+            invalid_ = true;
+        else if (!isDelete)
+        {
+            std::optional<std::uint32_t> auditorVersion;
+            if (auto const version = (*current)[~sfAuditorKeyVersion])
+                auditorVersion = *version;
+            confidentialHoldings_.push_back(
+                {(*current)[sfMPTokenIssuanceID],
+                 current->isFieldPresent(sfAuditorEncryptedBalance),
+                 auditorVersion});
+        }
+    }
+
+    if (before && after && before->getType() == ltMPTOKEN && after->getType() == ltMPTOKEN)
+    {
+        bool const beforeHas = before->isFieldPresent(sfConfidentialBalanceSpending);
+        bool const afterHas = after->isFieldPresent(sfConfidentialBalanceSpending);
+        bool const spendingChanged = beforeHas != afterHas ||
+            (beforeHas &&
+             before->getFieldVL(sfConfidentialBalanceSpending) !=
+                 after->getFieldVL(sfConfidentialBalanceSpending));
+        // A successful full-balance exit removes the entire confidential
+        // field set and decrements the issuance holder census atomically.
+        if (spendingChanged && beforeHas && afterHas)
+        {
+            if (!before->isFieldPresent(sfConfidentialBalanceVersion) ||
+                !after->isFieldPresent(sfConfidentialBalanceVersion) ||
+                after->getFieldU32(sfConfidentialBalanceVersion) !=
+                    before->getFieldU32(sfConfidentialBalanceVersion) + 1)
+                invalid_ = true;
+        }
+    }
+}
+
+bool
+ValidConfidentialMPT::finalize(
+    STTx const&,
+    TER const result,
+    XRPAmount const,
+    ReadView const& view,
+    beast::Journal const& j) const
+{
+    if (!view.rules().enabled(featureConfidentialTransfer) || !isTesSuccess(result))
+        return true;
+
+    if (invalid_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: invalid confidential MPT state";
+        return false;
+    }
+
+    for (auto const& holding : confidentialHoldings_)
+    {
+        auto const issuance = view.read(keylet::mptIssuance(holding.issuanceID));
+        if (!issuance || !issuance->isFlag(lsfMPTCanHoldConfidentialBalance))
+        {
+            JLOG(j.fatal()) << "Invariant failed: confidential balance without enabled issuance";
+            return false;
+        }
+
+        auto const currentVersion = (*issuance)[sfAuditorKeyVersion];
+        if (!issuance->isFieldPresent(sfPendingAuditorEncryptionKey))
+        {
+            auto const hasAuditor = issuance->isFieldPresent(sfAuditorEncryptionKey);
+            if (holding.hasAuditorBalance != hasAuditor ||
+                holding.auditorKeyVersion.has_value() != hasAuditor ||
+                (hasAuditor && *holding.auditorKeyVersion != currentVersion))
+            {
+                JLOG(j.fatal()) << "Invariant failed: confidential auditor mirror version";
+                return false;
+            }
+        }
+        else
+        {
+            auto const targetVersion = currentVersion + 1;
+            if (holding.auditorKeyVersion &&
+                (*holding.auditorKeyVersion != currentVersion &&
+                 *holding.auditorKeyVersion != targetVersion))
+            {
+                JLOG(j.fatal()) << "Invariant failed: confidential auditor migration version";
+                return false;
+            }
+            if (holding.auditorKeyVersion && !holding.hasAuditorBalance)
+            {
+                JLOG(j.fatal()) << "Invariant failed: confidential auditor mirror missing";
+                return false;
+            }
+        }
+    }
     return true;
 }
 

@@ -4,6 +4,7 @@
 #include <xrpl/beast/utility/Zero.h>
 #include <xrpl/beast/utility/instrumentation.h>
 #include <xrpl/core/ServiceRegistry.h>
+#include <xrpl/crypto/confidential.h>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/ledger/helpers/DelegateHelpers.h>
 #include <xrpl/protocol/Feature.h>
@@ -31,9 +32,18 @@ namespace xrpl {
 bool
 MPTokenIssuanceSet::checkExtraFeatures(PreflightContext const& ctx)
 {
-    return !ctx.tx.isFieldPresent(sfDomainID) ||
-        (ctx.rules.enabled(featurePermissionedDomains) &&
-         ctx.rules.enabled(featureSingleAssetVault));
+    if (ctx.tx.isFieldPresent(sfDomainID) &&
+        !(ctx.rules.enabled(featurePermissionedDomains) &&
+          ctx.rules.enabled(featureSingleAssetVault)))
+        return false;
+
+    if ((ctx.tx.isFieldPresent(sfIssuerEncryptionKey) ||
+         ctx.tx.isFieldPresent(sfAuditorEncryptionKey) ||
+         ((ctx.tx[~sfMutableFlags].value_or(0) & tmfMPTSetCanHoldConfidentialBalance) != 0u)) &&
+        !ctx.rules.enabled(featureConfidentialTransfer))
+        return false;
+
+    return true;
 }
 
 std::uint32_t
@@ -78,9 +88,15 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
     auto const mutableFlags = ctx.tx[~sfMutableFlags];
     auto const metadata = ctx.tx[~sfMPTokenMetadata];
     auto const transferFee = ctx.tx[~sfTransferFee];
-    auto const isMutate = mutableFlags || metadata || transferFee;
+    auto const issuerKey = ctx.tx[~sfIssuerEncryptionKey];
+    auto const auditorKey = ctx.tx[~sfAuditorEncryptionKey];
+    auto const hasConfidentialKeys = issuerKey || auditorKey;
+    auto const isMutate = mutableFlags || metadata || transferFee || hasConfidentialKeys;
 
-    if (isMutate && !ctx.rules.enabled(featureDynamicMPT))
+    if ((mutableFlags || metadata || transferFee) && !ctx.rules.enabled(featureDynamicMPT))
+        return temDISABLED;
+
+    if (hasConfidentialKeys && !ctx.rules.enabled(featureConfidentialTransfer))
         return temDISABLED;
 
     if (ctx.tx.isFieldPresent(sfDomainID) && ctx.tx.isFieldPresent(sfHolder))
@@ -95,6 +111,24 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
     if (holderID && accountID == holderID)
         return temMALFORMED;
 
+    if (hasConfidentialKeys)
+    {
+        // Key registration cannot be combined with holder-targeted operations.
+        if (holderID)
+            return temMALFORMED;
+
+        if (issuerKey && issuerKey->length() != kConfidentialElGamalPubKeyLength)
+            return temMALFORMED;
+
+        if (auditorKey && auditorKey->length() != kConfidentialElGamalPubKeyLength)
+            return temMALFORMED;
+
+        confidential::CompressedPoint parsed{};
+        if ((issuerKey && !confidential::parseCompressedPoint(*issuerKey, parsed)) ||
+            (auditorKey && !confidential::parseCompressedPoint(*auditorKey, parsed)))
+            return temMALFORMED;
+    }
+
     if (ctx.rules.enabled(featureSingleAssetVault) || ctx.rules.enabled(featureDynamicMPT))
     {
         // Is this transaction actually changing anything ?
@@ -102,7 +136,7 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
             return temMALFORMED;
     }
 
-    if (ctx.rules.enabled(featureDynamicMPT))
+    if (ctx.rules.enabled(featureDynamicMPT) || hasConfidentialKeys)
     {
         // Holder field is not allowed when mutating MPTokenIssuance
         if (isMutate && holderID)
@@ -133,6 +167,11 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
             // in the same transaction is not allowed.
             if ((transferFee.value_or(0) != 0u) && ((*mutableFlags & tmfMPTClearCanTransfer) != 0u))
                 return temMALFORMED;
+
+            // Confidential + non-zero TransferFee in the same transaction.
+            if ((transferFee.value_or(0) != 0u) &&
+                ((*mutableFlags & tmfMPTSetCanHoldConfidentialBalance) != 0u))
+                return temBAD_TRANSFER_FEE;
         }
     }
 
@@ -155,6 +194,14 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
     if (isTesSuccess(checkTxPermission(sle, tx)))
         return tesSUCCESS;
 
+    // Granular permissions only cover lock/unlock. Key registration and other
+    // issuance mutations require transaction-level MPTokenIssuanceSet.
+    if (tx.isFieldPresent(sfDomainID) || tx.isFieldPresent(sfMPTokenMetadata) ||
+        tx.isFieldPresent(sfTransferFee) || tx.isFieldPresent(sfMutableFlags) ||
+        tx.isFieldPresent(sfIssuerEncryptionKey) ||
+        tx.isFieldPresent(sfAuditorEncryptionKey))
+        return terNO_DELEGATE_PERMISSION;
+
     // this is added in case more flags will be added for MPTokenIssuanceSet
     // in the future. Currently unreachable.
     if ((tx.getFlags() & tfMPTokenIssuanceSetMask) != 0u)
@@ -167,6 +214,9 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
         return terNO_DELEGATE_PERMISSION;
 
     if (tx.isFlag(tfMPTUnlock) && !granularPermissions.contains(MPTokenIssuanceUnlock))
+        return terNO_DELEGATE_PERMISSION;
+
+    if (!tx.isFlag(tfMPTLock) && !tx.isFlag(tfMPTUnlock))
         return terNO_DELEGATE_PERMISSION;
 
     return tesSUCCESS;
@@ -259,6 +309,48 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
 
         if (!isMutableFlag(lsmfMPTCanMutateTransferFee))
             return tecNO_PERMISSION;
+
+        // Cannot set a non-zero TransferFee while confidential balances are
+        // enabled (or being enabled in this transaction).
+        auto const enablingConfidential =
+            (ctx.tx[~sfMutableFlags].value_or(0) & tmfMPTSetCanHoldConfidentialBalance) != 0u;
+        if (fee > 0u &&
+            (sleMptIssuance->isFlag(lsfMPTCanHoldConfidentialBalance) || enablingConfidential))
+            return tecNO_PERMISSION;
+    }
+
+    auto const setConfidential =
+        (ctx.tx[~sfMutableFlags].value_or(0) & tmfMPTSetCanHoldConfidentialBalance) != 0u;
+    if (setConfidential)
+    {
+        if (isMutableFlag(lsmfMPTCannotEnableCanHoldConfidentialBalance))
+            return tecNO_PERMISSION;
+
+        // Cannot enable confidential balances while a non-zero TransferFee is set.
+        if (sleMptIssuance->getFieldU16(sfTransferFee) != 0)
+            return tecNO_PERMISSION;
+    }
+
+    auto const settingIssuerKey = ctx.tx.isFieldPresent(sfIssuerEncryptionKey);
+    auto const settingAuditorKey = ctx.tx.isFieldPresent(sfAuditorEncryptionKey);
+    if (settingIssuerKey || settingAuditorKey)
+    {
+        // Keys require confidential capability already on, or being enabled now.
+        if (!sleMptIssuance->isFlag(lsfMPTCanHoldConfidentialBalance) && !setConfidential)
+            return tecNO_PERMISSION;
+
+        if (settingIssuerKey &&
+            (sleMptIssuance->isFieldPresent(sfIssuerEncryptionKey) ||
+             sleMptIssuance->getFieldU64(sfConfidentialOutstandingAmount) != 0))
+            return tecNO_PERMISSION;
+
+        if (settingAuditorKey &&
+            (!sleMptIssuance->isFieldPresent(sfIssuerEncryptionKey) && !settingIssuerKey))
+            return tecNO_PERMISSION;
+
+        if (settingAuditorKey &&
+            sleMptIssuance->isFieldPresent(sfPendingAuditorEncryptionKey))
+            return tecNO_PERMISSION;
     }
 
     return tesSUCCESS;
@@ -310,11 +402,38 @@ MPTokenIssuanceSet::doApply()
             }
         }
 
+        // One-way enable for confidential balances.
+        if ((mutableFlags & tmfMPTSetCanHoldConfidentialBalance) != 0u)
+            flagsOut |= lsfMPTCanHoldConfidentialBalance;
+
         if ((mutableFlags & tmfMPTClearCanTransfer) != 0u)
         {
             // If the lsfMPTCanTransfer flag is being cleared, then also clear
             // the TransferFee field.
             sle->makeFieldAbsent(sfTransferFee);
+        }
+    }
+
+    if (auto const issuerKey = ctx_.tx[~sfIssuerEncryptionKey])
+        sle->setFieldVL(sfIssuerEncryptionKey, *issuerKey);
+
+    if (auto const auditorKey = ctx_.tx[~sfAuditorEncryptionKey])
+    {
+        auto const holderCount = (*sle)[sfConfidentialHolderCount];
+        auto const nextVersion = (*sle)[sfAuditorKeyVersion] + 1;
+
+        // DESIGN DECISION: auditor changes use a frozen, two-phase migration.
+        // Existing holder mirrors are re-encrypted one at a time and the last
+        // migration atomically activates the pending key.
+        if (holderCount == 0)
+        {
+            sle->setFieldVL(sfAuditorEncryptionKey, *auditorKey);
+            sle->setFieldU32(sfAuditorKeyVersion, nextVersion);
+        }
+        else
+        {
+            sle->setFieldVL(sfPendingAuditorEncryptionKey, *auditorKey);
+            sle->setFieldU32(sfAuditorMigrationCount, holderCount);
         }
     }
 
