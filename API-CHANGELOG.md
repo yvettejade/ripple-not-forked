@@ -28,6 +28,8 @@ This section contains changes targeting a future version.
 
 ### Additions
 
+- `submit`, `simulate`, `tx`, `account_tx`, `ledger_entry`, `account_objects`, `server_definitions`: Added XLS-0096 confidential MPT transaction types, issuance settings, and confidential ledger fields behind the `ConfidentialTransfer` amendment.
+
 - `ledger_entry`, `account_objects`: The `Delegate` ledger entry now includes an optional `DestinationNode` field, which stores the index into the authorized account's owner directory. This field is present on entries created after bidirectional directory tracking was introduced and may appear in RPC responses for those entries. ([#6681](https://github.com/XRPLF/rippled/pull/6681))
 
 - `server_definitions`: Added the following new sections to the response ([#6321](https://github.com/XRPLF/rippled/pull/6321)):

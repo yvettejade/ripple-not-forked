@@ -37,6 +37,12 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfMutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    if ((ctx.tx.isFieldPresent(sfImmutableFlags) ||
+         ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance)) &&
+        !(ctx.rules.enabled(featureDynamicMPT) &&
+          ctx.rules.enabled(featureConfidentialTransfer)))
+        return false;
+
     return true;
 }
 
@@ -70,6 +76,18 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
         // must also be set.
         if (fee > 0u && !ctx.tx.isFlag(tfMPTCanTransfer))
             return temMALFORMED;
+
+        if (fee > 0u && ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance))
+            return temBAD_TRANSFER_FEE;
+    }
+
+    if (auto const immutableFlags = ctx.tx[~sfImmutableFlags])
+    {
+        // XLS-0096 omitted the immutable transaction-field mask. This was
+        // raised during implementation; only its one specified bit is valid.
+        if (*immutableFlags == 0u ||
+            (*immutableFlags & ~tifMPTCanHoldConfidentialBalance) != 0u)
+            return temINVALID_FLAG;
     }
 
     if (auto const domain = ctx.tx[~sfDomainID])
@@ -147,6 +165,12 @@ MPTokenIssuanceCreate::create(ApplyView& view, beast::Journal journal, MPTCreate
         if (args.mutableFlags)
             (*mptIssuance)[sfMutableFlags] = *args.mutableFlags;
 
+        if (args.immutableFlags)
+            (*mptIssuance)[sfImmutableFlags] = *args.immutableFlags;
+
+        if ((args.flags & tfMPTCanHoldConfidentialBalance) != 0u)
+            (*mptIssuance)[sfConfidentialOutstandingAmount] = 0;
+
         if (args.referenceHolding)
         {
             // Defensive: the holding must already exist and be of an
@@ -190,6 +214,7 @@ MPTokenIssuanceCreate::doApply()
             .metadata = tx[~sfMPTokenMetadata],
             .domainId = tx[~sfDomainID],
             .mutableFlags = tx[~sfMutableFlags],
+            .immutableFlags = tx[~sfImmutableFlags],
         });
     return result ? tesSUCCESS : result.error();
 }
