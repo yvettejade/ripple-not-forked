@@ -2933,6 +2933,33 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             freshClawback[sfMPTAmount] = std::to_string(remainder);
             freshClawback[sfZKProof] = hex(*freshClawProof);
             setConfidentialFee(freshClawback);
+
+            // Updated Sec 5.5/5.7: public input m is the tx amount. A valid
+            // remainder proof submitted with a mismatched amount must fail.
+            {
+                json::Value wrongAmount = freshClawback;
+                wrongAmount[sfMPTAmount] = std::to_string(remainder - 1);
+                env(wrongAmount, Ter(tecBAD_PROOF));
+            }
+
+            // A proof for the wrong plaintext against the real ciphertext
+            // must also fail even when the tx amount matches that wrong m.
+            {
+                cm::ClawbackPublicInput const wrongMInput{
+                    .issuerKey = issuerEncryption.publicKey,
+                    .c1 = cm::ciphertextC1(*aliceIssuerAfter),
+                    .c2 = cm::ciphertextC2(*aliceIssuerAfter),
+                    .m = remainder - 1};
+                auto const wrongMProof = cm::proveClawback(
+                    wrongMInput, issuerEncryption.secret, asSlice(freshClawCtx));
+                if (!BEAST_EXPECT(wrongMProof))
+                    return;
+                json::Value wrongPlaintext = freshClawback;
+                wrongPlaintext[sfMPTAmount] = std::to_string(remainder - 1);
+                wrongPlaintext[sfZKProof] = hex(*wrongMProof);
+                env(wrongPlaintext, Ter(tecBAD_PROOF));
+            }
+
             env(freshClawback);
 
             auto const issuance = env.le(keylet::mptIssuance(issuanceID));
