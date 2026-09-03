@@ -213,6 +213,36 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         return tx;
     }
 
+    static json::Value
+    convertTxWithoutKey(
+        test::jtx::Account const& account,
+        MPTID const& issuanceID,
+        std::uint64_t amount,
+        EncryptionKey const& holderKey,
+        EncryptionKey const& issuerKey,
+        EncryptionKey const& auditorKey,
+        cm::Scalar const& randomness)
+    {
+        // Subsequent converts omit key registration (key already on MPToken).
+        auto const holderAmount = cm::encryptAmount(holderKey.publicKey, amount, randomness);
+        auto const issuerAmount = cm::encryptAmount(issuerKey.publicKey, amount, randomness);
+        auto const auditorAmount = cm::encryptAmount(auditorKey.publicKey, amount, randomness);
+        if (!holderAmount || !issuerAmount || !auditorAmount)
+            Throw<std::runtime_error>("Unable to create subsequent Convert ciphertexts");
+
+        json::Value tx;
+        tx[jss::TransactionType] = jss::ConfidentialMPTConvert;
+        tx[sfAccount] = account.human();
+        tx[sfMPTokenIssuanceID] = to_string(issuanceID);
+        tx[sfMPTAmount] = std::to_string(amount);
+        tx[sfHolderEncryptedAmount] = hex(*holderAmount);
+        tx[sfIssuerEncryptedAmount] = hex(*issuerAmount);
+        tx[sfAuditorEncryptedAmount] = hex(*auditorAmount);
+        tx[sfBlindingFactor] = hex(randomness);
+        setConfidentialFee(tx);
+        return tx;
+    }
+
     void
     testIssuancePolicy()
     {
@@ -994,6 +1024,98 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         }
     }
 
+
+    void
+    testAmendmentDisabled()
+    {
+        testcase("Convert and MergeInbox temDISABLED when amendment off");
+        using namespace test::jtx;
+
+        Env env(*this, testableAmendments() - featureConfidentialTransfer);
+        Account const issuer{"disIssuer"};
+        Account const alice{"disAlice"};
+        env.fund(XRP(10'000), issuer, alice);
+        env.close();
+
+        auto const id = makeMptID(env.seq(issuer), issuer);
+        env(convertTx(
+                alice,
+                id,
+                1,
+                key(3),
+                key(5),
+                key(7),
+                scalar(9),
+                env.seq(alice)),
+            Ter(temDISABLED));
+        env(mergeTx(alice, id), Ter(temDISABLED));
+    }
+
+    void
+    testConvertDuplicateKey()
+    {
+        testcase("Convert rejects re-registering HolderEncryptionKey");
+        using namespace test::jtx;
+
+        auto features = testableAmendments();
+        features.set(featureConfidentialTransfer);
+        features.set(featureDynamicMPT);
+        Env env(*this, features);
+        Account const issuer{"dupIssuer"};
+        Account const alice{"dupAlice"};
+
+        MPTTester mpt(env, issuer, {.holders = {alice}});
+        mpt.create(
+            {.maxAmt = 200,
+             .authorize = MPTCreate::allHolders,
+             .pay = {{{alice}, 50}},
+             .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+        auto const issuanceID = mpt.issuanceID();
+        auto const issuerEncryption = key(21);
+        auto const auditorEncryption = key(23);
+        auto const aliceEncryption = key(25);
+
+        json::Value setKeys;
+        setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+        setKeys[sfAccount] = issuer.human();
+        setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+        setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+        setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+        env(setKeys);
+
+        env(convertTx(
+            alice,
+            issuanceID,
+            20,
+            aliceEncryption,
+            issuerEncryption,
+            auditorEncryption,
+            scalar(2),
+            env.seq(alice)));
+
+        // Re-submitting a holder key after registration is tecDUPLICATE.
+        env(convertTx(
+                alice,
+                issuanceID,
+                10,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(4),
+                env.seq(alice)),
+            Ter(tecDUPLICATE));
+
+        // Subsequent convert without key registration succeeds.
+        env(convertTxWithoutKey(
+            alice,
+            issuanceID,
+            10,
+            aliceEncryption,
+            issuerEncryption,
+            auditorEncryption,
+            scalar(6)));
+    }
+
 public:
     void
     run() override
@@ -1002,6 +1124,8 @@ public:
         testFlow();
         testNegativePaths();
         testFeesAndPolicyFailures();
+        testAmendmentDisabled();
+        testConvertDuplicateKey();
     }
 };
 
