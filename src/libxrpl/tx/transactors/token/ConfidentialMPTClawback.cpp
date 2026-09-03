@@ -212,8 +212,9 @@ ConfidentialMPTClawback::doApply()
     if (amount > coa || amount > outstanding)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    sleIssuance->setFieldU64(sfConfidentialOutstandingAmount, coa - amount);
-    sleIssuance->setFieldU64(sfOutstandingAmount, outstanding - amount);
+    sleIssuance->at(sfConfidentialOutstandingAmount) = coa - amount;
+    // SoeDefault: assignment removes the field if clawback burns all supply.
+    sleIssuance->at(sfOutstandingAmount) = outstanding - amount;
 
     view().update(sleMpt);
     view().update(sleIssuance);

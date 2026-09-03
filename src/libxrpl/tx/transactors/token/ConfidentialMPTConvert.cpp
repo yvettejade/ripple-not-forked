@@ -348,12 +348,14 @@ ConfidentialMPTConvert::doApply()
     auto const publicBalance = (*sleMpt)[sfMPTAmount];
     if (publicBalance < amount)
         return tecINTERNAL;  // LCOV_EXCL_LINE
-    sleMpt->setFieldU64(sfMPTAmount, publicBalance - amount);
+    // SoeDefault: ValueProxy removes the field when the value is 0.
+    // setFieldU64(0) would leave an explicit default and break later SLE reads.
+    (*sleMpt)[sfMPTAmount] = publicBalance - amount;
 
     auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
     if (coa > kMaxMpTokenAmount - amount)
         return tecINTERNAL;  // LCOV_EXCL_LINE
-    sleIssuance->setFieldU64(sfConfidentialOutstandingAmount, coa + amount);
+    (*sleIssuance)[sfConfidentialOutstandingAmount] = coa + amount;
 
     view().update(sleMpt);
     view().update(sleIssuance);

@@ -987,6 +987,201 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             env(mergeTx(lockAlice, issuanceID), Ter(tecLOCKED));
         }
 
+        // --- Lock blocks ConfidentialMPTSend / ConvertBack after ledger close ---
+        {
+            Account const lockIssuer{"lockSendIssuer"};
+            Account const lockAlice{"lockSendAlice"};
+            Account const lockBob{"lockSendBob"};
+            MPTTester mpt(env, lockIssuer, {.holders = {lockAlice, lockBob}});
+            mpt.create(
+                {.maxAmt = 200,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{lockAlice}, 40}},
+                 .flags = tfMPTCanTransfer | tfMPTCanLock | tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(101);
+            auto const auditorEncryption = key(103);
+            auto const aliceEncryption = key(105);
+            auto const bobEncryption = key(107);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = lockIssuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            env(convertTx(
+                lockAlice,
+                issuanceID,
+                40,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(5),
+                env.seq(lockAlice)));
+            env(mergeTx(lockAlice, issuanceID));
+            env(convertTx(
+                lockBob,
+                issuanceID,
+                0,
+                bobEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(11),
+                env.seq(lockBob)));
+
+            // Re-deserialize from SHAMap to exercise canonical SoeDefault fields.
+            env.close();
+
+            auto const aliceMpt = env.le(keylet::mptoken(issuanceID, lockAlice.id()));
+            if (!BEAST_EXPECT(aliceMpt))
+                return;
+            auto const aliceSpending =
+                cm::parseCiphertext((*aliceMpt)[sfConfidentialBalanceSpending]);
+            if (!BEAST_EXPECT(aliceSpending))
+                return;
+
+            std::uint64_t constexpr amount = 10;
+            std::uint64_t constexpr aliceBalance = 40;
+            auto const sendRandomness = scalar(13);
+            auto const balanceBlinding = scalar(17);
+            auto const remainderBlinding = scalar(19);
+            auto const senderAmount =
+                cm::encryptAmount(aliceEncryption.publicKey, amount, sendRandomness);
+            auto const destinationAmount =
+                cm::encryptAmount(bobEncryption.publicKey, amount, sendRandomness);
+            auto const issuerAmount =
+                cm::encryptAmount(issuerEncryption.publicKey, amount, sendRandomness);
+            auto const auditorAmount =
+                cm::encryptAmount(auditorEncryption.publicKey, amount, sendRandomness);
+            auto const amountCommitment = cm::pedersenCommit(amount, sendRandomness);
+            auto const balanceCommitment = cm::pedersenCommit(aliceBalance, balanceBlinding);
+            auto const remainderCommitment =
+                cm::pedersenCommit(aliceBalance - amount, remainderBlinding);
+            if (!BEAST_EXPECT(
+                    senderAmount && destinationAmount && issuerAmount && auditorAmount &&
+                    amountCommitment && balanceCommitment && remainderCommitment))
+                return;
+
+            json::Value send;
+            send[jss::TransactionType] = jss::ConfidentialMPTSend;
+            send[sfAccount] = lockAlice.human();
+            send[sfDestination] = lockBob.human();
+            send[sfMPTokenIssuanceID] = to_string(issuanceID);
+            send[sfSenderEncryptedAmount] = hex(*senderAmount);
+            send[sfDestinationEncryptedAmount] = hex(*destinationAmount);
+            send[sfIssuerEncryptedAmount] = hex(*issuerAmount);
+            send[sfAuditorEncryptedAmount] = hex(*auditorAmount);
+            send[sfAmountCommitment] = hex(*amountCommitment);
+            send[sfBalanceCommitment] = hex(*balanceCommitment);
+            setConfidentialFee(send);
+
+            auto const aliceVersion = (*aliceMpt)[~sfConfidentialBalanceVersion].value_or(0);
+            auto const sendCtx =
+                sendContext(lockAlice, issuanceID, env.seq(lockAlice), lockBob, aliceVersion);
+            cm::SendPublicInput sendInput{
+                .recipientKeys =
+                    {aliceEncryption.publicKey,
+                     bobEncryption.publicKey,
+                     issuerEncryption.publicKey,
+                     auditorEncryption.publicKey},
+                .senderKey = aliceEncryption.publicKey,
+                .c1 = cm::ciphertextC1(*senderAmount),
+                .c2 =
+                    {cm::ciphertextC2(*senderAmount),
+                     cm::ciphertextC2(*destinationAmount),
+                     cm::ciphertextC2(*issuerAmount),
+                     cm::ciphertextC2(*auditorAmount)},
+                .amountCommitment = *amountCommitment,
+                .balanceCommitment = *balanceCommitment,
+                .balanceC1 = cm::ciphertextC1(*aliceSpending),
+                .balanceC2 = cm::ciphertextC2(*aliceSpending)};
+            cm::SendWitness const sendWitness{
+                .m = amount,
+                .r = sendRandomness,
+                .b = aliceBalance,
+                .rho = balanceBlinding,
+                .sk = aliceEncryption.secret};
+            auto const sigma = cm::proveSendSigma(sendInput, sendWitness, asSlice(sendCtx));
+            auto const range = cm::proveAggregatedBulletproof(
+                *amountCommitment,
+                *remainderCommitment,
+                amount,
+                sendRandomness,
+                aliceBalance - amount,
+                remainderBlinding,
+                asSlice(sendCtx));
+            if (!BEAST_EXPECT(sigma && range))
+                return;
+            send[sfZKProof] = joinedHex(*sigma, *range);
+
+            // Construct valid ConvertBack for alice (non-zero; preflight rejects 0).
+            auto const withdrawRandomness = scalar(23);
+            auto const withdrawBlinding = scalar(29);
+            std::uint64_t constexpr withdrawAmt = 10;
+            auto const holderWithdrawal =
+                cm::encryptAmount(aliceEncryption.publicKey, withdrawAmt, withdrawRandomness);
+            auto const issuerWithdrawal =
+                cm::encryptAmount(issuerEncryption.publicKey, withdrawAmt, withdrawRandomness);
+            auto const auditorWithdrawal =
+                cm::encryptAmount(auditorEncryption.publicKey, withdrawAmt, withdrawRandomness);
+            auto const withdrawBalanceCommitment =
+                cm::pedersenCommit(aliceBalance, withdrawBlinding);
+            auto const withdrawRemainderCommitment =
+                cm::pedersenCommit(aliceBalance - withdrawAmt, withdrawBlinding);
+            if (!BEAST_EXPECT(
+                    holderWithdrawal && issuerWithdrawal && auditorWithdrawal &&
+                    withdrawBalanceCommitment && withdrawRemainderCommitment))
+                return;
+            auto const withdrawCtx =
+                convertBackContext(lockAlice, issuanceID, env.seq(lockAlice), aliceVersion);
+            cm::ConvertBackPublicInput const withdrawInput{
+                .holderKey = aliceEncryption.publicKey,
+                .balanceC1 = cm::ciphertextC1(*aliceSpending),
+                .balanceC2 = cm::ciphertextC2(*aliceSpending),
+                .balanceCommitment = *withdrawBalanceCommitment};
+            cm::ConvertBackWitness const withdrawWitness{
+                .b = aliceBalance, .rho = withdrawBlinding, .sk = aliceEncryption.secret};
+            auto const withdrawSigma =
+                cm::proveConvertBackSigma(withdrawInput, withdrawWitness, asSlice(withdrawCtx));
+            auto const withdrawRange = cm::proveSingleBulletproof(
+                *withdrawRemainderCommitment,
+                aliceBalance - withdrawAmt,
+                withdrawBlinding,
+                asSlice(withdrawCtx));
+            if (!BEAST_EXPECT(withdrawSigma && withdrawRange))
+                return;
+
+            json::Value convertBack;
+            convertBack[jss::TransactionType] = jss::ConfidentialMPTConvertBack;
+            convertBack[sfAccount] = lockAlice.human();
+            convertBack[sfMPTokenIssuanceID] = to_string(issuanceID);
+            convertBack[sfMPTAmount] = std::to_string(withdrawAmt);
+            convertBack[sfHolderEncryptedAmount] = hex(*holderWithdrawal);
+            convertBack[sfIssuerEncryptedAmount] = hex(*issuerWithdrawal);
+            convertBack[sfAuditorEncryptedAmount] = hex(*auditorWithdrawal);
+            convertBack[sfBlindingFactor] = hex(withdrawRandomness);
+            convertBack[sfBalanceCommitment] = hex(*withdrawBalanceCommitment);
+            convertBack[sfZKProof] = joinedHex(*withdrawSigma, *withdrawRange);
+            setConfidentialFee(convertBack);
+
+            json::Value lockTx;
+            lockTx[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            lockTx[sfAccount] = lockIssuer.human();
+            lockTx[sfMPTokenIssuanceID] = to_string(issuanceID);
+            env(lockTx, Txflags(tfMPTLock));
+
+            auto const issuance = env.le(keylet::mptIssuance(issuanceID));
+            BEAST_EXPECT(issuance && issuance->isFlag(lsfMPTLocked));
+
+            // ConvertBack before Send so fee/seq from tecLOCKED does not
+            // invalidate the ConvertBack proof sequence binding.
+            env(convertBack, Ter(tecLOCKED));
+            env(send, Ter(tecLOCKED));
+        }
+
         // --- Dedicated vault account may convert (issuer account may not) ---
         {
             Account const vaultIssuer{"vaultIssuer"};
