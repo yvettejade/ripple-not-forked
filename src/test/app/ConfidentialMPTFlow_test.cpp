@@ -5578,7 +5578,7 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
     {
         testcase(
             "requirement evidence: SequenceOrTicket transcript binding for "
-            "Convert and Send");
+            "Convert, Send, ConvertBack, and Clawback");
         using namespace test::jtx;
 
         auto features = testableAmendments();
@@ -5593,7 +5593,8 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             {.maxAmt = 100,
              .authorize = MPTCreate::allHolders,
              .pay = {{{alice}, 20}},
-             .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+             .flags = tfMPTCanTransfer | tfMPTCanClawback |
+                 tfMPTCanHoldConfidentialBalance});
         auto const issuanceID = mpt.issuanceID();
         auto const issuerEncryption = key(951);
         auto const aliceEncryption = key(953);
@@ -5734,6 +5735,119 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         setProof(sendTicket2);
         env(send, ticket::Use(sendTicket2));
         env.require(tickets(alice, 0));
+
+        // Updated §4.7: ConvertBack proof also binds SequenceOrTicket.
+        env(mergeTx(bob, issuanceID));
+        auto bobMpt = env.le(keylet::mptoken(issuanceID, bob.id()));
+        if (!BEAST_EXPECT(bobMpt))
+            return;
+        auto const bobSpending =
+            cm::parseCiphertext((*bobMpt)[sfConfidentialBalanceSpending]);
+        if (!BEAST_EXPECT(bobSpending))
+            return;
+        auto const withdrawRandomness = scalar(29);
+        auto const withdrawBlinding = scalar(31);
+        auto const holderWithdrawal =
+            cm::encryptAmount(bobEncryption.publicKey, amount, withdrawRandomness);
+        auto const issuerWithdrawal =
+            cm::encryptAmount(issuerEncryption.publicKey, amount, withdrawRandomness);
+        auto const withdrawBalanceCommitment =
+            cm::pedersenCommit(amount, withdrawBlinding);
+        auto const withdrawRemainderCommitment =
+            cm::pedersenCommit(0, withdrawBlinding);
+        if (!BEAST_EXPECT(
+                holderWithdrawal && issuerWithdrawal &&
+                withdrawBalanceCommitment && withdrawRemainderCommitment))
+            return;
+
+        auto const bobVersion =
+            (*bobMpt)[~sfConfidentialBalanceVersion].value_or(0);
+        cm::ConvertBackPublicInput const withdrawInput{
+            .holderKey = bobEncryption.publicKey,
+            .balanceC1 = cm::ciphertextC1(*bobSpending),
+            .balanceC2 = cm::ciphertextC2(*bobSpending),
+            .balanceCommitment = *withdrawBalanceCommitment};
+        cm::ConvertBackWitness const withdrawWitness{
+            .b = amount, .rho = withdrawBlinding, .sk = bobEncryption.secret};
+        json::Value convertBack;
+        convertBack[jss::TransactionType] = jss::ConfidentialMPTConvertBack;
+        convertBack[sfAccount] = bob.human();
+        convertBack[sfMPTokenIssuanceID] = to_string(issuanceID);
+        convertBack[sfMPTAmount] = std::to_string(amount);
+        convertBack[sfHolderEncryptedAmount] = hex(*holderWithdrawal);
+        convertBack[sfIssuerEncryptedAmount] = hex(*issuerWithdrawal);
+        convertBack[sfBlindingFactor] = hex(withdrawRandomness);
+        convertBack[sfBalanceCommitment] = hex(*withdrawBalanceCommitment);
+        setConfidentialFee(convertBack);
+        auto const setConvertBackProof = [&](std::uint32_t sequenceOrTicket) {
+            auto const context =
+                convertBackContext(bob, issuanceID, sequenceOrTicket, bobVersion);
+            auto const sigma = cm::proveConvertBackSigma(
+                withdrawInput, withdrawWitness, asSlice(context));
+            auto const range = cm::proveSingleBulletproof(
+                *withdrawRemainderCommitment, 0, withdrawBlinding, asSlice(context));
+            if (!sigma || !range)
+                Throw<std::runtime_error>(
+                    "Unable to create ticket-bound ConvertBack proof");
+            convertBack[sfZKProof] = joinedHex(*sigma, *range);
+        };
+
+        auto const convertBackTicket1 = env.seq(bob) + 1;
+        auto const convertBackTicket2 = env.seq(bob) + 2;
+        env(ticket::create(bob, 2));
+        env.close();
+        setConvertBackProof(env.seq(bob));
+        env(
+            convertBack,
+            ticket::Use(convertBackTicket1),
+            Ter(tecBAD_PROOF));
+        setConvertBackProof(convertBackTicket2);
+        env(convertBack, ticket::Use(convertBackTicket2));
+        env.require(tickets(bob, 0));
+
+        // Updated §5.6: Clawback intentionally omits CBS version, but still
+        // binds the issuer's SequenceOrTicket in TransactionContextID.
+        auto const aliceAfterSend =
+            env.le(keylet::mptoken(issuanceID, alice.id()));
+        if (!BEAST_EXPECT(aliceAfterSend))
+            return;
+        auto const aliceIssuerBalance =
+            cm::parseCiphertext((*aliceAfterSend)[sfIssuerEncryptedBalance]);
+        if (!BEAST_EXPECT(aliceIssuerBalance))
+            return;
+        std::uint64_t constexpr clawAmount = aliceBalance - amount;
+        cm::ClawbackPublicInput const clawInput{
+            .issuerKey = issuerEncryption.publicKey,
+            .c1 = cm::ciphertextC1(*aliceIssuerBalance),
+            .c2 = cm::ciphertextC2(*aliceIssuerBalance),
+            .m = clawAmount};
+        json::Value clawback;
+        clawback[jss::TransactionType] = jss::ConfidentialMPTClawback;
+        clawback[sfAccount] = issuer.human();
+        clawback[sfHolder] = alice.human();
+        clawback[sfMPTokenIssuanceID] = to_string(issuanceID);
+        clawback[sfMPTAmount] = std::to_string(clawAmount);
+        setConfidentialFee(clawback);
+        auto const setClawbackProof = [&](std::uint32_t sequenceOrTicket) {
+            auto const context =
+                clawbackContext(issuer, issuanceID, sequenceOrTicket, alice);
+            auto const proof = cm::proveClawback(
+                clawInput, issuerEncryption.secret, asSlice(context));
+            if (!proof)
+                Throw<std::runtime_error>(
+                    "Unable to create ticket-bound Clawback proof");
+            clawback[sfZKProof] = hex(*proof);
+        };
+
+        auto const clawbackTicket1 = env.seq(issuer) + 1;
+        auto const clawbackTicket2 = env.seq(issuer) + 2;
+        env(ticket::create(issuer, 2));
+        env.close();
+        setClawbackProof(env.seq(issuer));
+        env(clawback, ticket::Use(clawbackTicket1), Ter(tecBAD_PROOF));
+        setClawbackProof(clawbackTicket2);
+        env(clawback, ticket::Use(clawbackTicket2));
+        env.require(tickets(issuer, 0));
     }
 
 public:
