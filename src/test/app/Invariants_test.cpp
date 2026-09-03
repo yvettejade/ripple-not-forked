@@ -4592,13 +4592,55 @@ class Invariants_test : public beast::unit_test::Suite
 
         // Changing the spending ciphertext without advancing its version is
         // invalid (xls-0096 §7.4).
+        //
+        // OpenLedger::modify/rawReplace only mutates the open view's state
+        // table; env.close() discards those edits. Apply confidential fields
+        // after close so they remain visible via env.current().
         {
             testcase << "Confidential MPT spending version";
             MPTID id;
+            Env env{*this, defaultAmendments()};
+            Account const a1{"A1"};
+            Account const a2{"A2"};
+            env.fund(XRP(1000), a1, a2);
+
+            Account const issuer{"confVersionIssuer"};
+            env.fund(XRP(1'000), issuer);
+            MPTTester mpt(env, issuer, {.holders = {a2}, .fund = false});
+            mpt.create(
+                {.maxAmt = 100,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{a2}, 10}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            id = mpt.issuanceID();
+            env.close();
+
+            bool const modified = env.app().getOpenLedger().modify(
+                [&](OpenView& view, beast::Journal) {
+                    auto const sle = view.read(keylet::mptoken(id, a2));
+                    if (!sle)
+                        return false;
+                    auto replacement = std::make_shared<SLE>(*sle, sle->key());
+                    replacement->setFieldVL(sfHolderEncryptionKey, dummyPk);
+                    replacement->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                    replacement->setFieldVL(sfConfidentialBalanceInbox, dummyCt);
+                    replacement->setFieldVL(sfIssuerEncryptedBalance, dummyCt);
+                    replacement->setFieldU32(sfConfidentialBalanceVersion, 1);
+                    view.rawReplace(replacement);
+                    return true;
+                });
+            auto const initialized = env.le(keylet::mptoken(id, a2));
+            BEAST_EXPECT(
+                modified && initialized &&
+                initialized->isFieldPresent(sfConfidentialBalanceSpending));
+
             doInvariantCheck(
+                std::move(env),
+                a1,
+                a2,
                 {{"invalid Confidential MPT ledger state"}},
-                [&](Account const&, Account const& a2, ApplyContext& ac) {
-                    auto sle = ac.view().peek(keylet::mptoken(id, a2));
+                [&](Account const&, Account const& holder, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, holder));
                     if (!sle)
                         return false;
                     Blob changedCt(66, 0x03);
@@ -4608,57 +4650,59 @@ class Invariants_test : public beast::unit_test::Suite
                 },
                 XRPAmount{},
                 STTx{ttCONFIDENTIAL_MPT_SEND, [](STObject&) {}},
-                {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
-                [&](Account const&, Account const& a2, Env& env) {
-                    Account const issuer{"confVersionIssuer"};
-                    env.fund(XRP(1'000), issuer);
-                    MPTTester mpt(
-                        env, issuer, {.holders = {a2}, .fund = false});
-                    mpt.create(
-                        {.maxAmt = 100,
-                         .authorize = MPTCreate::allHolders,
-                         .pay = {{{a2}, 10}},
-                         .flags =
-                             tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
-                    id = mpt.issuanceID();
-
-                    bool const modified = env.app().getOpenLedger().modify(
-                        [&](OpenView& view, beast::Journal) {
-                            auto const sle = view.read(keylet::mptoken(id, a2));
-                            if (!sle)
-                                return false;
-                            auto replacement =
-                                std::make_shared<SLE>(*sle, sle->key());
-                            replacement->setFieldVL(
-                                sfHolderEncryptionKey, dummyPk);
-                            replacement->setFieldVL(
-                                sfConfidentialBalanceSpending, dummyCt);
-                            replacement->setFieldVL(
-                                sfConfidentialBalanceInbox, dummyCt);
-                            replacement->setFieldVL(
-                                sfIssuerEncryptedBalance, dummyCt);
-                            replacement->setFieldU32(
-                                sfConfidentialBalanceVersion, 1);
-                            view.rawReplace(replacement);
-                            return true;
-                        });
-                    auto const initialized =
-                        env.le(keylet::mptoken(id, a2));
-                    return modified && initialized &&
-                        initialized->isFieldPresent(
-                            sfConfidentialBalanceSpending);
-                });
+                {tecINVARIANT_FAILED, tefINVARIANT_FAILED});
         }
 
         // A confidentially initialized MPToken cannot be deleted (xls-0096
         // §7.4), even when its encrypted balance represents zero.
+        //
+        // Same close/rawReplace ordering constraint as the spending-version
+        // case above: confidential fields must survive into env.current().
         {
             testcase << "Confidential MPT initialized delete";
             MPTID id;
+            Env env{*this, defaultAmendments()};
+            Account const a1{"A1"};
+            Account const a2{"A2"};
+            env.fund(XRP(1000), a1, a2);
+
+            Account const issuer{"confDeleteIssuer"};
+            env.fund(XRP(1'000), issuer);
+            MPTTester mpt(env, issuer, {.holders = {a2}, .fund = false});
+            mpt.create(
+                {.maxAmt = 100,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{a2}, 10}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            id = mpt.issuanceID();
+            env.close();
+
+            bool const modified = env.app().getOpenLedger().modify(
+                [&](OpenView& view, beast::Journal) {
+                    auto const sle = view.read(keylet::mptoken(id, a2));
+                    if (!sle)
+                        return false;
+                    auto replacement = std::make_shared<SLE>(*sle, sle->key());
+                    replacement->setFieldVL(sfHolderEncryptionKey, dummyPk);
+                    replacement->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                    replacement->setFieldVL(sfConfidentialBalanceInbox, dummyCt);
+                    replacement->setFieldVL(sfIssuerEncryptedBalance, dummyCt);
+                    replacement->setFieldU32(sfConfidentialBalanceVersion, 1);
+                    view.rawReplace(replacement);
+                    return true;
+                });
+            auto const initialized = env.le(keylet::mptoken(id, a2));
+            BEAST_EXPECT(
+                modified && initialized &&
+                initialized->isFieldPresent(sfConfidentialBalanceSpending));
+
             doInvariantCheck(
+                std::move(env),
+                a1,
+                a2,
                 {{"invalid Confidential MPT ledger state"}},
-                [&](Account const&, Account const& a2, ApplyContext& ac) {
-                    auto sle = ac.view().peek(keylet::mptoken(id, a2));
+                [&](Account const&, Account const& holder, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, holder));
                     if (!sle)
                         return false;
                     ac.view().erase(sle);
@@ -4666,46 +4710,7 @@ class Invariants_test : public beast::unit_test::Suite
                 },
                 XRPAmount{},
                 STTx{ttMPTOKEN_AUTHORIZE, [](STObject&) {}},
-                {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
-                [&](Account const&, Account const& a2, Env& env) {
-                    Account const issuer{"confDeleteIssuer"};
-                    env.fund(XRP(1'000), issuer);
-                    MPTTester mpt(
-                        env, issuer, {.holders = {a2}, .fund = false});
-                    mpt.create(
-                        {.maxAmt = 100,
-                         .authorize = MPTCreate::allHolders,
-                         .pay = {{{a2}, 10}},
-                         .flags =
-                             tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
-                    id = mpt.issuanceID();
-
-                    bool const modified = env.app().getOpenLedger().modify(
-                        [&](OpenView& view, beast::Journal) {
-                            auto const sle = view.read(keylet::mptoken(id, a2));
-                            if (!sle)
-                                return false;
-                            auto replacement =
-                                std::make_shared<SLE>(*sle, sle->key());
-                            replacement->setFieldVL(
-                                sfHolderEncryptionKey, dummyPk);
-                            replacement->setFieldVL(
-                                sfConfidentialBalanceSpending, dummyCt);
-                            replacement->setFieldVL(
-                                sfConfidentialBalanceInbox, dummyCt);
-                            replacement->setFieldVL(
-                                sfIssuerEncryptedBalance, dummyCt);
-                            replacement->setFieldU32(
-                                sfConfidentialBalanceVersion, 1);
-                            view.rawReplace(replacement);
-                            return true;
-                        });
-                    auto const initialized =
-                        env.le(keylet::mptoken(id, a2));
-                    return modified && initialized &&
-                        initialized->isFieldPresent(
-                            sfConfidentialBalanceSpending);
-                });
+                {tecINVARIANT_FAILED, tefINVARIANT_FAILED});
         }
 
         // Send and MergeInbox are supply-neutral (xls-0096 §8.4/§9.3).
