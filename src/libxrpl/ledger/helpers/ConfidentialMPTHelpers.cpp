@@ -15,9 +15,10 @@ confidentialMPTEncryptedZero(
     MPTID const& issuanceID) noexcept
 {
     static constexpr std::string_view kTag = "EncZero";
-    // XLS-0096 specifies Account || Issuer || Currency, but XLS-33 MPTs have
-    // an issuance ID rather than a Currency field. The issuance ID is the
-    // canonical token-domain replacement while retaining Issuer explicitly.
+    // SPEC INCONSISTENCY (xls-0096 EncZero domain):
+    // Spec hashes Account || Issuer || Currency. XLS-33 MPTs have no Currency;
+    // this implementation substitutes MPTokenIssuanceID while keeping Issuer.
+    // Interop requires agreement on that substitution (or a Currency encoding).
     auto const digest = sha512Half(Slice{kTag.data(), kTag.size()}, account, issuer, issuanceID);
     auto const randomness = confidential_mpt::reduceScalar(Slice{digest.data(), digest.size()});
     return randomness ? confidential_mpt::encryptZero(publicKey, *randomness) : std::nullopt;

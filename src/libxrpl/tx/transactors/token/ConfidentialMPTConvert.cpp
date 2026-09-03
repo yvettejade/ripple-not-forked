@@ -55,9 +55,9 @@ toScalar(Slice const data)
 [[nodiscard]] uint256
 makeConvertContext(STTx const& tx)
 {
-    // The supplemental proof document requires TransactionContextID here but
-    // does not define Convert's TxSpecific component. Bind the fields common
-    // to Equation (40), including the sequence/ticket replay domain.
+    // SPEC INCONSISTENCY (Updated_ConfidentialMPT TransactionContextID):
+    // Convert's TxSpecific component is unspecified. Provisional binding:
+    // ttCONFIDENTIAL_MPT_CONVERT || Account || IssuanceID || SeqOrTicket.
     return sha512Half(
         static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT),
         tx.getAccountID(sfAccount),

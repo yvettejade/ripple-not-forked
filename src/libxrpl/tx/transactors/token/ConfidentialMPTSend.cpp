@@ -419,8 +419,8 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     if (auto const ter = canTransfer(ctx.view, mptIssue, account, destination); !isTesSuccess(ter))
         return ter;
 
-    // XLS-0096 names terFROZEN, which is absent in this tree; checkFrozen
-    // applies the existing MPT result, tecLOCKED.
+    // SPEC INCONSISTENCY (xls-0096): names terFROZEN, which is absent here.
+    // checkFrozen applies the existing MPT result, tecLOCKED.
     if (auto const ter = checkFrozen(ctx.view, account, mptIssue); !isTesSuccess(ter))
         return ter;
     if (auto const ter = checkFrozen(ctx.view, destination, mptIssue); !isTesSuccess(ter))

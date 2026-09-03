@@ -203,9 +203,10 @@ ConfidentialMPTClawback::doApply()
         sfConfidentialBalanceVersion,
         version == std::numeric_limits<std::uint32_t>::max() ? 0 : version + 1);
 
-    // Burn: reduce COA and OA. Do not create/credit an issuer MPToken balance.
-    // Supplemental "public reserve" language is interpreted through XLS-33 OA
-    // semantics (outstanding supply contracts when confidential value is burned).
+    // SPEC INCONSISTENCY (xls-0096 clawback vs Updated_ConfidentialMPT):
+    // XLS-0096 burns OA+COA. Updated text describes crediting an issuer public
+    // reserve. This implementation follows XLS-0096 and burns OA+COA without
+    // crediting an issuer MPToken balance.
     auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
     auto const outstanding = (*sleIssuance)[sfOutstandingAmount];
     if (amount > coa || amount > outstanding)

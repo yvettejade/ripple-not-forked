@@ -205,8 +205,8 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     if (coa < amount)
         return tecINSUFFICIENT_FUNDS;
 
-    // XLS-0096 says terFROZEN, which does not exist in this tree. Existing
-    // MPT freeze/lock checks use tecLOCKED.
+    // SPEC INCONSISTENCY (xls-0096): names terFROZEN, absent in this tree.
+    // Existing MPT freeze/lock checks use tecLOCKED.
     if (sleMpt->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
         return tecLOCKED;
 
