@@ -1490,7 +1490,7 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         setConfidentialFee(send);
         credentialEnv(
             send,
-            credentials::Ids({uint256{1}}),
+            credentials::Ids({to_string(uint256{1})}),
             Ter(temDISABLED));
     }
 
