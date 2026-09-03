@@ -369,6 +369,10 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         return tecNO_PERMISSION;
 
     // TransferFee is incompatible with confidential transfers.
+    // Create/IssuanceSet already refuse a non-zero fee on a confidential
+    // issuance (temBAD_TRANSFER_FEE / tecNO_PERMISSION), so this branch is
+    // defense in depth for a ledger state that valid transactions cannot
+    // currently produce.
     if ((*sleIssuance)[sfTransferFee] != 0)
         return tecNO_PERMISSION;
 
