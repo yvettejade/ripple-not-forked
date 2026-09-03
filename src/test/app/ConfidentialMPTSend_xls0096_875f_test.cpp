@@ -124,6 +124,13 @@ class ConfidentialMPTSend_xls0096_875f_test : public beast::unit_test::Suite
             auto jv = makeSendJson(alice, bob, id, /*zkBytes=*/100);
             env(jv, Ter(temMALFORMED));
         }
+        // XLS-0096 Send ZKProof is exactly 946 bytes (192 + 754).
+        {
+            constexpr auto kExact = ConfidentialMPTSend::kZKProofBytes;
+            static_assert(kExact == 946u);
+            env(makeSendJson(alice, bob, id, kExact - 1), Ter(temMALFORMED));
+            env(makeSendJson(alice, bob, id, kExact + 1), Ter(temMALFORMED));
+        }
 
         // Commitment wrong length
         {

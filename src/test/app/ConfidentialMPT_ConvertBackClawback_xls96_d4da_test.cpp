@@ -155,6 +155,16 @@ class ConfidentialMPT_ConvertBackClawback_xls96_d4da_test : public beast::unit_t
             auto jv = makeConvertBackJson(bob, id, 1, /*zkBytes=*/100);
             env(jv, Ter(temMALFORMED));
         }
+        // XLS-0096 ConvertBack ZKProof is exactly 816 bytes (128 + 688).
+        // Off-by-one sizes must fail in preflight, not later.
+        {
+            constexpr auto kExact =
+                confidential_mpt::kConvertBackSigmaBytes +
+                ConfidentialMPTConvertBack::kBulletproofBytes;
+            static_assert(kExact == 816u);
+            env(makeConvertBackJson(bob, id, 1, kExact - 1), Ter(temMALFORMED));
+            env(makeConvertBackJson(bob, id, 1, kExact + 1), Ter(temMALFORMED));
+        }
         {
             auto jv = makeConvertBackJson(bob, id);
             jv[sfBalanceCommitment] = hexZeros(32);
@@ -194,6 +204,13 @@ class ConfidentialMPT_ConvertBackClawback_xls96_d4da_test : public beast::unit_t
         {
             auto jv = makeClawbackJson(alice, bob, id, 1, /*zkBytes=*/32);
             env(jv, Ter(temMALFORMED));
+        }
+        // XLS-0096 Clawback ZKProof is exactly 64 bytes.
+        {
+            constexpr auto kExact = confidential_mpt::kClawbackProofBytes;
+            static_assert(kExact == 64u);
+            env(makeClawbackJson(alice, bob, id, 1, kExact - 1), Ter(temMALFORMED));
+            env(makeClawbackJson(alice, bob, id, 1, kExact + 1), Ter(temMALFORMED));
         }
 
         env.close();
