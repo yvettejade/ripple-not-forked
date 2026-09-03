@@ -2729,6 +2729,305 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         BEAST_EXPECT((*after)[sfConfidentialBalanceVersion] == 0);
     }
 
+    void
+    testClawbackFrontRunning()
+    {
+        testcase(
+            "requirement evidence: Updated Remark 5.1 clawback front-running "
+            "and clawback under lock");
+        using namespace test::jtx;
+
+        auto features = testableAmendments();
+        features.set(featureConfidentialTransfer);
+        features.set(featureDynamicMPT);
+        Env env(*this, features);
+
+        // Updated Remark 5.1: clawback proofs bind the concrete issuer
+        // ciphertext. An intervening Send that changes IssuerEncryptedBalance
+        // must invalidate a previously prepared clawback proof (tecBAD_PROOF).
+        {
+            Account const issuer{"frIssuer"};
+            Account const alice{"frAlice"};
+            Account const bob{"frBob"};
+            MPTTester mpt(env, issuer, {.holders = {alice, bob}});
+            mpt.create(
+                {.maxAmt = 100,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 40}},
+                 .flags = tfMPTCanTransfer | tfMPTCanClawback |
+                     tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(401);
+            auto const auditorEncryption = key(403);
+            auto const aliceEncryption = key(405);
+            auto const bobEncryption = key(407);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = issuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            env(convertTx(
+                alice,
+                issuanceID,
+                40,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(3),
+                env.seq(alice)));
+            env(mergeTx(alice, issuanceID));
+            env(convertTx(
+                bob,
+                issuanceID,
+                0,
+                bobEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(5),
+                env.seq(bob)));
+
+            auto const aliceBefore = env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(aliceBefore))
+                return;
+            auto const aliceSpending =
+                cm::parseCiphertext((*aliceBefore)[sfConfidentialBalanceSpending]);
+            auto const aliceIssuerBefore =
+                cm::parseCiphertext((*aliceBefore)[sfIssuerEncryptedBalance]);
+            if (!BEAST_EXPECT(aliceSpending && aliceIssuerBefore))
+                return;
+
+            std::uint64_t constexpr aliceBalance = 40;
+            std::uint64_t constexpr sendAmount = 5;
+            auto const staleClawCtx =
+                clawbackContext(issuer, issuanceID, env.seq(issuer), alice);
+            cm::ClawbackPublicInput const staleClawInput{
+                .issuerKey = issuerEncryption.publicKey,
+                .c1 = cm::ciphertextC1(*aliceIssuerBefore),
+                .c2 = cm::ciphertextC2(*aliceIssuerBefore),
+                .m = aliceBalance};
+            auto const staleClawProof = cm::proveClawback(
+                staleClawInput, issuerEncryption.secret, asSlice(staleClawCtx));
+            if (!BEAST_EXPECT(staleClawProof))
+                return;
+
+            json::Value staleClawback;
+            staleClawback[jss::TransactionType] = jss::ConfidentialMPTClawback;
+            staleClawback[sfAccount] = issuer.human();
+            staleClawback[sfHolder] = alice.human();
+            staleClawback[sfMPTokenIssuanceID] = to_string(issuanceID);
+            staleClawback[sfMPTAmount] = std::to_string(aliceBalance);
+            staleClawback[sfZKProof] = hex(*staleClawProof);
+            setConfidentialFee(staleClawback);
+
+            // Intervening Send changes Alice's issuer ciphertext before clawback.
+            auto const sendRandomness = scalar(41);
+            auto const balanceBlinding = scalar(43);
+            auto const remainderBlinding = scalar(2);
+            auto const senderAmount =
+                cm::encryptAmount(aliceEncryption.publicKey, sendAmount, sendRandomness);
+            auto const destinationAmount =
+                cm::encryptAmount(bobEncryption.publicKey, sendAmount, sendRandomness);
+            auto const issuerAmount =
+                cm::encryptAmount(issuerEncryption.publicKey, sendAmount, sendRandomness);
+            auto const auditorAmount =
+                cm::encryptAmount(auditorEncryption.publicKey, sendAmount, sendRandomness);
+            auto const amountCommitment = cm::pedersenCommit(sendAmount, sendRandomness);
+            auto const balanceCommitment =
+                cm::pedersenCommit(aliceBalance, balanceBlinding);
+            auto const remainderCommitment =
+                cm::pedersenCommit(aliceBalance - sendAmount, remainderBlinding);
+            if (!BEAST_EXPECT(
+                    senderAmount && destinationAmount && issuerAmount && auditorAmount &&
+                    amountCommitment && balanceCommitment && remainderCommitment))
+                return;
+
+            auto const aliceVersion =
+                (*aliceBefore)[~sfConfidentialBalanceVersion].value_or(0);
+            auto const sendCtx =
+                sendContext(alice, issuanceID, env.seq(alice), bob, aliceVersion);
+            cm::SendPublicInput sendInput{
+                .recipientKeys =
+                    {aliceEncryption.publicKey,
+                     bobEncryption.publicKey,
+                     issuerEncryption.publicKey,
+                     auditorEncryption.publicKey},
+                .senderKey = aliceEncryption.publicKey,
+                .c1 = cm::ciphertextC1(*senderAmount),
+                .c2 =
+                    {cm::ciphertextC2(*senderAmount),
+                     cm::ciphertextC2(*destinationAmount),
+                     cm::ciphertextC2(*issuerAmount),
+                     cm::ciphertextC2(*auditorAmount)},
+                .amountCommitment = *amountCommitment,
+                .balanceCommitment = *balanceCommitment,
+                .balanceC1 = cm::ciphertextC1(*aliceSpending),
+                .balanceC2 = cm::ciphertextC2(*aliceSpending)};
+            cm::SendWitness const sendWitness{
+                .m = sendAmount,
+                .r = sendRandomness,
+                .b = aliceBalance,
+                .rho = balanceBlinding,
+                .sk = aliceEncryption.secret};
+            auto const sigma = cm::proveSendSigma(sendInput, sendWitness, asSlice(sendCtx));
+            auto const range = cm::proveAggregatedBulletproof(
+                *amountCommitment,
+                *remainderCommitment,
+                sendAmount,
+                sendRandomness,
+                aliceBalance - sendAmount,
+                remainderBlinding,
+                asSlice(sendCtx));
+            if (!BEAST_EXPECT(sigma && range))
+                return;
+
+            json::Value send;
+            send[jss::TransactionType] = jss::ConfidentialMPTSend;
+            send[sfAccount] = alice.human();
+            send[sfDestination] = bob.human();
+            send[sfMPTokenIssuanceID] = to_string(issuanceID);
+            send[sfSenderEncryptedAmount] = hex(*senderAmount);
+            send[sfDestinationEncryptedAmount] = hex(*destinationAmount);
+            send[sfIssuerEncryptedAmount] = hex(*issuerAmount);
+            send[sfAuditorEncryptedAmount] = hex(*auditorAmount);
+            send[sfAmountCommitment] = hex(*amountCommitment);
+            send[sfBalanceCommitment] = hex(*balanceCommitment);
+            send[sfZKProof] = joinedHex(*sigma, *range);
+            setConfidentialFee(send);
+            env(send);
+
+            auto const aliceAfterSend = env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(aliceAfterSend))
+                return;
+            auto const aliceIssuerAfter =
+                cm::parseCiphertext((*aliceAfterSend)[sfIssuerEncryptedBalance]);
+            if (!BEAST_EXPECT(aliceIssuerAfter))
+                return;
+            BEAST_EXPECT(*aliceIssuerAfter != *aliceIssuerBefore);
+
+            // Stale clawback (bound to pre-Send ciphertext / full 40) fails.
+            env(staleClawback, Ter(tecBAD_PROOF));
+
+            // Fresh clawback over the post-Send remainder succeeds.
+            std::uint64_t constexpr remainder = aliceBalance - sendAmount;
+            auto const freshClawCtx =
+                clawbackContext(issuer, issuanceID, env.seq(issuer), alice);
+            cm::ClawbackPublicInput const freshClawInput{
+                .issuerKey = issuerEncryption.publicKey,
+                .c1 = cm::ciphertextC1(*aliceIssuerAfter),
+                .c2 = cm::ciphertextC2(*aliceIssuerAfter),
+                .m = remainder};
+            auto const freshClawProof = cm::proveClawback(
+                freshClawInput, issuerEncryption.secret, asSlice(freshClawCtx));
+            if (!BEAST_EXPECT(freshClawProof))
+                return;
+
+            json::Value freshClawback;
+            freshClawback[jss::TransactionType] = jss::ConfidentialMPTClawback;
+            freshClawback[sfAccount] = issuer.human();
+            freshClawback[sfHolder] = alice.human();
+            freshClawback[sfMPTokenIssuanceID] = to_string(issuanceID);
+            freshClawback[sfMPTAmount] = std::to_string(remainder);
+            freshClawback[sfZKProof] = hex(*freshClawProof);
+            setConfidentialFee(freshClawback);
+            env(freshClawback);
+
+            auto const issuance = env.le(keylet::mptIssuance(issuanceID));
+            auto const aliceFinal = env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(issuance && aliceFinal))
+                return;
+            BEAST_EXPECT((*issuance)[sfOutstandingAmount] == sendAmount);
+            BEAST_EXPECT(
+                (*issuance)[~sfConfidentialOutstandingAmount].value_or(0) == sendAmount);
+        }
+
+        // Remark 5.1 recommends locking before clawback. Lock blocks holder
+        // Send/Merge/ConvertBack (tecLOCKED) but must still allow issuer clawback.
+        {
+            Account const issuer{"lkIssuer"};
+            Account const alice{"lkAlice"};
+            MPTTester mpt(env, issuer, {.holders = {alice}});
+            mpt.create(
+                {.maxAmt = 50,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 20}},
+                 .flags = tfMPTCanTransfer | tfMPTCanClawback | tfMPTCanLock |
+                     tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(411);
+            auto const auditorEncryption = key(413);
+            auto const aliceEncryption = key(415);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = issuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            env(convertTx(
+                alice,
+                issuanceID,
+                20,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(7),
+                env.seq(alice)));
+            env(mergeTx(alice, issuanceID));
+
+            json::Value lockHolder;
+            lockHolder[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            lockHolder[sfAccount] = issuer.human();
+            lockHolder[sfMPTokenIssuanceID] = to_string(issuanceID);
+            lockHolder[sfHolder] = alice.human();
+            env(lockHolder, Txflags(tfMPTLock));
+            env.close();
+
+            auto const aliceMpt = env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(aliceMpt && aliceMpt->isFlag(lsfMPTLocked)))
+                return;
+            auto const aliceIssuer =
+                cm::parseCiphertext((*aliceMpt)[sfIssuerEncryptedBalance]);
+            if (!BEAST_EXPECT(aliceIssuer))
+                return;
+
+            std::uint64_t constexpr amount = 20;
+            auto const clawCtx =
+                clawbackContext(issuer, issuanceID, env.seq(issuer), alice);
+            cm::ClawbackPublicInput const clawInput{
+                .issuerKey = issuerEncryption.publicKey,
+                .c1 = cm::ciphertextC1(*aliceIssuer),
+                .c2 = cm::ciphertextC2(*aliceIssuer),
+                .m = amount};
+            auto const clawProof =
+                cm::proveClawback(clawInput, issuerEncryption.secret, asSlice(clawCtx));
+            if (!BEAST_EXPECT(clawProof))
+                return;
+
+            json::Value clawback;
+            clawback[jss::TransactionType] = jss::ConfidentialMPTClawback;
+            clawback[sfAccount] = issuer.human();
+            clawback[sfHolder] = alice.human();
+            clawback[sfMPTokenIssuanceID] = to_string(issuanceID);
+            clawback[sfMPTAmount] = std::to_string(amount);
+            clawback[sfZKProof] = hex(*clawProof);
+            setConfidentialFee(clawback);
+            env(clawback);
+
+            auto const issuance = env.le(keylet::mptIssuance(issuanceID));
+            if (!BEAST_EXPECT(issuance))
+                return;
+            BEAST_EXPECT((*issuance)[sfOutstandingAmount] == 0);
+            BEAST_EXPECT(
+                (*issuance)[~sfConfidentialOutstandingAmount].value_or(0) == 0);
+        }
+    }
+
 
 public:
     void
@@ -2745,6 +3044,7 @@ public:
         testRequirementEvidence();
         testInboxRerandomizeAndConvertBackVersion();
         testVersionWrap();
+        testClawbackFrontRunning();
     }
 };
 
