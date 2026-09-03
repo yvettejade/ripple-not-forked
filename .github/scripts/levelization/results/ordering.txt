@@ -5,6 +5,7 @@ libxrpl.core > xrpl.basics
 libxrpl.core > xrpl.core
 libxrpl.core > xrpl.json
 libxrpl.crypto > xrpl.basics
+libxrpl.crypto > xrpl.crypto
 libxrpl.json > xrpl.basics
 libxrpl.json > xrpl.json
 libxrpl.ledger > xrpl.basics
@@ -20,6 +21,7 @@ libxrpl.nodestore > xrpl.json
 libxrpl.nodestore > xrpl.nodestore
 libxrpl.nodestore > xrpl.protocol
 libxrpl.protocol > xrpl.basics
+libxrpl.protocol > xrpl.crypto
 libxrpl.protocol > xrpl.json
 libxrpl.protocol > xrpl.protocol
 libxrpl.rdb > xrpl.basics
@@ -95,6 +97,8 @@ test.core > xrpl.json
 test.core > xrpl.protocol
 test.core > xrpl.rdb
 test.core > xrpl.server
+test.crypto > xrpl.basics
+test.crypto > xrpl.crypto
 test.csf > xrpl.basics
 test.csf > xrpld.consensus
 test.csf > xrpl.json
@@ -151,6 +155,7 @@ test.peerfinder > xrpl.protocol
 test.protocol > test.jtx
 test.protocol > test.unit_test
 test.protocol > xrpl.basics
+test.protocol > xrpl.crypto
 test.protocol > xrpl.json
 test.protocol > xrpl.protocol
 test.resource > test.unit_test
@@ -188,6 +193,7 @@ test.unit_test > xrpl.basics
 test.unit_test > xrpl.protocol
 tests.libxrpl > xrpl.basics
 tests.libxrpl > xrpl.core
+tests.libxrpl > xrpl.crypto
 tests.libxrpl > xrpl.json
 tests.libxrpl > xrpl.ledger
 tests.libxrpl > xrpl.net
@@ -202,6 +208,7 @@ xrpl.conditions > xrpl.protocol
 xrpl.core > xrpl.basics
 xrpl.core > xrpl.json
 xrpl.core > xrpl.protocol
+xrpl.crypto > xrpl.basics
 xrpl.json > xrpl.basics
 xrpl.ledger > xrpl.basics
 xrpl.ledger > xrpl.protocol
@@ -210,6 +217,7 @@ xrpl.net > xrpl.basics
 xrpl.nodestore > xrpl.basics
 xrpl.nodestore > xrpl.protocol
 xrpl.protocol > xrpl.basics
+xrpl.protocol > xrpl.crypto
 xrpl.protocol > xrpl.json
 xrpl.protocol_autogen > xrpl.json
 xrpl.protocol_autogen > xrpl.protocol
@@ -221,6 +229,7 @@ xrpl.resource > xrpl.json
 xrpl.resource > xrpl.protocol
 xrpl.server > xrpl.basics
 xrpl.server > xrpl.core
+xrpl.server > xrpl.crypto
 xrpl.server > xrpl.json
 xrpl.server > xrpl.protocol
 xrpl.server > xrpl.rdb
@@ -236,6 +245,7 @@ xrpl.tx > xrpl.protocol
 xrpld.app > test.unit_test
 xrpld.app > xrpl.basics
 xrpld.app > xrpl.core
+xrpld.app > xrpl.crypto
 xrpld.app > xrpld.consensus
 xrpld.app > xrpld.core
 xrpld.app > xrpl.json
@@ -280,6 +290,7 @@ xrpld.perflog > xrpl.json
 xrpld.perflog > xrpl.protocol
 xrpld.rpc > xrpl.basics
 xrpld.rpc > xrpl.core
+xrpld.rpc > xrpl.crypto
 xrpld.rpc > xrpld.core
 xrpld.rpc > xrpl.json
 xrpld.rpc > xrpl.ledger
