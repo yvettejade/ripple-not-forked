@@ -177,8 +177,10 @@ enum LedgerEntryType : std::uint16_t {
         LSF_FLAG(lsfMPTCanEscrow, 0x00000008)                                                                                      \
         LSF_FLAG(lsfMPTCanTrade, 0x00000010)                                                                                       \
         LSF_FLAG(lsfMPTCanTransfer, 0x00000020)                                                                                    \
-        LSF_FLAG(lsfMPTCanClawback, 0x00000040))                                                                                   \
+        LSF_FLAG(lsfMPTCanClawback, 0x00000040)                                                                                    \
+        LSF_FLAG(lsfMPTCanHoldConfidentialBalance, 0x00000080))                                                                    \
                                                                                                                                    \
+    /* XLS-0096 uses ImmutableFlags/lsif*; this branch's DynamicMPT model uses MutableFlags/lsmf*. */                              \
     LEDGER_OBJECT(MPTokenIssuanceMutable,                                                                                          \
         LSF_FLAG(lsmfMPTCanMutateCanLock, 0x00000002)                                                                              \
         LSF_FLAG(lsmfMPTCanMutateRequireAuth, 0x00000004)                                                                          \
@@ -186,6 +188,7 @@ enum LedgerEntryType : std::uint16_t {
         LSF_FLAG(lsmfMPTCanMutateCanTrade, 0x00000010)                                                                             \
         LSF_FLAG(lsmfMPTCanMutateCanTransfer, 0x00000020)                                                                          \
         LSF_FLAG(lsmfMPTCanMutateCanClawback, 0x00000040)                                                                          \
+        LSF_FLAG(lsmfMPTCanMutateCanHoldConfidentialBalance, 0x00000080)                                                           \
         LSF_FLAG(lsmfMPTCanMutateMetadata, 0x00010000)                                                                             \
         LSF_FLAG(lsmfMPTCanMutateTransferFee, 0x00020000))                                                                         \
                                                                                                                                    \

@@ -388,12 +388,16 @@ ValidMPTPayment::visitEntry(
         if (type == ltMPTOKEN_ISSUANCE)
         {
             auto const outstanding = sle[sfOutstandingAmount];
-            if (outstanding > kMaxMpTokenAmount)
+            auto const confidential = sle[~sfConfidentialOutstandingAmount].value_or(0);
+            if (outstanding > kMaxMpTokenAmount || confidential > outstanding)
             {
                 overflow_ = true;
                 return false;
             }
-            data_[makeKey(sle)].outstanding[static_cast<std::size_t>(order)] = outstanding;
+            auto& data = data_[makeKey(sle)];
+            auto const index = static_cast<std::size_t>(order);
+            data.outstanding[index] = outstanding;
+            data.confidential[index] = confidential;
         }
         else if (type == ltMPTOKEN)
         {
@@ -456,11 +460,22 @@ ValidMPTPayment::finalize(
             (void)id;
             static constexpr auto kIBefore = static_cast<std::size_t>(Order::Before);
             static constexpr auto kIAfter = static_cast<std::size_t>(Order::After);
+            auto const confidentialDelta =
+                data.confidential[kIAfter] - data.confidential[kIBefore];
             bool const addOverflows =
-                (data.mptAmount > 0 && data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
-                (data.mptAmount < 0 && data.outstanding[kIBefore] < (-signedMax - data.mptAmount));
+                (data.mptAmount > 0 &&
+                 data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
+                (data.mptAmount < 0 &&
+                 data.outstanding[kIBefore] < (-signedMax - data.mptAmount)) ||
+                (confidentialDelta > 0 &&
+                 data.outstanding[kIBefore] + data.mptAmount >
+                     (signedMax - confidentialDelta)) ||
+                (confidentialDelta < 0 &&
+                 data.outstanding[kIBefore] + data.mptAmount <
+                     (-signedMax - confidentialDelta));
             if (addOverflows ||
-                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + data.mptAmount))
+                data.outstanding[kIAfter] !=
+                    (data.outstanding[kIBefore] + data.mptAmount + confidentialDelta))
             {
                 JLOG(j.fatal()) << "Invariant failed: invalid OutstandingAmount balance "
                                 << data.outstanding[kIBefore] << " " << data.outstanding[kIAfter]
@@ -613,6 +628,147 @@ ValidMPTTransfer::finalize(
         }
     }
 
+    return true;
+}
+
+void
+ValidConfidentialMPT::visitEntry(
+    bool isDelete,
+    std::shared_ptr<SLE const> const& before,
+    std::shared_ptr<SLE const> const& after)
+{
+    auto const value = [](SLE const* sle, SField const& field) -> std::uint64_t {
+        return sle && sle->isFieldPresent(field) ? sle->getFieldU64(field) : 0;
+    };
+
+    auto const beforeSle = before.get();
+    auto const afterSle = isDelete ? nullptr : after.get();
+    auto const observed = afterSle ? afterSle : beforeSle;
+    if (!observed)
+        return;
+
+    if (observed->getType() == ltMPTOKEN_ISSUANCE)
+    {
+        auto const id = makeMptID((*observed)[sfSequence], (*observed)[sfIssuer]);
+        auto& state = state_[id];
+        state.confidentialDelta +=
+            static_cast<std::int64_t>(value(afterSle, sfConfidentialOutstandingAmount)) -
+            static_cast<std::int64_t>(value(beforeSle, sfConfidentialOutstandingAmount));
+        state.outstandingDelta +=
+            static_cast<std::int64_t>(value(afterSle, sfOutstandingAmount)) -
+            static_cast<std::int64_t>(value(beforeSle, sfOutstandingAmount));
+
+        if (afterSle &&
+            value(afterSle, sfConfidentialOutstandingAmount) >
+                value(afterSle, sfOutstandingAmount))
+            invalid_ = true;
+        return;
+    }
+
+    if (observed->getType() != ltMPTOKEN)
+        return;
+
+    auto const id = (*observed)[sfMPTokenIssuanceID];
+    state_[id].publicDelta +=
+        static_cast<std::int64_t>(value(afterSle, sfMPTAmount)) -
+        static_cast<std::int64_t>(value(beforeSle, sfMPTAmount));
+
+    auto const hasConfidentialState = [](SLE const* sle) {
+        return sle && (sle->isFieldPresent(sfHolderEncryptionKey) ||
+                       sle->isFieldPresent(sfConfidentialBalanceSpending) ||
+                       sle->isFieldPresent(sfConfidentialBalanceInbox) ||
+                       sle->isFieldPresent(sfIssuerEncryptedBalance) ||
+                       sle->isFieldPresent(sfAuditorEncryptedBalance));
+    };
+    if (isDelete && hasConfidentialState(observed))
+        invalid_ = true;
+
+    if (!afterSle)
+        return;
+
+    bool const hasSpending = afterSle->isFieldPresent(sfConfidentialBalanceSpending);
+    bool const hasInbox = afterSle->isFieldPresent(sfConfidentialBalanceInbox);
+    bool const hasIssuer = afterSle->isFieldPresent(sfIssuerEncryptedBalance);
+    if (hasSpending != hasInbox || hasSpending != hasIssuer)
+        invalid_ = true;
+
+    if (hasConfidentialState(afterSle))
+        confidentialHoldings_.emplace_back(id, (*afterSle)[sfAccount]);
+
+    bool const spendingChanged =
+        beforeSle && beforeSle->isFieldPresent(sfConfidentialBalanceSpending) &&
+        (!hasSpending ||
+         beforeSle->getFieldVL(sfConfidentialBalanceSpending) !=
+             afterSle->getFieldVL(sfConfidentialBalanceSpending));
+    if (spendingChanged &&
+        beforeSle->getFieldU32(sfConfidentialBalanceVersion) ==
+            afterSle->getFieldU32(sfConfidentialBalanceVersion))
+        invalid_ = true;
+}
+
+bool
+ValidConfidentialMPT::finalize(
+    STTx const& tx,
+    TER const result,
+    XRPAmount const,
+    ReadView const& view,
+    beast::Journal const& j) const
+{
+    if (!view.rules().enabled(featureConfidentialTransfer) || !isTesSuccess(result))
+        return true;
+
+    if (invalid_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: invalid Confidential MPT ledger state";
+        return false;
+    }
+
+    for (auto const& [id, account] : confidentialHoldings_)
+    {
+        (void)account;
+        auto const issuance = view.read(keylet::mptIssuance(id));
+        if (!issuance || !issuance->isFlag(lsfMPTCanHoldConfidentialBalance))
+        {
+            JLOG(j.fatal()) << "Invariant failed: confidential balance without issuance flag";
+            return false;
+        }
+    }
+
+    for (auto const& [id, state] : state_)
+    {
+        (void)id;
+        switch (tx.getTxnType())
+        {
+            case ttCONFIDENTIAL_MPT_CONVERT:
+            case ttCONFIDENTIAL_MPT_CONVERT_BACK:
+                if (state.outstandingDelta != 0 ||
+                    state.confidentialDelta != -state.publicDelta)
+                {
+                    JLOG(j.fatal()) << "Invariant failed: invalid confidential conversion";
+                    return false;
+                }
+                break;
+            case ttCONFIDENTIAL_MPT_SEND:
+            case ttCONFIDENTIAL_MPT_MERGE_INBOX:
+                if (state.outstandingDelta != 0 || state.confidentialDelta != 0 ||
+                    state.publicDelta != 0)
+                {
+                    JLOG(j.fatal()) << "Invariant failed: confidential transfer changed supply";
+                    return false;
+                }
+                break;
+            case ttCONFIDENTIAL_MPT_CLAWBACK:
+                if (state.confidentialDelta >= 0 ||
+                    state.confidentialDelta != state.outstandingDelta || state.publicDelta != 0)
+                {
+                    JLOG(j.fatal()) << "Invariant failed: invalid confidential clawback accounting";
+                    return false;
+                }
+                break;
+            default:
+                break;
+        }
+    }
     return true;
 }
 

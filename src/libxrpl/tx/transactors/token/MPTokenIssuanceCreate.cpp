@@ -37,6 +37,11 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfMutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    if (ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) &&
+        !(ctx.rules.enabled(featureConfidentialTransfer) &&
+          ctx.rules.enabled(featureDynamicMPT)))
+        return false;
+
     return true;
 }
 
@@ -64,6 +69,9 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
     if (auto const fee = ctx.tx[~sfTransferFee])
     {
         if (fee > kMaxTransferFee)
+            return temBAD_TRANSFER_FEE;
+
+        if (fee > 0u && ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance))
             return temBAD_TRANSFER_FEE;
 
         // If a non-zero TransferFee is set then the tfTransferable flag
