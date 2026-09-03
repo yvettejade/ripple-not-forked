@@ -4611,7 +4611,8 @@ class Invariants_test : public beast::unit_test::Suite
                 [&](Account const&, Account const& a2, Env& env) {
                     Account const issuer{"confVersionIssuer"};
                     env.fund(XRP(1'000), issuer);
-                    MPTTester mpt(env, issuer, {.holders = {a2}});
+                    MPTTester mpt(
+                        env, issuer, {.holders = {a2}, .fund = false});
                     mpt.create(
                         {.maxAmt = 100,
                          .authorize = MPTCreate::allHolders,
@@ -4620,7 +4621,7 @@ class Invariants_test : public beast::unit_test::Suite
                              tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
                     id = mpt.issuanceID();
 
-                    return env.app().getOpenLedger().modify(
+                    bool const modified = env.app().getOpenLedger().modify(
                         [&](OpenView& view, beast::Journal) {
                             auto const sle = view.read(keylet::mptoken(id, a2));
                             if (!sle)
@@ -4640,6 +4641,11 @@ class Invariants_test : public beast::unit_test::Suite
                             view.rawReplace(replacement);
                             return true;
                         });
+                    auto const initialized =
+                        env.le(keylet::mptoken(id, a2));
+                    return modified && initialized &&
+                        initialized->isFieldPresent(
+                            sfConfidentialBalanceSpending);
                 });
         }
 
@@ -4662,7 +4668,8 @@ class Invariants_test : public beast::unit_test::Suite
                 [&](Account const&, Account const& a2, Env& env) {
                     Account const issuer{"confDeleteIssuer"};
                     env.fund(XRP(1'000), issuer);
-                    MPTTester mpt(env, issuer, {.holders = {a2}});
+                    MPTTester mpt(
+                        env, issuer, {.holders = {a2}, .fund = false});
                     mpt.create(
                         {.maxAmt = 100,
                          .authorize = MPTCreate::allHolders,
@@ -4671,7 +4678,7 @@ class Invariants_test : public beast::unit_test::Suite
                              tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
                     id = mpt.issuanceID();
 
-                    return env.app().getOpenLedger().modify(
+                    bool const modified = env.app().getOpenLedger().modify(
                         [&](OpenView& view, beast::Journal) {
                             auto const sle = view.read(keylet::mptoken(id, a2));
                             if (!sle)
@@ -4691,6 +4698,11 @@ class Invariants_test : public beast::unit_test::Suite
                             view.rawReplace(replacement);
                             return true;
                         });
+                    auto const initialized =
+                        env.le(keylet::mptoken(id, a2));
+                    return modified && initialized &&
+                        initialized->isFieldPresent(
+                            sfConfidentialBalanceSpending);
                 });
         }
 
