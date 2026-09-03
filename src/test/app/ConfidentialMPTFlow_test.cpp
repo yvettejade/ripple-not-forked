@@ -2911,15 +2911,64 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             // Stale clawback (bound to pre-Send ciphertext / full 40) fails.
             env(staleClawback, Ter(tecBAD_PROOF));
 
-            // Fresh clawback over the post-Send remainder succeeds.
+            // Fresh clawback over the post-Send remainder succeeds after
+            // amount/plaintext mismatch rejections. tec* results consume
+            // sequence, so each proof must bind the issuer sequence used
+            // at submit time.
             std::uint64_t constexpr remainder = aliceBalance - sendAmount;
-            auto const freshClawCtx =
-                clawbackContext(issuer, issuanceID, env.seq(issuer), alice);
             cm::ClawbackPublicInput const freshClawInput{
                 .issuerKey = issuerEncryption.publicKey,
                 .c1 = cm::ciphertextC1(*aliceIssuerAfter),
                 .c2 = cm::ciphertextC2(*aliceIssuerAfter),
                 .m = remainder};
+
+            // Updated Sec 5.5/5.7: public input m is the tx amount. A valid
+            // remainder proof submitted with a mismatched amount must fail.
+            {
+                auto const wrongAmtCtx =
+                    clawbackContext(issuer, issuanceID, env.seq(issuer), alice);
+                auto const wrongAmtProof = cm::proveClawback(
+                    freshClawInput, issuerEncryption.secret, asSlice(wrongAmtCtx));
+                if (!BEAST_EXPECT(wrongAmtProof))
+                    return;
+                json::Value wrongAmount;
+                wrongAmount[jss::TransactionType] = jss::ConfidentialMPTClawback;
+                wrongAmount[sfAccount] = issuer.human();
+                wrongAmount[sfHolder] = alice.human();
+                wrongAmount[sfMPTokenIssuanceID] = to_string(issuanceID);
+                wrongAmount[sfMPTAmount] = std::to_string(remainder - 1);
+                wrongAmount[sfZKProof] = hex(*wrongAmtProof);
+                setConfidentialFee(wrongAmount);
+                env(wrongAmount, Ter(tecBAD_PROOF));
+            }
+
+            // A proof for the wrong plaintext against the real ciphertext
+            // must also fail even when the tx amount matches that wrong m.
+            {
+                auto const wrongMCtx =
+                    clawbackContext(issuer, issuanceID, env.seq(issuer), alice);
+                cm::ClawbackPublicInput const wrongMInput{
+                    .issuerKey = issuerEncryption.publicKey,
+                    .c1 = cm::ciphertextC1(*aliceIssuerAfter),
+                    .c2 = cm::ciphertextC2(*aliceIssuerAfter),
+                    .m = remainder - 1};
+                auto const wrongMProof = cm::proveClawback(
+                    wrongMInput, issuerEncryption.secret, asSlice(wrongMCtx));
+                if (!BEAST_EXPECT(wrongMProof))
+                    return;
+                json::Value wrongPlaintext;
+                wrongPlaintext[jss::TransactionType] = jss::ConfidentialMPTClawback;
+                wrongPlaintext[sfAccount] = issuer.human();
+                wrongPlaintext[sfHolder] = alice.human();
+                wrongPlaintext[sfMPTokenIssuanceID] = to_string(issuanceID);
+                wrongPlaintext[sfMPTAmount] = std::to_string(remainder - 1);
+                wrongPlaintext[sfZKProof] = hex(*wrongMProof);
+                setConfidentialFee(wrongPlaintext);
+                env(wrongPlaintext, Ter(tecBAD_PROOF));
+            }
+
+            auto const freshClawCtx =
+                clawbackContext(issuer, issuanceID, env.seq(issuer), alice);
             auto const freshClawProof = cm::proveClawback(
                 freshClawInput, issuerEncryption.secret, asSlice(freshClawCtx));
             if (!BEAST_EXPECT(freshClawProof))
@@ -2933,33 +2982,6 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             freshClawback[sfMPTAmount] = std::to_string(remainder);
             freshClawback[sfZKProof] = hex(*freshClawProof);
             setConfidentialFee(freshClawback);
-
-            // Updated Sec 5.5/5.7: public input m is the tx amount. A valid
-            // remainder proof submitted with a mismatched amount must fail.
-            {
-                json::Value wrongAmount = freshClawback;
-                wrongAmount[sfMPTAmount] = std::to_string(remainder - 1);
-                env(wrongAmount, Ter(tecBAD_PROOF));
-            }
-
-            // A proof for the wrong plaintext against the real ciphertext
-            // must also fail even when the tx amount matches that wrong m.
-            {
-                cm::ClawbackPublicInput const wrongMInput{
-                    .issuerKey = issuerEncryption.publicKey,
-                    .c1 = cm::ciphertextC1(*aliceIssuerAfter),
-                    .c2 = cm::ciphertextC2(*aliceIssuerAfter),
-                    .m = remainder - 1};
-                auto const wrongMProof = cm::proveClawback(
-                    wrongMInput, issuerEncryption.secret, asSlice(freshClawCtx));
-                if (!BEAST_EXPECT(wrongMProof))
-                    return;
-                json::Value wrongPlaintext = freshClawback;
-                wrongPlaintext[sfMPTAmount] = std::to_string(remainder - 1);
-                wrongPlaintext[sfZKProof] = hex(*wrongMProof);
-                env(wrongPlaintext, Ter(tecBAD_PROOF));
-            }
-
             env(freshClawback);
 
             auto const issuance = env.le(keylet::mptIssuance(issuanceID));
