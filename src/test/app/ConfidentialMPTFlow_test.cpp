@@ -31,6 +31,12 @@
 #include <xrpl/protocol/TxFlags.h>
 #include <xrpl/protocol/digest.h>
 #include <xrpl/protocol/jss.h>
+#include <xrpl/tx/Transactor.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTClawback.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTConvertBack.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
 
 #include <array>
 #include <cstdint>
@@ -723,6 +729,271 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         }
     }
 
+    void
+    testFeesAndPolicyFailures()
+    {
+        testcase("10x base fee, EncZero pin, clawback flag, destroy with COA");
+        using namespace test::jtx;
+
+        auto features = testableAmendments();
+        features.set(featureConfidentialTransfer);
+        features.set(featureDynamicMPT);
+        Env env(*this, features);
+        Account const issuer{"feeIssuer"};
+        Account const alice{"feeAlice"};
+        Account const bob{"feeBob"};
+
+        // --- 10x fee (XLS-0096 §14.2) ---
+        {
+            MPTTester mpt(env, issuer, {.holders = {alice}});
+            mpt.create(
+                {.maxAmt = 1'000,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 10}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+
+            auto checkTenX = [&](json::Value jv) {
+                setConfidentialFee(jv);
+                auto const jtx = env.jt(jv);
+                if (!BEAST_EXPECT(jtx.stx))
+                    return;
+                auto const base = Transactor::calculateBaseFee(*env.current(), *jtx.stx);
+                auto const typed = [&]() -> XRPAmount {
+                    switch (jtx.stx->getTxnType())
+                    {
+                        case ttCONFIDENTIAL_MPT_CONVERT:
+                            return ConfidentialMPTConvert::calculateBaseFee(
+                                *env.current(), *jtx.stx);
+                        case ttCONFIDENTIAL_MPT_MERGE_INBOX:
+                            return ConfidentialMPTMergeInbox::calculateBaseFee(
+                                *env.current(), *jtx.stx);
+                        case ttCONFIDENTIAL_MPT_CONVERT_BACK:
+                            return ConfidentialMPTConvertBack::calculateBaseFee(
+                                *env.current(), *jtx.stx);
+                        case ttCONFIDENTIAL_MPT_SEND:
+                            return ConfidentialMPTSend::calculateBaseFee(
+                                *env.current(), *jtx.stx);
+                        case ttCONFIDENTIAL_MPT_CLAWBACK:
+                            return ConfidentialMPTClawback::calculateBaseFee(
+                                *env.current(), *jtx.stx);
+                        default:
+                            return XRPAmount{0};
+                    }
+                }();
+                BEAST_EXPECT(typed == base * 10);
+            };
+
+            checkTenX(mergeTx(alice, issuanceID));
+
+            json::Value convert;
+            convert[jss::TransactionType] = jss::ConfidentialMPTConvert;
+            convert[sfAccount] = alice.human();
+            convert[sfMPTokenIssuanceID] = to_string(issuanceID);
+            convert[sfMPTAmount] = "1";
+            convert[sfHolderEncryptionKey] = std::string(66, '0');
+            convert[sfHolderEncryptedAmount] = std::string(132, '0');
+            convert[sfIssuerEncryptedAmount] = std::string(132, '0');
+            convert[sfBlindingFactor] = std::string(64, '0');
+            convert[sfZKProof] = std::string(128, '0');
+            checkTenX(convert);
+
+            json::Value send;
+            send[jss::TransactionType] = jss::ConfidentialMPTSend;
+            send[sfAccount] = alice.human();
+            send[sfDestination] = bob.human();
+            send[sfMPTokenIssuanceID] = to_string(issuanceID);
+            send[sfSenderEncryptedAmount] = std::string(132, '0');
+            send[sfDestinationEncryptedAmount] = std::string(132, '0');
+            send[sfIssuerEncryptedAmount] = std::string(132, '0');
+            send[sfAmountCommitment] = std::string(66, '0');
+            send[sfBalanceCommitment] = std::string(66, '0');
+            send[sfZKProof] = std::string(946 * 2, '0');
+            checkTenX(send);
+
+            json::Value convertBack;
+            convertBack[jss::TransactionType] = jss::ConfidentialMPTConvertBack;
+            convertBack[sfAccount] = alice.human();
+            convertBack[sfMPTokenIssuanceID] = to_string(issuanceID);
+            convertBack[sfMPTAmount] = "1";
+            convertBack[sfHolderEncryptedAmount] = std::string(132, '0');
+            convertBack[sfIssuerEncryptedAmount] = std::string(132, '0');
+            convertBack[sfBlindingFactor] = std::string(64, '0');
+            convertBack[sfBalanceCommitment] = std::string(66, '0');
+            convertBack[sfZKProof] = std::string(816 * 2, '0');
+            checkTenX(convertBack);
+
+            json::Value clawback;
+            clawback[jss::TransactionType] = jss::ConfidentialMPTClawback;
+            clawback[sfAccount] = issuer.human();
+            clawback[sfHolder] = alice.human();
+            clawback[sfMPTokenIssuanceID] = to_string(issuanceID);
+            clawback[sfMPTAmount] = "1";
+            clawback[sfZKProof] = std::string(128, '0');
+            checkTenX(clawback);
+        }
+
+        // --- EncZero pin: helper ciphertext is deterministic ---
+        {
+            auto const pk = key(99).publicKey;
+            AccountID const acct = alice.id();
+            AccountID const iss = issuer.id();
+            MPTID const id = makeMptID(1, issuer);
+            auto const a = confidentialMPTEncryptedZero(pk, acct, iss, id);
+            auto const b = confidentialMPTEncryptedZero(pk, acct, iss, id);
+            BEAST_EXPECT(a && b && *a == *b);
+            auto const c = confidentialMPTEncryptedZero(pk, bob.id(), iss, id);
+            BEAST_EXPECT(c && a && *c != *a);
+        }
+
+        // --- Clawback requires lsfMPTCanClawback ---
+        {
+            Account const noClawIssuer{"noClawIssuer"};
+            Account const noClawAlice{"noClawAlice"};
+            MPTTester mpt(env, noClawIssuer, {.holders = {noClawAlice}});
+            mpt.create(
+                {.maxAmt = 100,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{noClawAlice}, 20}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(71);
+            auto const auditorEncryption = key(73);
+            auto const aliceEncryption = key(75);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = noClawIssuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            env(convertTx(
+                noClawAlice,
+                issuanceID,
+                20,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(7),
+                env.seq(noClawAlice)));
+            env(mergeTx(noClawAlice, issuanceID));
+
+            json::Value clawback;
+            clawback[jss::TransactionType] = jss::ConfidentialMPTClawback;
+            clawback[sfAccount] = noClawIssuer.human();
+            clawback[sfHolder] = noClawAlice.human();
+            clawback[sfMPTokenIssuanceID] = to_string(issuanceID);
+            clawback[sfMPTAmount] = "20";
+            clawback[sfZKProof] = hex(std::array<std::uint8_t, 64>{});
+            setConfidentialFee(clawback);
+            env(clawback, Ter(tecNO_PERMISSION));
+
+            mpt.destroy({.err = tecHAS_OBLIGATIONS});
+        }
+
+        // --- Lock blocks MergeInbox (XLS-0096; terFROZEN absent -> tecLOCKED) ---
+        {
+            Account const lockIssuer{"lockIssuer"};
+            Account const lockAlice{"lockAlice"};
+            MPTTester mpt(env, lockIssuer, {.holders = {lockAlice}});
+            mpt.create(
+                {.maxAmt = 200,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{lockAlice}, 40}},
+                 .flags = tfMPTCanTransfer | tfMPTCanLock | tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(81);
+            auto const auditorEncryption = key(83);
+            auto const aliceEncryption = key(85);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = lockIssuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            env(convertTx(
+                lockAlice,
+                issuanceID,
+                40,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(3),
+                env.seq(lockAlice)));
+            env(mergeTx(lockAlice, issuanceID));
+
+            // Global issuance lock via MPTokenIssuanceSet.
+            json::Value lockTx;
+            lockTx[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            lockTx[sfAccount] = lockIssuer.human();
+            lockTx[sfMPTokenIssuanceID] = to_string(issuanceID);
+            env(lockTx, Txflags(tfMPTLock));
+
+            auto const issuance = env.le(keylet::mptIssuance(issuanceID));
+            BEAST_EXPECT(issuance && issuance->isFlag(lsfMPTLocked));
+
+            env(mergeTx(lockAlice, issuanceID), Ter(tecLOCKED));
+        }
+
+        // --- Dedicated vault account may convert (issuer account may not) ---
+        {
+            Account const vaultIssuer{"vaultIssuer"};
+            Account const vault{"vault"};
+            Account const vaultBob{"vaultBob"};
+            MPTTester mpt(env, vaultIssuer, {.holders = {vault, vaultBob}});
+            mpt.create(
+                {.maxAmt = 500,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{vault}, 80}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(91);
+            auto const auditorEncryption = key(93);
+            auto const vaultEncryption = key(95);
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = vaultIssuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            // Issuer still forbidden.
+            env(convertTx(
+                    vaultIssuer,
+                    issuanceID,
+                    1,
+                    vaultEncryption,
+                    issuerEncryption,
+                    auditorEncryption,
+                    scalar(2),
+                    env.seq(vaultIssuer)),
+                Ter(temMALFORMED));
+
+            // Dedicated vault converts like any holder.
+            env(convertTx(
+                vault,
+                issuanceID,
+                80,
+                vaultEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(11),
+                env.seq(vault)));
+            env(mergeTx(vault, issuanceID));
+
+            auto const vaultMpt = env.le(keylet::mptoken(issuanceID, vault.id()));
+            BEAST_EXPECT(vaultMpt);
+            auto const iss = env.le(keylet::mptIssuance(issuanceID));
+            BEAST_EXPECT(iss && (*iss)[~sfConfidentialOutstandingAmount].value_or(0) == 80);
+        }
+    }
+
 public:
     void
     run() override
@@ -730,6 +1001,7 @@ public:
         testIssuancePolicy();
         testFlow();
         testNegativePaths();
+        testFeesAndPolicyFailures();
     }
 };
 

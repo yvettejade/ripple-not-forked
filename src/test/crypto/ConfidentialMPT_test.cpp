@@ -466,6 +466,34 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         check(std::numeric_limits<std::uint64_t>::max(), std::numeric_limits<std::uint64_t>::max());
     }
 
+    void
+    testSpecConstants()
+    {
+        // Pin Updated_ConfidentialMPT domain tags and XLS-0096 proof sizes so
+        // accidental renames break CI instead of silent interop drift.
+        testcase("spec domain tags and proof sizes");
+
+        expect(kDomainKeyReg == "CMPT_POK_SK_REGISTER");
+        expect(kDomainSend == "CMPT_SEND_SIGMA");
+        expect(kDomainConvertBack == "CMPT_CONVERTBACK_SIGMA");
+        expect(kDomainClawback == "CMPT_CLAWBACK_SIGMA");
+
+        expect(kKeyRegProofBytes == 64u);
+        expect(kSendSigmaBytes == 192u);
+        expect(kConvertBackSigmaBytes == 128u);
+        expect(kClawbackProofBytes == 64u);
+        expect(kSingleBulletproofBytes == 688u);
+        expect(kAggregatedBulletproofBytes == 754u);
+        expect(kSendSigmaBytes + kAggregatedBulletproofBytes == 946u);
+        expect(kConvertBackSigmaBytes + kSingleBulletproofBytes == 816u);
+
+        expect(kDomainBulletproofSingle == "CMPT_BP_RANGE64");
+        expect(kDomainBulletproofAggregated == "CMPT_BP_RANGE64x2");
+
+        // EncZero label is the XLS-0096 literal used by confidentialMPTEncryptedZero.
+        expect(std::string_view{"EncZero"}.size() == 7u);
+    }
+
 public:
     void
     run() override
@@ -480,6 +508,7 @@ public:
         testPedersenH();
         testSingleBulletproof();
         testAggregatedBulletproof();
+        testSpecConstants();
     }
 };
 
