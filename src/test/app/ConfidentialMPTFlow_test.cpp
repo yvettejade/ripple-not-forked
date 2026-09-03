@@ -3662,6 +3662,453 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
     }
 
 
+    void
+    testPreclaimCoverageMatrix()
+    {
+        testcase(
+            "preflight/preclaim coverage: Convert field checks, missing objects, "
+            "sender lock, auditor asymmetry, MergeInbox gates, Set fee+flag, "
+            "destroy after drained COA");
+        using namespace test::jtx;
+
+        auto features = testableAmendments();
+        features.set(featureConfidentialTransfer);
+        features.set(featureDynamicMPT);
+
+        // Sec 7.3.1: Convert key/proof pairing, scalar, amount, ciphertext,
+        // and missing-issuance failures.
+        {
+            Env env(*this, features);
+            Account const issuer{"pfIssuer"};
+            Account const alice{"pfAlice"};
+            MPTTester mpt(env, issuer, {.holders = {alice}});
+            mpt.create(
+                {.maxAmt = 100,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 20}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(601);
+            auto const auditorEncryption = key(603);
+            auto const aliceEncryption = key(605);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = issuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            auto const base = convertTx(
+                alice,
+                issuanceID,
+                5,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(7),
+                env.seq(alice));
+
+            {
+                auto tx = base;
+                tx.removeMember(sfHolderEncryptionKey.jsonName);
+                env(tx, Ter(temMALFORMED));
+            }
+            {
+                auto tx = base;
+                tx.removeMember(sfZKProof.jsonName);
+                env(tx, Ter(temMALFORMED));
+            }
+            {
+                auto tx = base;
+                tx[sfHolderEncryptionKey] = std::string(64, '0');
+                env(tx, Ter(temMALFORMED));
+            }
+            {
+                auto tx = base;
+                tx[sfBlindingFactor] = std::string(64, '0');
+                env(tx, Ter(temMALFORMED));
+            }
+            {
+                auto tx = base;
+                tx[sfMPTAmount] = std::to_string(
+                    static_cast<std::uint64_t>(kMaxMpTokenAmount) + 1ull);
+                env(tx, Ter(temBAD_AMOUNT));
+            }
+            {
+                auto tx = base;
+                tx[sfHolderEncryptedAmount] =
+                    std::string(cm::kCiphertextBytes * 2, '0');
+                env(tx, Ter(temBAD_CIPHERTEXT));
+            }
+            {
+                auto tx = base;
+                tx[sfMPTokenIssuanceID] = to_string(makeMptID(1, alice));
+                env(tx, Ter(tecOBJECT_NOT_FOUND));
+            }
+        }
+
+        // Sec 9.2.1: MergeInbox rejects non-confidential issuance and
+        // confidentially-uninitialized holders.
+        {
+            Env env(*this, features);
+            Account const issuer{"mergeGateIssuer"};
+            Account const alice{"mergeGateAlice"};
+            MPTTester mpt(env, issuer, {.holders = {alice}});
+            mpt.create(
+                {.maxAmt = 50,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 10}},
+                 .flags = tfMPTCanTransfer});
+            env(mergeTx(alice, mpt.issuanceID()), Ter(tecNO_PERMISSION));
+        }
+        {
+            Env env(*this, features);
+            Account const issuer{"mergeInitIssuer"};
+            Account const alice{"mergeInitAlice"};
+            MPTTester mpt(env, issuer, {.holders = {alice}});
+            mpt.create(
+                {.maxAmt = 50,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 10}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = issuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(key(611).publicKey);
+            env(setKeys);
+            env(mergeTx(alice, issuanceID), Ter(tecNO_PERMISSION));
+        }
+
+        // Sec 6 / 12: same-transaction TransferFee>0 + set confidential flag.
+        {
+            Env env(*this, features);
+            Account const issuer{"feeFlagIssuer"};
+            MPTTester mpt(env, issuer);
+            mpt.create(
+                {.flags = tfMPTCanTransfer,
+                 .mutableFlags = tmfMPTCanMutateTransferFee});
+            json::Value set;
+            set[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            set[sfAccount] = issuer.human();
+            set[sfMPTokenIssuanceID] = to_string(mpt.issuanceID());
+            set[sfTransferFee] = 1;
+            set[sfIssuerEncryptionKey] = hex(key(621).publicKey);
+            env(set,
+                Txflags(tfMPTSetCanHoldConfidentialBalance),
+                Ter(temBAD_TRANSFER_FEE));
+        }
+
+        // Sec 8.3.2.6 sender-only lock + Sec 8.3 auditor-required asymmetry.
+        {
+            Env env(*this, features);
+            Account const issuer{"sndGateIssuer"};
+            Account const alice{"sndGateAlice"};
+            Account const bob{"sndGateBob"};
+            MPTTester mpt(env, issuer, {.holders = {alice, bob}});
+            mpt.create(
+                {.maxAmt = 100,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 20}},
+                 .flags = tfMPTCanTransfer | tfMPTCanLock |
+                     tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(631);
+            auto const auditorEncryption = key(633);
+            auto const aliceEncryption = key(635);
+            auto const bobEncryption = key(637);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = issuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            env(convertTx(
+                alice,
+                issuanceID,
+                20,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(3),
+                env.seq(alice)));
+            env(mergeTx(alice, issuanceID));
+            env(convertTx(
+                bob,
+                issuanceID,
+                0,
+                bobEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(5),
+                env.seq(bob)));
+
+            auto const aliceMpt = env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(aliceMpt))
+                return;
+            auto const aliceSpending =
+                cm::parseCiphertext((*aliceMpt)[sfConfidentialBalanceSpending]);
+            if (!BEAST_EXPECT(aliceSpending))
+                return;
+
+            std::uint64_t constexpr amount = 3;
+            std::uint64_t constexpr aliceBalance = 20;
+            auto const sendRandomness = scalar(41);
+            auto const balanceBlinding = scalar(43);
+            auto const remainderBlinding = scalar(2);
+            auto const senderAmount =
+                cm::encryptAmount(aliceEncryption.publicKey, amount, sendRandomness);
+            auto const destinationAmount =
+                cm::encryptAmount(bobEncryption.publicKey, amount, sendRandomness);
+            auto const issuerAmount =
+                cm::encryptAmount(issuerEncryption.publicKey, amount, sendRandomness);
+            auto const auditorAmount =
+                cm::encryptAmount(auditorEncryption.publicKey, amount, sendRandomness);
+            auto const amountCommitment = cm::pedersenCommit(amount, sendRandomness);
+            auto const balanceCommitment =
+                cm::pedersenCommit(aliceBalance, balanceBlinding);
+            auto const remainderCommitment =
+                cm::pedersenCommit(aliceBalance - amount, remainderBlinding);
+            if (!BEAST_EXPECT(
+                    senderAmount && destinationAmount && issuerAmount && auditorAmount &&
+                    amountCommitment && balanceCommitment && remainderCommitment))
+                return;
+
+            auto const aliceVersion =
+                (*aliceMpt)[~sfConfidentialBalanceVersion].value_or(0);
+            auto const sendCtx =
+                sendContext(alice, issuanceID, env.seq(alice), bob, aliceVersion);
+            cm::SendPublicInput sendInput{
+                .recipientKeys =
+                    {aliceEncryption.publicKey,
+                     bobEncryption.publicKey,
+                     issuerEncryption.publicKey,
+                     auditorEncryption.publicKey},
+                .senderKey = aliceEncryption.publicKey,
+                .c1 = cm::ciphertextC1(*senderAmount),
+                .c2 =
+                    {cm::ciphertextC2(*senderAmount),
+                     cm::ciphertextC2(*destinationAmount),
+                     cm::ciphertextC2(*issuerAmount),
+                     cm::ciphertextC2(*auditorAmount)},
+                .amountCommitment = *amountCommitment,
+                .balanceCommitment = *balanceCommitment,
+                .balanceC1 = cm::ciphertextC1(*aliceSpending),
+                .balanceC2 = cm::ciphertextC2(*aliceSpending)};
+            cm::SendWitness const sendWitness{
+                .m = amount,
+                .r = sendRandomness,
+                .b = aliceBalance,
+                .rho = balanceBlinding,
+                .sk = aliceEncryption.secret};
+            auto const sigma =
+                cm::proveSendSigma(sendInput, sendWitness, asSlice(sendCtx));
+            auto const range = cm::proveAggregatedBulletproof(
+                *amountCommitment,
+                *remainderCommitment,
+                amount,
+                sendRandomness,
+                aliceBalance - amount,
+                remainderBlinding,
+                asSlice(sendCtx));
+            if (!BEAST_EXPECT(sigma && range))
+                return;
+
+            auto makeSend = [&](bool includeAuditor) {
+                json::Value send;
+                send[jss::TransactionType] = jss::ConfidentialMPTSend;
+                send[sfAccount] = alice.human();
+                send[sfDestination] = bob.human();
+                send[sfMPTokenIssuanceID] = to_string(issuanceID);
+                send[sfSenderEncryptedAmount] = hex(*senderAmount);
+                send[sfDestinationEncryptedAmount] = hex(*destinationAmount);
+                send[sfIssuerEncryptedAmount] = hex(*issuerAmount);
+                if (includeAuditor)
+                    send[sfAuditorEncryptedAmount] = hex(*auditorAmount);
+                send[sfAmountCommitment] = hex(*amountCommitment);
+                send[sfBalanceCommitment] = hex(*balanceCommitment);
+                send[sfZKProof] = joinedHex(*sigma, *range);
+                setConfidentialFee(send);
+                return send;
+            };
+
+            // Auditor key present on issuance but omitted from Send.
+            env(makeSend(false), Ter(tecNO_PERMISSION));
+
+            json::Value lockAlice;
+            lockAlice[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            lockAlice[sfAccount] = issuer.human();
+            lockAlice[sfMPTokenIssuanceID] = to_string(issuanceID);
+            lockAlice[sfHolder] = alice.human();
+            env(lockAlice, Txflags(tfMPTLock));
+            env.close();
+            auto const locked = env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(locked && locked->isFlag(lsfMPTLocked)))
+                return;
+            env(makeSend(true), Ter(tecLOCKED));
+        }
+
+        // Sec 8.3: auditor ciphertext forbidden when issuance has no auditor.
+        {
+            Env env(*this, features);
+            Account const issuer{"noAudIssuer"};
+            Account const alice{"noAudAlice"};
+            Account const bob{"noAudBob"};
+            MPTTester mpt(env, issuer, {.holders = {alice, bob}});
+            mpt.create(
+                {.maxAmt = 100,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 20}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(641);
+            auto const aliceEncryption = key(643);
+            auto const bobEncryption = key(645);
+            auto const strayAuditor = key(647);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = issuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            env(setKeys);
+
+            env(convertTxIssuerOnly(
+                alice,
+                issuanceID,
+                20,
+                aliceEncryption,
+                issuerEncryption,
+                scalar(3),
+                env.seq(alice)));
+            env(mergeTx(alice, issuanceID));
+            env(convertTxIssuerOnly(
+                bob,
+                issuanceID,
+                0,
+                bobEncryption,
+                issuerEncryption,
+                scalar(5),
+                env.seq(bob)));
+
+            std::uint64_t constexpr amount = 2;
+            auto const sendRandomness = scalar(11);
+            auto const balanceBlinding = scalar(13);
+            auto const senderAmount =
+                cm::encryptAmount(aliceEncryption.publicKey, amount, sendRandomness);
+            auto const destinationAmount =
+                cm::encryptAmount(bobEncryption.publicKey, amount, sendRandomness);
+            auto const issuerAmount =
+                cm::encryptAmount(issuerEncryption.publicKey, amount, sendRandomness);
+            auto const auditorAmount =
+                cm::encryptAmount(strayAuditor.publicKey, amount, sendRandomness);
+            auto const amountCommitment = cm::pedersenCommit(amount, sendRandomness);
+            auto const balanceCommitment = cm::pedersenCommit(20, balanceBlinding);
+            if (!BEAST_EXPECT(
+                    senderAmount && destinationAmount && issuerAmount && auditorAmount &&
+                    amountCommitment && balanceCommitment))
+                return;
+
+            json::Value send;
+            send[jss::TransactionType] = jss::ConfidentialMPTSend;
+            send[sfAccount] = alice.human();
+            send[sfDestination] = bob.human();
+            send[sfMPTokenIssuanceID] = to_string(issuanceID);
+            send[sfSenderEncryptedAmount] = hex(*senderAmount);
+            send[sfDestinationEncryptedAmount] = hex(*destinationAmount);
+            send[sfIssuerEncryptedAmount] = hex(*issuerAmount);
+            send[sfAuditorEncryptedAmount] = hex(*auditorAmount);
+            send[sfAmountCommitment] = hex(*amountCommitment);
+            send[sfBalanceCommitment] = hex(*balanceCommitment);
+            // Preclaim rejects auditor asymmetry before proof verification.
+            send[sfZKProof] = hex(std::array<std::uint8_t, 946>{});
+            setConfidentialFee(send);
+            env(send, Ter(tecNO_PERMISSION));
+        }
+
+        // Sec 11 / 12: after COA and OA are drained, issuance destroy succeeds.
+        {
+            Env env(*this, features);
+            Account const issuer{"drainIssuer"};
+            Account const alice{"drainAlice"};
+            MPTTester mpt(env, issuer, {.holders = {alice}});
+            mpt.create(
+                {.maxAmt = 50,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 10}},
+                 .flags = tfMPTCanTransfer | tfMPTCanClawback |
+                     tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(651);
+            auto const auditorEncryption = key(653);
+            auto const aliceEncryption = key(655);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = issuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            env(convertTx(
+                alice,
+                issuanceID,
+                10,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(3),
+                env.seq(alice)));
+            env(mergeTx(alice, issuanceID));
+
+            auto const aliceMpt = env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(aliceMpt))
+                return;
+            auto const issuerBal =
+                cm::parseCiphertext((*aliceMpt)[sfIssuerEncryptedBalance]);
+            if (!BEAST_EXPECT(issuerBal))
+                return;
+
+            cm::ClawbackPublicInput const clawInput{
+                .issuerKey = issuerEncryption.publicKey,
+                .c1 = cm::ciphertextC1(*issuerBal),
+                .c2 = cm::ciphertextC2(*issuerBal),
+                .m = 10};
+            auto const clawCtx =
+                clawbackContext(issuer, issuanceID, env.seq(issuer), alice);
+            auto const clawProof =
+                cm::proveClawback(clawInput, issuerEncryption.secret, asSlice(clawCtx));
+            if (!BEAST_EXPECT(clawProof))
+                return;
+
+            json::Value clawback;
+            clawback[jss::TransactionType] = jss::ConfidentialMPTClawback;
+            clawback[sfAccount] = issuer.human();
+            clawback[sfHolder] = alice.human();
+            clawback[sfMPTokenIssuanceID] = to_string(issuanceID);
+            clawback[sfMPTAmount] = "10";
+            clawback[sfZKProof] = hex(*clawProof);
+            setConfidentialFee(clawback);
+            env(clawback);
+
+            auto const issuance = env.le(keylet::mptIssuance(issuanceID));
+            if (!BEAST_EXPECT(issuance))
+                return;
+            BEAST_EXPECT((*issuance)[sfOutstandingAmount] == 0);
+            BEAST_EXPECT(
+                (*issuance)[~sfConfidentialOutstandingAmount].value_or(0) == 0);
+            mpt.destroy();
+        }
+    }
+
+
 public:
     void
     run() override
@@ -3679,6 +4126,7 @@ public:
         testVersionWrap();
         testClawbackFrontRunning();
         testAdditionalRequirementEvidence();
+        testPreclaimCoverageMatrix();
     }
 };
 
