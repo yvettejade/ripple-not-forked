@@ -15,8 +15,10 @@
 #include <xrpl/protocol/digest.h>
 #include <xrpl/tx/Transactor.h>
 
-#include <cstring>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -129,6 +131,21 @@ creditField(
 std::uint32_t
 ConfidentialMPTConvert::getFlagsMask(PreflightContext const& ctx)
 {
+    // #region agent log
+    {
+        auto const mask = tfUniversalMask;
+        auto const flags = ctx.tx.getFlags();
+        std::ofstream ofs("/workspace/.cursor/debug-3bb9d4.log", std::ios::app);
+        ofs << "{\"hypothesisId\":\"H2\",\"location\":\"ConfidentialMPTConvert.cpp:getFlagsMask\","
+               "\"message\":\"flags mask\",\"data\":{\"mask\":"
+            << mask << ",\"flags\":" << flags << ",\"forbidden\":" << (flags & mask)
+            << "},\"timestamp\":"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count()
+            << "}\n";
+    }
+    // #endregion
     return tfUniversalMask;
 }
 
@@ -140,39 +157,124 @@ ConfidentialMPTConvert::preflight(PreflightContext const& ctx)
 
     bool const hasKey = ctx.tx.isFieldPresent(sfHolderEncryptionKey);
     bool const hasProof = ctx.tx.isFieldPresent(sfZKProof);
+    // #region agent log
+    {
+        std::ofstream ofs("/workspace/.cursor/debug-3bb9d4.log", std::ios::app);
+        ofs << "{\"hypothesisId\":\"H3\",\"location\":\"ConfidentialMPTConvert.cpp:preflight:entry\","
+               "\"message\":\"field presence\",\"data\":{\"hasKey\":"
+            << (hasKey ? "true" : "false") << ",\"hasProof\":" << (hasProof ? "true" : "false")
+            << ",\"flags\":" << ctx.tx.getFlags() << ",\"mptAmount\":" << ctx.tx[sfMPTAmount]
+            << "},\"timestamp\":"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count()
+            << "}\n";
+    }
+    // #endregion
     if (hasKey != hasProof)
+    {
+        // #region agent log
+        {
+            std::ofstream ofs("/workspace/.cursor/debug-3bb9d4.log", std::ios::app);
+            ofs << "{\"hypothesisId\":\"H3\",\"location\":\"ConfidentialMPTConvert.cpp:preflight:"
+                   "keyProofMismatch\",\"message\":\"hasKey!=hasProof\",\"data\":{},"
+                   "\"timestamp\":"
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count()
+                << "}\n";
+        }
+        // #endregion
         return temMALFORMED;
+    }
 
     if (hasKey)
     {
-        auto const key = makeSlice(ctx.tx.getFieldVL(sfHolderEncryptionKey));
-        if (key.size() != cm::kPointBytes || !cm::isValidCompressedPoint(key))
+        // Use operator[] so Slice points into STTx-owned STBlob storage.
+        // makeSlice(getFieldVL(...)) dangles: getFieldVL returns a temporary Blob.
+        auto const key = ctx.tx[sfHolderEncryptionKey];
+        auto const proof = ctx.tx[sfZKProof];
+        bool const keyOk =
+            key.size() == cm::kPointBytes && cm::isValidCompressedPoint(key);
+        // #region agent log
+        {
+            std::ofstream ofs("/workspace/.cursor/debug-3bb9d4.log", std::ios::app);
+            ofs << "{\"hypothesisId\":\"H4\",\"location\":\"ConfidentialMPTConvert.cpp:preflight:"
+                   "keyProof\",\"message\":\"key/proof checks\",\"data\":{\"keySize\":"
+                << key.size() << ",\"keyOk\":" << (keyOk ? "true" : "false")
+                << ",\"proofSize\":" << proof.size()
+                << ",\"expectProof\":" << cm::kKeyRegProofBytes
+                << ",\"runId\":\"post-fix\"},\"timestamp\":"
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count()
+                << "}\n";
+        }
+        // #endregion
+        if (!keyOk)
             return temMALFORMED;
-        if (ctx.tx.getFieldVL(sfZKProof).size() != cm::kKeyRegProofBytes)
+        if (proof.size() != cm::kKeyRegProofBytes)
             return temMALFORMED;
     }
 
     // sfBlindingFactor is UINT256 (32 bytes). Reject non-scalar values.
-    if (!cm::isValidScalar(u256Slice(ctx.tx[sfBlindingFactor])))
+    auto const blindSlice = u256Slice(ctx.tx[sfBlindingFactor]);
+    bool const blindOk = cm::isValidScalar(blindSlice);
+    // #region agent log
+    {
+        std::ofstream ofs("/workspace/.cursor/debug-3bb9d4.log", std::ios::app);
+        ofs << "{\"hypothesisId\":\"H5\",\"location\":\"ConfidentialMPTConvert.cpp:preflight:"
+               "blinding\",\"message\":\"blinding scalar\",\"data\":{\"blindSize\":"
+            << blindSlice.size() << ",\"blindOk\":" << (blindOk ? "true" : "false")
+            << "},\"timestamp\":"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count()
+            << "}\n";
+    }
+    // #endregion
+    if (!blindOk)
         return temMALFORMED;
 
-    if (auto const ter = requireCiphertext(makeSlice(ctx.tx.getFieldVL(sfHolderEncryptedAmount)));
-        !isTesSuccess(ter))
+    if (auto const ter = requireCiphertext(ctx.tx[sfHolderEncryptedAmount]); !isTesSuccess(ter))
+    {
+        // #region agent log
+        {
+            std::ofstream ofs("/workspace/.cursor/debug-3bb9d4.log", std::ios::app);
+            ofs << "{\"hypothesisId\":\"H4\",\"location\":\"ConfidentialMPTConvert.cpp:preflight:"
+                   "holderCt\",\"message\":\"holder ciphertext rejected\",\"data\":{\"ter\":"
+                << TERtoInt(ter) << "},\"timestamp\":"
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count()
+                << "}\n";
+        }
+        // #endregion
         return ter;
-    if (auto const ter = requireCiphertext(makeSlice(ctx.tx.getFieldVL(sfIssuerEncryptedAmount)));
-        !isTesSuccess(ter))
+    }
+    if (auto const ter = requireCiphertext(ctx.tx[sfIssuerEncryptedAmount]); !isTesSuccess(ter))
         return ter;
     if (ctx.tx.isFieldPresent(sfAuditorEncryptedAmount))
     {
-        if (auto const ter =
-                requireCiphertext(makeSlice(ctx.tx.getFieldVL(sfAuditorEncryptedAmount)));
-            !isTesSuccess(ter))
+        if (auto const ter = requireCiphertext(ctx.tx[sfAuditorEncryptedAmount]); !isTesSuccess(ter))
             return ter;
     }
 
     if (ctx.tx[sfMPTAmount] > kMaxMpTokenAmount)
         return temBAD_AMOUNT;
 
+    // #region agent log
+    {
+        std::ofstream ofs("/workspace/.cursor/debug-3bb9d4.log", std::ios::app);
+        ofs << "{\"hypothesisId\":\"H3\",\"location\":\"ConfidentialMPTConvert.cpp:preflight:"
+               "success\",\"message\":\"preflight returning tesSUCCESS\",\"data\":{},"
+               "\"timestamp\":"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+                   .count()
+            << "}\n";
+    }
+    // #endregion
     return tesSUCCESS;
 }
 
@@ -221,10 +323,10 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (!hasTxKey && !hasRegisteredKey)
         return tecNO_PERMISSION;
 
-    auto const holderKey = hasTxKey ? makeSlice(ctx.tx.getFieldVL(sfHolderEncryptionKey))
-                                    : makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey));
+    auto const holderKey =
+        hasTxKey ? ctx.tx[sfHolderEncryptionKey] : (*sleMpt)[sfHolderEncryptionKey];
     auto const holderPk = toPoint(holderKey);
-    auto const issuerPk = toPoint(makeSlice(sleIssuance->getFieldVL(sfIssuerEncryptionKey)));
+    auto const issuerPk = toPoint((*sleIssuance)[sfIssuerEncryptionKey]);
     if (!holderPk)
         return temBAD_CIPHERTEXT;
     if (!issuerPk)
@@ -233,7 +335,7 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     std::optional<cm::Point> auditorPk;
     if (auditorConfigured)
     {
-        auditorPk = toPoint(makeSlice(sleIssuance->getFieldVL(sfAuditorEncryptionKey)));
+        auditorPk = toPoint((*sleIssuance)[sfAuditorEncryptionKey]);
         if (!auditorPk)
             return tecNO_PERMISSION;
     }
@@ -243,17 +345,12 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
         return temMALFORMED;
 
     if (!amountCiphertextValid(
-            *holderPk, makeSlice(ctx.tx.getFieldVL(sfHolderEncryptedAmount)), amount, *blinding) ||
-        !amountCiphertextValid(
-            *issuerPk, makeSlice(ctx.tx.getFieldVL(sfIssuerEncryptedAmount)), amount, *blinding))
+            *holderPk, ctx.tx[sfHolderEncryptedAmount], amount, *blinding) ||
+        !amountCiphertextValid(*issuerPk, ctx.tx[sfIssuerEncryptedAmount], amount, *blinding))
         return tecBAD_PROOF;
 
     if (auditorPk &&
-        !amountCiphertextValid(
-            *auditorPk,
-            makeSlice(ctx.tx.getFieldVL(sfAuditorEncryptedAmount)),
-            amount,
-            *blinding))
+        !amountCiphertextValid(*auditorPk, ctx.tx[sfAuditorEncryptedAmount], amount, *blinding))
         return tecBAD_PROOF;
 
     if (hasTxKey)
@@ -263,7 +360,7 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
             account,
             issuanceID);
         if (!cm::verifyKeyRegistration(
-                *holderPk, makeSlice(ctx.tx.getFieldVL(sfZKProof)), u256Slice(context)))
+                *holderPk, ctx.tx[sfZKProof], u256Slice(context)))
             return tecBAD_PROOF;
     }
 
@@ -291,17 +388,17 @@ ConfidentialMPTConvert::doApply()
         !sleMpt->isFieldPresent(sfIssuerEncryptedBalance);
 
     auto const holderKey = tx.isFieldPresent(sfHolderEncryptionKey)
-        ? makeSlice(tx.getFieldVL(sfHolderEncryptionKey))
-        : makeSlice(sleMpt->getFieldVL(sfHolderEncryptionKey));
+        ? tx[sfHolderEncryptionKey]
+        : (*sleMpt)[sfHolderEncryptionKey];
     auto const holderPk = toPoint(holderKey);
-    auto const issuerPk = toPoint(makeSlice(sleIssuance->getFieldVL(sfIssuerEncryptionKey)));
-    auto const holderDelta = cm::parseCiphertext(makeSlice(tx.getFieldVL(sfHolderEncryptedAmount)));
-    auto const issuerDelta = cm::parseCiphertext(makeSlice(tx.getFieldVL(sfIssuerEncryptedAmount)));
+    auto const issuerPk = toPoint((*sleIssuance)[sfIssuerEncryptionKey]);
+    auto const holderDelta = cm::parseCiphertext(tx[sfHolderEncryptedAmount]);
+    auto const issuerDelta = cm::parseCiphertext(tx[sfIssuerEncryptedAmount]);
     if (!holderPk || !issuerPk || !holderDelta || !issuerDelta)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
     if (tx.isFieldPresent(sfHolderEncryptionKey))
-        sleMpt->setFieldVL(sfHolderEncryptionKey, makeSlice(tx.getFieldVL(sfHolderEncryptionKey)));
+        sleMpt->setFieldVL(sfHolderEncryptionKey, tx[sfHolderEncryptionKey]);
 
     if (initializing)
     {
@@ -329,10 +426,8 @@ ConfidentialMPTConvert::doApply()
 
     if (tx.isFieldPresent(sfAuditorEncryptedAmount))
     {
-        auto const auditorPk =
-            toPoint(makeSlice(sleIssuance->getFieldVL(sfAuditorEncryptionKey)));
-        auto const auditorDelta =
-            cm::parseCiphertext(makeSlice(tx.getFieldVL(sfAuditorEncryptedAmount)));
+        auto const auditorPk = toPoint((*sleIssuance)[sfAuditorEncryptionKey]);
+        auto const auditorDelta = cm::parseCiphertext(tx[sfAuditorEncryptedAmount]);
         if (!auditorPk || !auditorDelta)
             return tecINTERNAL;  // LCOV_EXCL_LINE
         if (auto const ter = creditField(
@@ -351,7 +446,7 @@ ConfidentialMPTConvert::doApply()
         return tecINTERNAL;  // LCOV_EXCL_LINE
     sleMpt->setFieldU64(sfMPTAmount, publicBalance - amount);
 
-    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].value_or(0);
+    auto const coa = (*sleIssuance)[~sfConfidentialOutstandingAmount].valueOr(0);
     if (coa > kMaxMpTokenAmount - amount)
         return tecINTERNAL;  // LCOV_EXCL_LINE
     sleIssuance->setFieldU64(sfConfidentialOutstandingAmount, coa + amount);
