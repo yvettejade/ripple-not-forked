@@ -1443,6 +1443,11 @@ bpGens() noexcept
  * SPEC GAP: documents omit hash and multi-challenge encoding. Squeeze uses
  * SHA-512Half over a CTX clone of the running state; the 32-byte digest is
  * accepted only in [1, q-1], then absorbed into the running state.
+ *
+ * SPEC INCONSISTENCY (internal): sigma Transcript::challenge() rejects a
+ * digest outside [1, q-1] with nullopt (no retry). This Bulletproof transcript
+ * instead increments a 32-bit counter and re-squeezes up to 256 times. Interop
+ * requires agreeing whether out-of-range digests are fatal or counter-retried.
  */
 class BPTranscript
 {

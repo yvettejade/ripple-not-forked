@@ -272,9 +272,11 @@ verifyClawback(ClawbackPublicInput const& x, Slice proof, Slice context) noexcep
 //    big-endian index. Not specified by the documents.
 // 2) Hash: Fiat–Shamir uses SHA-512Half (first 32 bytes of SHA-512) over an
 //    ordered byte transcript, matching this module's sigma proofs.
-// 3) Scalar reduction: challenges must already lie in [1, q-1] (same as
+// 3) Scalar reduction: digests must already lie in [1, q-1] (same as
 //    secp256k1_ec_seckey_verify); no mod-q reduction of oversized digests.
 //    Multi-challenge transcripts squeeze via CTX clone + absorb.
+//    SPEC INCONSISTENCY: sigma proofs reject an out-of-range digest; the
+//    Bulletproof transcript counter-retries up to 256 times instead.
 // 4) Serialization order (points then scalars as listed):
 //      A || S || T1 || T2 || τ_x || μ || t̂ || (L_j || R_j)_{j=1..log2(mn)}
 //      || â || b̂

@@ -466,6 +466,33 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         check(std::numeric_limits<std::uint64_t>::max(), std::numeric_limits<std::uint64_t>::max());
     }
 
+
+    void
+    testFiatShamirRejectCriterion()
+    {
+        // XLS / Updated docs leave digest→Z_q encoding unspecified. This tree
+        // rejects digests outside [1, q-1] (secp256k1_ec_seckey_verify) rather
+        // than reducing mod q. Pin that reject criterion here.
+        testcase("Fiat–Shamir reject criterion: scalar must lie in [1, q-1]");
+
+        Scalar zero{};
+        expect(!isValidScalar(makeSlice(zero)));
+
+        // Group order n is outside [1, q-1]; a digest equal to n must be rejected.
+        // secp256k1 order (big-endian):
+        // FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        Scalar order = {
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48,
+            0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41};
+        expect(!isValidScalar(makeSlice(order)));
+
+        // A known-valid scalar (1) is accepted.
+        Scalar one{};
+        one[31] = 1;
+        expect(isValidScalar(makeSlice(one)));
+    }
+
     void
     testSpecConstants()
     {
@@ -517,6 +544,7 @@ public:
         testPedersenH();
         testSingleBulletproof();
         testAggregatedBulletproof();
+        testFiatShamirRejectCriterion();
         testSpecConstants();
     }
 };

@@ -70,6 +70,9 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
 
     // Issuer cannot merge; checked before MPToken lookup so the result is
     // temMALFORMED even when the issuer has no MPToken (xls-0096).
+    // SPEC INCONSISTENCY (xls-0096 MergeInbox): names tefINTERNAL for an
+    // issuer-merge invariant; this tree returns temMALFORMED for issuer submit
+    // (preflight/preclaim) and keeps tefINTERNAL only for defensive internal paths.
     if (account == (*sleIssuance)[sfIssuer])
         return temMALFORMED;
 

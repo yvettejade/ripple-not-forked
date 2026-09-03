@@ -5850,6 +5850,245 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         env.require(tickets(issuer, 0));
     }
 
+
+    void
+    testDedicatedVaultSection107NarrativeEvidence()
+    {
+        // XLS-0096 §10.7 walkthrough (dedicated vault) with §10.5 accounting:
+        // Convert 50 → Send 20 → ConvertBack 30. Observers learn net confidential
+        // supply change 50-30=20, not the hidden Send amount. §10.7's prose that
+        // ConvertBack decreases OutstandingAmount is a SPEC INCONSISTENCY with
+        // §10.5; this tree follows §10.5 (OA unchanged, COA decreases).
+        testcase(
+            "requirement evidence: §10.7 dedicated-vault Convert/Send/ConvertBack "
+            "accounting under §10.5 OA rules");
+        using namespace test::jtx;
+
+        auto features = testableAmendments();
+        features.set(featureConfidentialTransfer);
+        features.set(featureDynamicMPT);
+
+        Env env(*this, features);
+        Account const issuer{"vault107Issuer"};
+        Account const vault{"vault107"};
+        Account const bob{"vault107Bob"};
+        MPTTester mpt(env, issuer, {.holders = {vault, bob}});
+        mpt.create(
+            {.maxAmt = 200,
+             .authorize = MPTCreate::allHolders,
+             .pay = {{{vault}, 50}},
+             .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+        auto const issuanceID = mpt.issuanceID();
+        auto const issuerEncryption = key(1101);
+        auto const vaultEncryption = key(1103);
+        auto const bobEncryption = key(1105);
+
+        json::Value setKeys;
+        setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+        setKeys[sfAccount] = issuer.human();
+        setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+        setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+        env(setKeys);
+
+        // Issuer account cannot convert its own issuance (dedicated-account model).
+        env(convertTxIssuerOnly(
+                issuer,
+                issuanceID,
+                1,
+                vaultEncryption,
+                issuerEncryption,
+                scalar(1),
+                env.seq(issuer)),
+            Ter(temMALFORMED));
+
+        // Step 1: dedicated vault converts 50 public → confidential.
+        env(convertTxIssuerOnly(
+            vault,
+            issuanceID,
+            50,
+            vaultEncryption,
+            issuerEncryption,
+            scalar(7),
+            env.seq(vault)));
+        env(mergeTx(vault, issuanceID));
+        env(convertTxIssuerOnly(
+            bob,
+            issuanceID,
+            0,
+            bobEncryption,
+            issuerEncryption,
+            scalar(9),
+            env.seq(bob)));
+
+        auto issuance = env.le(keylet::mptIssuance(issuanceID));
+        auto vaultMpt = env.le(keylet::mptoken(issuanceID, vault.id()));
+        if (!BEAST_EXPECT(issuance && vaultMpt))
+            return;
+        BEAST_EXPECT((*issuance)[sfOutstandingAmount] == 50);
+        BEAST_EXPECT((*issuance)[~sfConfidentialOutstandingAmount].value_or(0) == 50);
+        BEAST_EXPECT((*vaultMpt)[~sfMPTAmount].value_or(0) == 0);
+
+        auto const vaultSpending =
+            cm::parseCiphertext((*vaultMpt)[sfConfidentialBalanceSpending]);
+        if (!BEAST_EXPECT(vaultSpending))
+            return;
+
+        // Step 2: confidential Send of 20 (amount hidden) vault → bob.
+        std::uint64_t constexpr sendAmount = 20;
+        std::uint64_t constexpr vaultBalance = 50;
+        auto const sendRandomness = scalar(41);
+        auto const balanceBlinding = scalar(43);
+        auto const remainderBlinding = scalar(2);
+        auto const senderAmount =
+            cm::encryptAmount(vaultEncryption.publicKey, sendAmount, sendRandomness);
+        auto const destinationAmount =
+            cm::encryptAmount(bobEncryption.publicKey, sendAmount, sendRandomness);
+        auto const issuerAmount =
+            cm::encryptAmount(issuerEncryption.publicKey, sendAmount, sendRandomness);
+        auto const amountCommitment = cm::pedersenCommit(sendAmount, sendRandomness);
+        auto const balanceCommitment =
+            cm::pedersenCommit(vaultBalance, balanceBlinding);
+        auto const remainderCommitment =
+            cm::pedersenCommit(vaultBalance - sendAmount, remainderBlinding);
+        if (!BEAST_EXPECT(
+                senderAmount && destinationAmount && issuerAmount && amountCommitment &&
+                balanceCommitment && remainderCommitment))
+            return;
+
+        auto const vaultVersion =
+            (*vaultMpt)[~sfConfidentialBalanceVersion].value_or(0);
+        auto const sendCtx =
+            sendContext(vault, issuanceID, env.seq(vault), bob, vaultVersion);
+        cm::SendPublicInput sendInput{
+            .recipientKeys =
+                {vaultEncryption.publicKey,
+                 bobEncryption.publicKey,
+                 issuerEncryption.publicKey},
+            .senderKey = vaultEncryption.publicKey,
+            .c1 = cm::ciphertextC1(*senderAmount),
+            .c2 =
+                {cm::ciphertextC2(*senderAmount),
+                 cm::ciphertextC2(*destinationAmount),
+                 cm::ciphertextC2(*issuerAmount)},
+            .amountCommitment = *amountCommitment,
+            .balanceCommitment = *balanceCommitment,
+            .balanceC1 = cm::ciphertextC1(*vaultSpending),
+            .balanceC2 = cm::ciphertextC2(*vaultSpending)};
+        cm::SendWitness const sendWitness{
+            .m = sendAmount,
+            .r = sendRandomness,
+            .b = vaultBalance,
+            .rho = balanceBlinding,
+            .sk = vaultEncryption.secret};
+        auto const sigma = cm::proveSendSigma(sendInput, sendWitness, asSlice(sendCtx));
+        auto const range = cm::proveAggregatedBulletproof(
+            *amountCommitment,
+            *remainderCommitment,
+            sendAmount,
+            sendRandomness,
+            vaultBalance - sendAmount,
+            remainderBlinding,
+            asSlice(sendCtx));
+        if (!BEAST_EXPECT(sigma && range))
+            return;
+
+        json::Value send;
+        send[jss::TransactionType] = jss::ConfidentialMPTSend;
+        send[sfAccount] = vault.human();
+        send[sfDestination] = bob.human();
+        send[sfMPTokenIssuanceID] = to_string(issuanceID);
+        send[sfSenderEncryptedAmount] = hex(*senderAmount);
+        send[sfDestinationEncryptedAmount] = hex(*destinationAmount);
+        send[sfIssuerEncryptedAmount] = hex(*issuerAmount);
+        send[sfAmountCommitment] = hex(*amountCommitment);
+        send[sfBalanceCommitment] = hex(*balanceCommitment);
+        send[sfZKProof] = joinedHex(*sigma, *range);
+        setConfidentialFee(send);
+        env(send);
+
+        issuance = env.le(keylet::mptIssuance(issuanceID));
+        if (!BEAST_EXPECT(issuance))
+            return;
+        // Send redistributes confidential value: OA and COA unchanged.
+        BEAST_EXPECT((*issuance)[sfOutstandingAmount] == 50);
+        BEAST_EXPECT((*issuance)[~sfConfidentialOutstandingAmount].value_or(0) == 50);
+
+        env(mergeTx(bob, issuanceID));
+
+        // Step 3: ConvertBack 30 from the dedicated vault.
+        vaultMpt = env.le(keylet::mptoken(issuanceID, vault.id()));
+        if (!BEAST_EXPECT(vaultMpt))
+            return;
+        auto const vaultSpendingAfterSend =
+            cm::parseCiphertext((*vaultMpt)[sfConfidentialBalanceSpending]);
+        if (!BEAST_EXPECT(vaultSpendingAfterSend))
+            return;
+
+        std::uint64_t constexpr convertBackAmount = 30;
+        std::uint64_t constexpr vaultBalanceAfterSend = vaultBalance - sendAmount;
+        auto const withdrawRandomness = scalar(29);
+        auto const withdrawBlinding = scalar(31);
+        auto const holderWithdrawal = cm::encryptAmount(
+            vaultEncryption.publicKey, convertBackAmount, withdrawRandomness);
+        auto const issuerWithdrawal = cm::encryptAmount(
+            issuerEncryption.publicKey, convertBackAmount, withdrawRandomness);
+        auto const withdrawBalanceCommitment =
+            cm::pedersenCommit(vaultBalanceAfterSend, withdrawBlinding);
+        auto const withdrawRemainderCommitment = cm::pedersenCommit(
+            vaultBalanceAfterSend - convertBackAmount, withdrawBlinding);
+        if (!BEAST_EXPECT(
+                holderWithdrawal && issuerWithdrawal && withdrawBalanceCommitment &&
+                withdrawRemainderCommitment))
+            return;
+
+        auto const vaultVersion2 =
+            (*vaultMpt)[~sfConfidentialBalanceVersion].value_or(0);
+        auto const withdrawCtx =
+            convertBackContext(vault, issuanceID, env.seq(vault), vaultVersion2);
+        cm::ConvertBackPublicInput const withdrawInput{
+            .holderKey = vaultEncryption.publicKey,
+            .balanceC1 = cm::ciphertextC1(*vaultSpendingAfterSend),
+            .balanceC2 = cm::ciphertextC2(*vaultSpendingAfterSend),
+            .balanceCommitment = *withdrawBalanceCommitment};
+        cm::ConvertBackWitness const withdrawWitness{
+            .b = vaultBalanceAfterSend,
+            .rho = withdrawBlinding,
+            .sk = vaultEncryption.secret};
+        auto const withdrawSigma = cm::proveConvertBackSigma(
+            withdrawInput, withdrawWitness, asSlice(withdrawCtx));
+        auto const withdrawRange = cm::proveSingleBulletproof(
+            *withdrawRemainderCommitment,
+            vaultBalanceAfterSend - convertBackAmount,
+            withdrawBlinding,
+            asSlice(withdrawCtx));
+        if (!BEAST_EXPECT(withdrawSigma && withdrawRange))
+            return;
+
+        json::Value convertBack;
+        convertBack[jss::TransactionType] = jss::ConfidentialMPTConvertBack;
+        convertBack[sfAccount] = vault.human();
+        convertBack[sfMPTokenIssuanceID] = to_string(issuanceID);
+        convertBack[sfMPTAmount] = std::to_string(convertBackAmount);
+        convertBack[sfHolderEncryptedAmount] = hex(*holderWithdrawal);
+        convertBack[sfIssuerEncryptedAmount] = hex(*issuerWithdrawal);
+        convertBack[sfBlindingFactor] = hex(withdrawRandomness);
+        convertBack[sfBalanceCommitment] = hex(*withdrawBalanceCommitment);
+        convertBack[sfZKProof] = joinedHex(*withdrawSigma, *withdrawRange);
+        setConfidentialFee(convertBack);
+        env(convertBack);
+
+        issuance = env.le(keylet::mptIssuance(issuanceID));
+        vaultMpt = env.le(keylet::mptoken(issuanceID, vault.id()));
+        if (!BEAST_EXPECT(issuance && vaultMpt))
+            return;
+        // §10.5 (over §10.7 narrative): OA unchanged; COA = 50 - 30 = 20;
+        // vault public MPTAmount restored by 30. Net confidential supply 20
+        // remains (bob holds the hidden Send), matching §10.7.1 inference.
+        BEAST_EXPECT((*issuance)[sfOutstandingAmount] == 50);
+        BEAST_EXPECT((*issuance)[~sfConfidentialOutstandingAmount].value_or(0) == 20);
+        BEAST_EXPECT((*vaultMpt)[sfMPTAmount] == convertBackAmount);
+    }
+
 public:
     void
     run() override
@@ -5873,6 +6112,7 @@ public:
         testOneWayFlagEncZeroIssuanceAndConvertBackOAEvidence();
         testNoAuditorSendAndMissingObjectEvidence();
         testTicketContextBindingEvidence();
+        testDedicatedVaultSection107NarrativeEvidence();
     }
 };
 
