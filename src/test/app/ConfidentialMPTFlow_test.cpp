@@ -1450,6 +1450,48 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         set[sfMPTokenIssuanceID] = to_string(id);
         set[sfIssuerEncryptionKey] = hex(key(11).publicKey);
         env(set, Txflags(tfMPTSetCanHoldConfidentialBalance), Ter(temDISABLED));
+
+        // CredentialIDs on Send require featureCredentials independently of
+        // featureConfidentialTransfer.
+        auto credentialFeatures = testableAmendments();
+        credentialFeatures.set(featureConfidentialTransfer);
+        credentialFeatures.set(featureDynamicMPT);
+        Env credentialEnv(*this, credentialFeatures - featureCredentials);
+        Account const credentialAlice{"credFeatureAlice"};
+        Account const credentialBob{"credFeatureBob"};
+        credentialEnv.fund(XRP(1'000), credentialAlice, credentialBob);
+
+        auto const r = scalar(13);
+        auto const senderAmount =
+            cm::encryptAmount(key(15).publicKey, 1, r);
+        auto const destinationAmount =
+            cm::encryptAmount(key(17).publicKey, 1, r);
+        auto const issuerAmount =
+            cm::encryptAmount(key(19).publicKey, 1, r);
+        auto const amountCommitment = cm::pedersenCommit(1, r);
+        auto const balanceCommitment = cm::pedersenCommit(1, scalar(21));
+        if (!BEAST_EXPECT(
+                senderAmount && destinationAmount && issuerAmount &&
+                amountCommitment && balanceCommitment))
+            return;
+
+        json::Value send;
+        send[jss::TransactionType] = jss::ConfidentialMPTSend;
+        send[sfAccount] = credentialAlice.human();
+        send[sfDestination] = credentialBob.human();
+        send[sfMPTokenIssuanceID] =
+            to_string(makeMptID(1, credentialAlice));
+        send[sfSenderEncryptedAmount] = hex(*senderAmount);
+        send[sfDestinationEncryptedAmount] = hex(*destinationAmount);
+        send[sfIssuerEncryptedAmount] = hex(*issuerAmount);
+        send[sfAmountCommitment] = hex(*amountCommitment);
+        send[sfBalanceCommitment] = hex(*balanceCommitment);
+        send[sfZKProof] = hex(std::array<std::uint8_t, 946>{});
+        setConfidentialFee(send);
+        credentialEnv(
+            send,
+            credentials::Ids({uint256{1}}),
+            Ter(temDISABLED));
     }
 
     void
@@ -4259,12 +4301,14 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             Account const issuer{"sndUninitIssuer"};
             Account const alice{"sndUninitAlice"};
             Account const bob{"sndUninitBob"};
+            Account const charlie{"sndMissingCharlie"};
             MPTTester mpt(env, issuer, {.holders = {alice, bob}});
             mpt.create(
                 {.maxAmt = 100,
                  .authorize = MPTCreate::allHolders,
                  .pay = {{{alice, bob}, 20}},
                  .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            env.fund(XRP(1'000), charlie);
             auto const issuanceID = mpt.issuanceID();
             auto const issuerEncryption = key(701);
             auto const auditorEncryption = key(703);
@@ -4325,6 +4369,11 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             send[sfZKProof] = hex(std::array<std::uint8_t, 946>{});
             setConfidentialFee(send);
             env(send, Ter(tecNO_PERMISSION));
+
+            // A public-only MPToken is tecNO_PERMISSION; an absent MPToken
+            // remains the existing MPT lifecycle error tecOBJECT_NOT_FOUND.
+            send[sfAccount] = charlie.human();
+            env(send, Ter(tecOBJECT_NOT_FOUND));
         }
 
         // Sec 10.4.2.6-8: ConvertBack BlindingFactor must match ciphertexts.
