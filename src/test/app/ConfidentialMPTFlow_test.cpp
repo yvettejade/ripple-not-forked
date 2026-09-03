@@ -1785,6 +1785,118 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             bothKeys[sfAuditorEncryptionKey] = hex(key(75).publicKey);
             env(bothKeys, Ter(tecNO_PERMISSION));
         }
+
+        // After COA drains to 0 (SoeDefault removes the field), key re-upload
+        // must still fail via write-once (§12.4.2.2), not because COA is present.
+        {
+            Account const issuer{"drainIssuer"};
+            Account const alice{"drainAlice"};
+            MPTTester mpt(env, issuer, {.holders = {alice}});
+            mpt.create(
+                {.maxAmt = 50,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 10}},
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(77);
+            auto const aliceEncryption = key(79);
+            json::Value setIssuer;
+            setIssuer[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setIssuer[sfAccount] = issuer.human();
+            setIssuer[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setIssuer[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            env(setIssuer);
+
+            std::uint64_t constexpr amount = 10;
+            env(convertTxIssuerOnly(
+                alice,
+                issuanceID,
+                amount,
+                aliceEncryption,
+                issuerEncryption,
+                scalar(8),
+                env.seq(alice)));
+            env(mergeTx(alice, issuanceID));
+
+            auto aliceMpt = env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(aliceMpt))
+                return;
+            auto const aliceSpending =
+                cm::parseCiphertext((*aliceMpt)[sfConfidentialBalanceSpending]);
+            if (!BEAST_EXPECT(aliceSpending))
+                return;
+
+            auto const withdrawRandomness = scalar(17);
+            auto const withdrawBlinding = scalar(19);
+            auto const holderWithdrawal =
+                cm::encryptAmount(aliceEncryption.publicKey, amount, withdrawRandomness);
+            auto const issuerWithdrawal =
+                cm::encryptAmount(issuerEncryption.publicKey, amount, withdrawRandomness);
+            auto const withdrawBalanceCommitment =
+                cm::pedersenCommit(amount, withdrawBlinding);
+            auto const withdrawRemainderCommitment =
+                cm::pedersenCommit(0, withdrawBlinding);
+            if (!BEAST_EXPECT(
+                    holderWithdrawal && issuerWithdrawal && withdrawBalanceCommitment &&
+                    withdrawRemainderCommitment))
+                return;
+
+            auto const aliceVersion =
+                (*aliceMpt)[~sfConfidentialBalanceVersion].value_or(0);
+            auto const withdrawCtx =
+                convertBackContext(alice, issuanceID, env.seq(alice), aliceVersion);
+            cm::ConvertBackPublicInput const withdrawInput{
+                .holderKey = aliceEncryption.publicKey,
+                .balanceC1 = cm::ciphertextC1(*aliceSpending),
+                .balanceC2 = cm::ciphertextC2(*aliceSpending),
+                .balanceCommitment = *withdrawBalanceCommitment};
+            cm::ConvertBackWitness const withdrawWitness{
+                .b = amount, .rho = withdrawBlinding, .sk = aliceEncryption.secret};
+            auto const withdrawSigma = cm::proveConvertBackSigma(
+                withdrawInput, withdrawWitness, asSlice(withdrawCtx));
+            auto const withdrawRange = cm::proveSingleBulletproof(
+                *withdrawRemainderCommitment, 0, withdrawBlinding, asSlice(withdrawCtx));
+            if (!BEAST_EXPECT(withdrawSigma && withdrawRange))
+                return;
+
+            json::Value convertBack;
+            convertBack[jss::TransactionType] = jss::ConfidentialMPTConvertBack;
+            convertBack[sfAccount] = alice.human();
+            convertBack[sfMPTokenIssuanceID] = to_string(issuanceID);
+            convertBack[sfMPTAmount] = std::to_string(amount);
+            convertBack[sfHolderEncryptedAmount] = hex(*holderWithdrawal);
+            convertBack[sfIssuerEncryptedAmount] = hex(*issuerWithdrawal);
+            convertBack[sfBlindingFactor] = hex(withdrawRandomness);
+            convertBack[sfBalanceCommitment] = hex(*withdrawBalanceCommitment);
+            convertBack[sfZKProof] = joinedHex(*withdrawSigma, *withdrawRange);
+            setConfidentialFee(convertBack);
+            env(convertBack);
+
+            auto const issuance = env.le(keylet::mptIssuance(issuanceID));
+            if (!BEAST_EXPECT(issuance))
+                return;
+            BEAST_EXPECT(!issuance->isFieldPresent(sfConfidentialOutstandingAmount));
+            BEAST_EXPECT((*issuance)[~sfConfidentialOutstandingAmount].value_or(0) == 0);
+            BEAST_EXPECT(
+                strHex(issuance->getFieldVL(sfIssuerEncryptionKey)) ==
+                hex(issuerEncryption.publicKey));
+
+            // Issuer key already stored → tecNO_PERMISSION even though COA field is gone.
+            json::Value reupload;
+            reupload[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            reupload[sfAccount] = issuer.human();
+            reupload[sfMPTokenIssuanceID] = to_string(issuanceID);
+            reupload[sfIssuerEncryptionKey] = hex(key(81).publicKey);
+            env(reupload, Ter(tecNO_PERMISSION));
+
+            json::Value reuploadBoth;
+            reuploadBoth[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            reuploadBoth[sfAccount] = issuer.human();
+            reuploadBoth[sfMPTokenIssuanceID] = to_string(issuanceID);
+            reuploadBoth[sfIssuerEncryptionKey] = hex(key(81).publicKey);
+            reuploadBoth[sfAuditorEncryptionKey] = hex(key(83).publicKey);
+            env(reuploadBoth, Ter(tecNO_PERMISSION));
+        }
     }
 
     void

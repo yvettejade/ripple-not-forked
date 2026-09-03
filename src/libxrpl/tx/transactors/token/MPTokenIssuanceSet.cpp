@@ -288,11 +288,22 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
     bool const hasAuditorKey = ctx.tx.isFieldPresent(sfAuditorEncryptionKey);
     if (hasIssuerKey || hasAuditorKey)
     {
+        // xls-0096 §12.4.2.2: keys are write-once; there is no clear/replace path.
         if ((hasIssuerKey && sleMptIssuance->isFieldPresent(sfIssuerEncryptionKey)) ||
             (hasAuditorKey && sleMptIssuance->isFieldPresent(sfAuditorEncryptionKey)))
             return tecNO_PERMISSION;
         if (!sleMptIssuance->isFlag(lsfMPTCanHoldConfidentialBalance) && !setConfidential)
             return tecNO_PERMISSION;
+        // xls-0096 §12.4.2.4: refuse key upload while COA field is present
+        // ("tokens are already in circulation").
+        //
+        // SPEC NOTE (SoeDefault): sfConfidentialOutstandingAmount is SoeDefault, so
+        // assigning 0 (full ConvertBack / Clawback drain) removes the field. After a
+        // drain, this presence check alone would allow a first-time upload again.
+        // That is not a practical key-mutation hole: Convert requires an issuer key,
+        // and §12.4.2.2 above still blocks re-upload/replace once a key is stored.
+        // Auditor-only upload remains temMALFORMED (§12.4.1.4). Combined, keys cannot
+        // be changed after confidential circulation has occurred.
         if (sleMptIssuance->isFieldPresent(sfConfidentialOutstandingAmount))
             return tecNO_PERMISSION;
     }

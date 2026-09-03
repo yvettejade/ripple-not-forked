@@ -611,6 +611,14 @@ ConfidentialMPTSend::doApply()
     }
 
     // --- Receiver: credit inbox + issuer/auditor mirrors, then re-randomize with e ---
+    //
+    // SPEC INCONSISTENCY (xls-0096 §8.4 vs Updated_ConfidentialMPT §3.8 / Remark 3.1):
+    // xls-0096 §8.4 describes only the homomorphic inbox/mirror credit. The Updated
+    // protocol additionally re-randomizes the receiver's inbox and issuer/auditor
+    // mirrors with Enc(0; e) where e is the Fiat–Shamir challenge, fixing
+    // TOB-RIPCTXR-5 (inbox-locking DoS from publicly known ciphertext randomness).
+    // This implementation follows the Updated state transition; a literal xls-0096
+    // §8.4 ledger would diverge on post-Send ciphertext bytes.
     {
         auto const inbox =
             confidential_mpt::parseCiphertext((*sleDestMpt)[sfConfidentialBalanceInbox]);
@@ -628,7 +636,8 @@ ConfidentialMPTSend::doApply()
             confidential_mpt::rerandomizeWithScalar(*creditedInbox, *destPk, e);
         if (!rerandInbox)
         {
-            // Spec §3.8: re-randomized inbox must be a well-formed group element.
+            // Updated_ConfidentialMPT §3.8: re-randomized inbox must be a
+            // well-formed group element (not the point at infinity).
             return tecBAD_PROOF;
         }
 

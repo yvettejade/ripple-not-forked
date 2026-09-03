@@ -40,6 +40,10 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfImmutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    // xls-0096 §6.1 says IssuerEncryptionKey is required to *use* confidential
+    // transfers; §12.3 / §12.4.2.3 intentionally allow enabling the flag first
+    // and uploading keys in a later MPTokenIssuanceSet (or in the same Set).
+    // Do not require keys at Create/flag-enable time.
     if (ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) &&
         !ctx.rules.enabled(featureConfidentialTransfer))
         return false;
