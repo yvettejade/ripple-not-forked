@@ -23,6 +23,7 @@
 #include <xrpl/basics/strHex.h>
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/crypto/confidential_mpt.h>
+#include <xrpl/ledger/OpenView.h>
 #include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
@@ -41,6 +42,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -654,6 +657,31 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
 
         // Issuer cannot MergeInbox.
         env(mergeTx(issuer, issuanceID), Ter(temMALFORMED));
+
+        // Issuer cannot ConvertBack (xls-0096 ConvertBack data verification).
+        {
+            auto const r = scalar(8);
+            auto const holderCt = cm::encryptAmount(aliceEncryption.publicKey, 1, r);
+            auto const issuerCt = cm::encryptAmount(issuerEncryption.publicKey, 1, r);
+            auto const auditorCt = cm::encryptAmount(auditorEncryption.publicKey, 1, r);
+            auto const commitment = cm::pedersenCommit(0, scalar(1));
+            if (!BEAST_EXPECT(holderCt && issuerCt && auditorCt && commitment))
+                return;
+
+            json::Value convertBack;
+            convertBack[jss::TransactionType] = jss::ConfidentialMPTConvertBack;
+            convertBack[sfAccount] = issuer.human();
+            convertBack[sfMPTokenIssuanceID] = to_string(issuanceID);
+            convertBack[sfMPTAmount] = "1";
+            convertBack[sfHolderEncryptedAmount] = hex(*holderCt);
+            convertBack[sfIssuerEncryptedAmount] = hex(*issuerCt);
+            convertBack[sfAuditorEncryptedAmount] = hex(*auditorCt);
+            convertBack[sfBlindingFactor] = hex(r);
+            convertBack[sfBalanceCommitment] = hex(*commitment);
+            convertBack[sfZKProof] = hex(std::array<std::uint8_t, 816>{});
+            setConfidentialFee(convertBack);
+            env(convertBack, Ter(temMALFORMED));
+        }
 
         env(convertTx(
             alice,
@@ -1973,6 +2001,73 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
     }
 
 
+    void
+    testVersionWrap()
+    {
+        testcase("MergeInbox wraps ConfidentialBalanceVersion at UINT32_MAX");
+        using namespace test::jtx;
+
+        auto features = testableAmendments();
+        features.set(featureConfidentialTransfer);
+        features.set(featureDynamicMPT);
+        Env env(*this, features);
+        Account const issuer{"wrapIssuer"};
+        Account const alice{"wrapAlice"};
+
+        MPTTester mpt(env, issuer, {.holders = {alice}});
+        mpt.create(
+            {.maxAmt = 50,
+             .authorize = MPTCreate::allHolders,
+             .pay = {{{alice}, 10}},
+             .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+        auto const issuanceID = mpt.issuanceID();
+        auto const issuerEncryption = key(121);
+        auto const auditorEncryption = key(123);
+        auto const aliceEncryption = key(125);
+
+        json::Value setKeys;
+        setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+        setKeys[sfAccount] = issuer.human();
+        setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+        setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+        setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+        env(setKeys);
+
+        // Leave a non-zero public MPTAmount so SLE(*sle, key) can re-apply the
+        // MPToken template (SoeDefault fields may not be explicitly zero).
+        env(convertTx(
+            alice,
+            issuanceID,
+            5,
+            aliceEncryption,
+            issuerEncryption,
+            auditorEncryption,
+            scalar(3),
+            env.seq(alice)));
+        env(mergeTx(alice, issuanceID));
+
+        // Force the spending-balance version to UINT32_MAX without closing the
+        // ledger, then merge the (empty) inbox so the wrap is observable.
+        BEAST_EXPECT(env.app().getOpenLedger().modify(
+            [&](OpenView& view, beast::Journal) {
+                auto const sle = view.read(keylet::mptoken(issuanceID, alice.id()));
+                if (!sle)
+                    return false;
+                auto replacement = std::make_shared<SLE>(*sle, sle->key());
+                (*replacement)[sfConfidentialBalanceVersion] =
+                    std::numeric_limits<std::uint32_t>::max();
+                view.rawReplace(replacement);
+                return true;
+            }));
+
+        env(mergeTx(alice, issuanceID));
+        auto const after = env.le(keylet::mptoken(issuanceID, alice.id()));
+        if (!BEAST_EXPECT(after))
+            return;
+        BEAST_EXPECT((*after)[sfConfidentialBalanceVersion] == 0);
+    }
+
+
 public:
     void
     run() override
@@ -1985,6 +2080,7 @@ public:
         testConvertDuplicateKey();
         testPermissionGates();
         testProtocolFailures();
+        testVersionWrap();
     }
 };
 

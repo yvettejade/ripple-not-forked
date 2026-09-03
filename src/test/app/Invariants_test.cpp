@@ -4513,6 +4513,84 @@ class Invariants_test : public beast::unit_test::Suite
         }
     }
 
+
+    void
+    testConfidentialMPT()
+    {
+        using namespace test::jtx;
+        testcase << "Confidential MPT";
+
+        Blob const dummyCt(66, 0x02);
+        Blob const dummyPk(33, 0x02);
+
+        // COA must not exceed OA.
+        doInvariantCheck(
+            {{"invalid Confidential MPT ledger state"}},
+            [](Account const& a1, Account const&, ApplyContext& ac) {
+                auto const sle = ac.view().peek(keylet::account(a1.id()));
+                if (!sle)
+                    return false;
+
+                MPTIssue const mpt{makeMptID(1, AccountID(0x4985601))};
+                auto sleNew = std::make_shared<SLE>(keylet::mptIssuance(mpt.getMptID()));
+                sleNew->setFieldU64(sfOutstandingAmount, 10);
+                sleNew->setFieldU64(sfConfidentialOutstandingAmount, 11);
+                sleNew->setFieldU32(sfFlags, lsfMPTCanHoldConfidentialBalance);
+                ac.view().insert(sleNew);
+                return true;
+            });
+
+        // Spending/inbox/issuer ciphertext fields must appear together.
+        doInvariantCheck(
+            {{"invalid Confidential MPT ledger state"}},
+            [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                auto const sle = ac.view().peek(keylet::account(a1.id()));
+                if (!sle)
+                    return false;
+
+                MPTIssue const mpt{makeMptID(1, AccountID(0x4985601))};
+                auto sleIssuance = std::make_shared<SLE>(keylet::mptIssuance(mpt.getMptID()));
+                sleIssuance->setFieldU64(sfOutstandingAmount, 10);
+                sleIssuance->setFieldU32(sfFlags, lsfMPTCanHoldConfidentialBalance);
+                ac.view().insert(sleIssuance);
+
+                auto sleMpt = std::make_shared<SLE>(keylet::mptoken(mpt.getMptID(), a2));
+                sleMpt->setAccountID(sfAccount, a2.id());
+                sleMpt->setFieldH192(sfMPTokenIssuanceID, mpt.getMptID());
+                sleMpt->setFieldVL(sfHolderEncryptionKey, dummyPk);
+                sleMpt->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                // Inbox and issuer mirror intentionally omitted.
+                ac.view().insert(sleMpt);
+                return true;
+            });
+
+        // Confidential holder state requires the issuance confidential flag.
+        doInvariantCheck(
+            {{"confidential balance without issuance flag"}},
+            [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                auto const sle = ac.view().peek(keylet::account(a1.id()));
+                if (!sle)
+                    return false;
+
+                MPTIssue const mpt{makeMptID(1, AccountID(0x4985601))};
+                auto sleIssuance = std::make_shared<SLE>(keylet::mptIssuance(mpt.getMptID()));
+                sleIssuance->setFieldU64(sfOutstandingAmount, 10);
+                // No lsfMPTCanHoldConfidentialBalance.
+                ac.view().insert(sleIssuance);
+
+                auto sleMpt = std::make_shared<SLE>(keylet::mptoken(mpt.getMptID(), a2));
+                sleMpt->setAccountID(sfAccount, a2.id());
+                sleMpt->setFieldH192(sfMPTokenIssuanceID, mpt.getMptID());
+                sleMpt->setFieldVL(sfHolderEncryptionKey, dummyPk);
+                sleMpt->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                sleMpt->setFieldVL(sfConfidentialBalanceInbox, dummyCt);
+                sleMpt->setFieldVL(sfIssuerEncryptedBalance, dummyCt);
+                sleMpt->setFieldU32(sfConfidentialBalanceVersion, 1);
+                ac.view().insert(sleMpt);
+                return true;
+            });
+    }
+
     void
     testAMM()
     {
@@ -4911,6 +4989,7 @@ public:
         testValidLoanBroker();
         testVault();
         testMPT();
+        testConfidentialMPT();
         testInvariantOverwrite(defaultAmendments());
         testInvariantOverwrite(defaultAmendments() - fixCleanup3_1_3);
         testVaultComputeCoarsestScale();
