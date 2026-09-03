@@ -975,6 +975,16 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             BEAST_EXPECT(issuance && issuance->isFlag(lsfMPTLocked));
 
             env(mergeTx(lockAlice, issuanceID), Ter(tecLOCKED));
+
+            env(lockTx, Txflags(tfMPTUnlock));
+
+            json::Value holderLock = lockTx;
+            holderLock[sfHolder] = lockAlice.human();
+            env(holderLock, Txflags(tfMPTLock));
+
+            auto const holder = env.le(keylet::mptoken(issuanceID, lockAlice.id()));
+            BEAST_EXPECT(holder && holder->isFlag(lsfMPTLocked));
+            env(mergeTx(lockAlice, issuanceID), Ter(tecLOCKED));
         }
 
         // --- Dedicated vault account may convert (issuer account may not) ---
