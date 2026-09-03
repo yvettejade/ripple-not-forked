@@ -81,6 +81,16 @@ makeSendTransactionContext(STTx const& tx, std::uint32_t cbsVersion)
 /**
  * Aggregated Bulletproof over PC_m and PC_rem = PC_b - PC_m (754 bytes).
  * Context is the same TransactionContextID used for the compact sigma proof.
+ *
+ * SPEC INCONSISTENCY (xls-0096 §5.4 / payload notes): the Bulletproof covers
+ * [0, 2^64) while the text says transactors independently reject amounts above
+ * maxMPTokenAmount (2^63-1). For ConfidentialMPTSend the amount is hidden, so
+ * an independent plaintext cap check is impossible without opening the
+ * commitment or shrinking the range proof to 63 bits (which would change the
+ * normative 754-byte aggregated layout). Convert / ConvertBack / Clawback
+ * enforce kMaxMPTokenAmount on their public MPTAmount fields. Until the specs
+ * pick either a 63-bit range proof or drop the "independent reject" language
+ * for Send, verification follows the stated 64-bit / 754-byte proof.
  */
 [[nodiscard]] bool
 verifySendAggregatedBulletproof(

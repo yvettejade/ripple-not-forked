@@ -188,13 +188,15 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (!sleIssuance)
         return tecOBJECT_NOT_FOUND;
 
+    // Issuer cannot convert its own issuance; vault accounts are holders.
+    // Checked before the MPToken lookup so the issuer gets temMALFORMED even
+    // when no issuer MPToken exists (xls-0096 Convert failure conditions).
+    if (account == (*sleIssuance)[sfIssuer])
+        return temMALFORMED;
+
     auto const sleMpt = ctx.view.read(keylet::mptoken(issuanceID, account));
     if (!sleMpt)
         return tecOBJECT_NOT_FOUND;
-
-    // Issuer cannot convert its own issuance; vault accounts are holders.
-    if (account == (*sleIssuance)[sfIssuer])
-        return temMALFORMED;
 
     if (!sleIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
         return tecNO_PERMISSION;

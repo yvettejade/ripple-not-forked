@@ -68,12 +68,14 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
     if (!sleIssuance)
         return tecOBJECT_NOT_FOUND;
 
+    // Issuer cannot merge; checked before MPToken lookup so the result is
+    // temMALFORMED even when the issuer has no MPToken (xls-0096).
+    if (account == (*sleIssuance)[sfIssuer])
+        return temMALFORMED;
+
     auto const sleMpt = ctx.view.read(keylet::mptoken(issuanceID, account));
     if (!sleMpt)
         return tecOBJECT_NOT_FOUND;
-
-    if (account == (*sleIssuance)[sfIssuer])
-        return temMALFORMED;
 
     if (!sleIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
         return tecNO_PERMISSION;

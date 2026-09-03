@@ -719,12 +719,24 @@ ValidConfidentialMPT::finalize(
 
     for (auto const& [id, account] : confidentialHoldings_)
     {
-        (void)account;
         auto const issuance = view.read(keylet::mptIssuance(id));
         if (!issuance || !issuance->isFlag(lsfMPTCanHoldConfidentialBalance))
         {
             JLOG(j.fatal()) << "Invariant failed: confidential balance without issuance flag";
             return false;
+        }
+
+        // When an auditor key is configured, every confidential MPToken must
+        // carry a matching auditor mirror (xls-0096 multi-ciphertext model).
+        if (issuance->isFieldPresent(sfAuditorEncryptionKey))
+        {
+            auto const mpt = view.read(keylet::mptoken(id, account));
+            if (!mpt || !mpt->isFieldPresent(sfAuditorEncryptedBalance))
+            {
+                JLOG(j.fatal())
+                    << "Invariant failed: auditor key set but auditor balance missing";
+                return false;
+            }
         }
     }
 

@@ -177,12 +177,13 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     if (!sleIssuance)
         return tecOBJECT_NOT_FOUND;
 
+    // Issuer cannot convert back; check before MPToken lookup (xls-0096).
+    if (account == (*sleIssuance)[sfIssuer])
+        return temMALFORMED;
+
     auto const sleMpt = ctx.view.read(keylet::mptoken(issuanceID, account));
     if (!sleMpt)
         return tecOBJECT_NOT_FOUND;
-
-    if (account == (*sleIssuance)[sfIssuer])
-        return temMALFORMED;
 
     if (!sleIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
         return tecNO_PERMISSION;
