@@ -170,6 +170,62 @@ parseSendCryptoFields(STTx const& tx, bool auditorRequired) noexcept
     return out;
 }
 
+
+/** Updated_ConfidentialMPT §3.8: after proof verify, simulate inbox credit +
+ *  Fiat–Shamir re-randomization and reject if any resulting ciphertext is not
+ *  a well-formed secp256k1 element (point at infinity / add failure).
+ */
+[[nodiscard]] bool
+receiverRerandomizationWellFormed(
+    SLE const& sleDestMpt,
+    SLE const& sleIssuance,
+    ParsedSendCrypto const& parsed,
+    Scalar const& e,
+    bool hasAuditorKey,
+    std::optional<Point> const& auditorPk) noexcept
+{
+    auto const destPk = readPoint(sleDestMpt[sfHolderEncryptionKey]);
+    auto const issuerPk = readPoint(sleIssuance[sfIssuerEncryptionKey]);
+    if (!destPk || !issuerPk)
+        return false;
+
+    auto const inbox =
+        confidential_mpt::parseCiphertext(sleDestMpt[sfConfidentialBalanceInbox]);
+    auto const issuerBal =
+        confidential_mpt::parseCiphertext(sleDestMpt[sfIssuerEncryptedBalance]);
+    if (!inbox || !issuerBal)
+        return false;
+
+    auto const creditedInbox =
+        confidential_mpt::ciphertextAdd(*inbox, parsed.destinationAmount);
+    if (!creditedInbox)
+        return false;
+    if (!confidential_mpt::rerandomizeWithScalar(*creditedInbox, *destPk, e))
+        return false;
+
+    auto const creditedIssuer =
+        confidential_mpt::ciphertextAdd(*issuerBal, parsed.issuerAmount);
+    if (!creditedIssuer)
+        return false;
+    if (!confidential_mpt::rerandomizeWithScalar(*creditedIssuer, *issuerPk, e))
+        return false;
+
+    if (hasAuditorKey)
+    {
+        auto const auditorBal =
+            confidential_mpt::parseCiphertext(sleDestMpt[sfAuditorEncryptedBalance]);
+        if (!auditorBal || !parsed.auditorAmount || !auditorPk)
+            return false;
+        auto const creditedAuditor =
+            confidential_mpt::ciphertextAdd(*auditorBal, *parsed.auditorAmount);
+        if (!creditedAuditor)
+            return false;
+        if (!confidential_mpt::rerandomizeWithScalar(*creditedAuditor, *auditorPk, e))
+            return false;
+    }
+    return true;
+}
+
 [[nodiscard]] bool
 hasInitializedConfidentialState(SLE const& mpt)
 {
@@ -459,6 +515,12 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     auto const verified = verifySendProofsWithDestKey(
         tx, *sleSenderMpt, *sleDestMpt, *sleIssuance, *parsed, auditorPk, ctx.j);
     if (!verified.ok)
+        return tecBAD_PROOF;
+
+    // Updated_ConfidentialMPT §3.8 validation: re-randomized inbox/mirrors must
+    // be well-formed before the state transition is applied.
+    if (!receiverRerandomizationWellFormed(
+            *sleDestMpt, *sleIssuance, *parsed, verified.challenge, hasAuditorKey, auditorPk))
         return tecBAD_PROOF;
 
     return tesSUCCESS;
