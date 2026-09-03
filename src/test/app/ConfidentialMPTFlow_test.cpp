@@ -3469,14 +3469,15 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
                 scalar(5),
                 env.seq(bob)));
 
+            // Peek+update avoids SLE copy/applyTemplate, which throws if an
+            // explicit default TransferFee(0) is present on the source SLE.
             BEAST_EXPECT(env.app().getOpenLedger().modify(
                 [&](OpenView& view, beast::Journal) {
-                    auto const sle = view.read(keylet::mptIssuance(issuanceID));
+                    auto sle = view.peek(keylet::mptIssuance(issuanceID));
                     if (!sle)
                         return false;
-                    auto replacement = std::make_shared<SLE>(*sle, sle->key());
-                    replacement->setFieldU16(sfTransferFee, 1);
-                    view.rawReplace(replacement);
+                    sle->setFieldU16(sfTransferFee, 1);
+                    view.update(sle);
                     return true;
                 }));
 
