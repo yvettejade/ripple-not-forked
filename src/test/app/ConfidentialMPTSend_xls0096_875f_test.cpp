@@ -106,16 +106,17 @@ class ConfidentialMPTSend_xls0096_875f_test : public beast::unit_test::Suite
         using namespace test::jtx;
 
         Env env(*this, testableAmendments().set(featureConfidentialTransfer));
+        Account const issuer{"issuer"};
         Account const alice{"alice"};
         Account const bob{"bob"};
-        env.fund(XRP(10'000), alice, bob);
+        env.fund(XRP(10'000), issuer, alice, bob);
         env.close();
 
-        auto const id = makeMptID(env.seq(alice), alice);
+        auto const id = makeMptID(env.seq(issuer), issuer);
 
         // Sender role is derivable from the ID and rejected in preflight.
         {
-            auto jv = makeSendJson(alice, bob, id);
+            auto jv = makeSendJson(issuer, bob, id);
             auto const pt = validPointHex();
             auto const ct = pt + pt;
             jv[sfBalanceCommitment] = pt;
