@@ -5573,6 +5573,169 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         }
     }
 
+    void
+    testTicketContextBindingEvidence()
+    {
+        testcase(
+            "requirement evidence: SequenceOrTicket transcript binding for "
+            "Convert and Send");
+        using namespace test::jtx;
+
+        auto features = testableAmendments();
+        features.set(featureConfidentialTransfer);
+        features.set(featureDynamicMPT);
+        Env env(*this, features);
+        Account const issuer{"ticketIssuer"};
+        Account const alice{"ticketAlice"};
+        Account const bob{"ticketBob"};
+        MPTTester mpt(env, issuer, {.holders = {alice, bob}});
+        mpt.create(
+            {.maxAmt = 100,
+             .authorize = MPTCreate::allHolders,
+             .pay = {{{alice}, 20}},
+             .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+        auto const issuanceID = mpt.issuanceID();
+        auto const issuerEncryption = key(951);
+        auto const aliceEncryption = key(953);
+        auto const bobEncryption = key(955);
+
+        json::Value setKeys;
+        setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+        setKeys[sfAccount] = issuer.human();
+        setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+        setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+        env(setKeys);
+
+        // Updated §2.4: Convert key-registration PoK is bound to
+        // SequenceOrTicket. A Sequence-bound proof fails through a Ticket;
+        // rebuilding against the second Ticket succeeds.
+        auto const convertTicket1 = env.seq(alice) + 1;
+        auto const convertTicket2 = env.seq(alice) + 2;
+        env(ticket::create(alice, 2));
+        env.close();
+        env(convertTxIssuerOnly(
+                alice,
+                issuanceID,
+                20,
+                aliceEncryption,
+                issuerEncryption,
+                scalar(3),
+                env.seq(alice)),
+            ticket::Use(convertTicket1),
+            Ter(tecBAD_PROOF));
+        env(convertTxIssuerOnly(
+                alice,
+                issuanceID,
+                20,
+                aliceEncryption,
+                issuerEncryption,
+                scalar(3),
+                convertTicket2),
+            ticket::Use(convertTicket2));
+        env(mergeTx(alice, issuanceID));
+        env(convertTxIssuerOnly(
+            bob,
+            issuanceID,
+            0,
+            bobEncryption,
+            issuerEncryption,
+            scalar(5),
+            env.seq(bob)));
+
+        auto const aliceMpt = env.le(keylet::mptoken(issuanceID, alice.id()));
+        if (!BEAST_EXPECT(aliceMpt))
+            return;
+        auto const aliceSpending =
+            cm::parseCiphertext((*aliceMpt)[sfConfidentialBalanceSpending]);
+        if (!BEAST_EXPECT(aliceSpending))
+            return;
+
+        std::uint64_t constexpr amount = 6;
+        std::uint64_t constexpr aliceBalance = 20;
+        auto const sendRandomness = scalar(41);
+        auto const balanceBlinding = scalar(43);
+        auto const remainderBlinding = scalar(2);
+        auto const senderAmount =
+            cm::encryptAmount(aliceEncryption.publicKey, amount, sendRandomness);
+        auto const destinationAmount =
+            cm::encryptAmount(bobEncryption.publicKey, amount, sendRandomness);
+        auto const issuerAmount =
+            cm::encryptAmount(issuerEncryption.publicKey, amount, sendRandomness);
+        auto const amountCommitment = cm::pedersenCommit(amount, sendRandomness);
+        auto const balanceCommitment =
+            cm::pedersenCommit(aliceBalance, balanceBlinding);
+        auto const remainderCommitment =
+            cm::pedersenCommit(aliceBalance - amount, remainderBlinding);
+        if (!BEAST_EXPECT(
+                senderAmount && destinationAmount && issuerAmount &&
+                amountCommitment && balanceCommitment && remainderCommitment))
+            return;
+
+        auto const aliceVersion =
+            (*aliceMpt)[~sfConfidentialBalanceVersion].value_or(0);
+        cm::SendPublicInput const sendInput{
+            .recipientKeys =
+                {aliceEncryption.publicKey,
+                 bobEncryption.publicKey,
+                 issuerEncryption.publicKey},
+            .senderKey = aliceEncryption.publicKey,
+            .c1 = cm::ciphertextC1(*senderAmount),
+            .c2 =
+                {cm::ciphertextC2(*senderAmount),
+                 cm::ciphertextC2(*destinationAmount),
+                 cm::ciphertextC2(*issuerAmount)},
+            .amountCommitment = *amountCommitment,
+            .balanceCommitment = *balanceCommitment,
+            .balanceC1 = cm::ciphertextC1(*aliceSpending),
+            .balanceC2 = cm::ciphertextC2(*aliceSpending)};
+        cm::SendWitness const sendWitness{
+            .m = amount,
+            .r = sendRandomness,
+            .b = aliceBalance,
+            .rho = balanceBlinding,
+            .sk = aliceEncryption.secret};
+        json::Value send;
+        send[jss::TransactionType] = jss::ConfidentialMPTSend;
+        send[sfAccount] = alice.human();
+        send[sfDestination] = bob.human();
+        send[sfMPTokenIssuanceID] = to_string(issuanceID);
+        send[sfSenderEncryptedAmount] = hex(*senderAmount);
+        send[sfDestinationEncryptedAmount] = hex(*destinationAmount);
+        send[sfIssuerEncryptedAmount] = hex(*issuerAmount);
+        send[sfAmountCommitment] = hex(*amountCommitment);
+        send[sfBalanceCommitment] = hex(*balanceCommitment);
+        setConfidentialFee(send);
+
+        auto const setProof = [&](std::uint32_t sequenceOrTicket) {
+            auto const context =
+                sendContext(alice, issuanceID, sequenceOrTicket, bob, aliceVersion);
+            auto const sigma =
+                cm::proveSendSigma(sendInput, sendWitness, asSlice(context));
+            auto const range = cm::proveAggregatedBulletproof(
+                *amountCommitment,
+                *remainderCommitment,
+                amount,
+                sendRandomness,
+                aliceBalance - amount,
+                remainderBlinding,
+                asSlice(context));
+            if (!sigma || !range)
+                Throw<std::runtime_error>("Unable to create ticket-bound Send proof");
+            send[sfZKProof] = joinedHex(*sigma, *range);
+        };
+
+        // Updated §3.7: Send uses the same SequenceOrTicket binding.
+        auto const sendTicket1 = env.seq(alice) + 1;
+        auto const sendTicket2 = env.seq(alice) + 2;
+        env(ticket::create(alice, 2));
+        env.close();
+        setProof(env.seq(alice));
+        env(send, ticket::Use(sendTicket1), Ter(tecBAD_PROOF));
+        setProof(sendTicket2);
+        env(send, ticket::Use(sendTicket2));
+        env.require(tickets(alice, 0));
+    }
+
 public:
     void
     run() override
@@ -5595,6 +5758,7 @@ public:
         testCredentialObjectMirrorEvidence();
         testOneWayFlagEncZeroIssuanceAndConvertBackOAEvidence();
         testNoAuditorSendAndMissingObjectEvidence();
+        testTicketContextBindingEvidence();
     }
 };
 
