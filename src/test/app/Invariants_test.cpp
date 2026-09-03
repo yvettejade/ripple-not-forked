@@ -4564,6 +4564,35 @@ class Invariants_test : public beast::unit_test::Suite
                 return true;
             });
 
+        // Encrypted balance state requires the holder's registered key.
+        doInvariantCheck(
+            {{"invalid Confidential MPT ledger state"}},
+            [&](Account const& a1, Account const& a2, ApplyContext& ac) {
+                if (!ac.view().peek(keylet::account(a1.id())))
+                    return false;
+
+                MPTIssue const mpt{makeMptID(1, AccountID(0x4985601))};
+                auto sleIssuance =
+                    std::make_shared<SLE>(keylet::mptIssuance(mpt.getMptID()));
+                sleIssuance->setFieldU64(sfOutstandingAmount, 10);
+                sleIssuance->setFieldU32(
+                    sfFlags, lsfMPTCanHoldConfidentialBalance);
+                ac.view().insert(sleIssuance);
+
+                auto sleMpt =
+                    std::make_shared<SLE>(keylet::mptoken(mpt.getMptID(), a2));
+                sleMpt->setAccountID(sfAccount, a2.id());
+                sleMpt->setFieldH192(
+                    sfMPTokenIssuanceID, mpt.getMptID());
+                sleMpt->setFieldVL(sfConfidentialBalanceSpending, dummyCt);
+                sleMpt->setFieldVL(sfConfidentialBalanceInbox, dummyCt);
+                sleMpt->setFieldVL(sfIssuerEncryptedBalance, dummyCt);
+                sleMpt->setFieldU32(sfConfidentialBalanceVersion, 1);
+                // HolderEncryptionKey intentionally omitted.
+                ac.view().insert(sleMpt);
+                return true;
+            });
+
         // Confidential holder state requires the issuance confidential flag.
         doInvariantCheck(
             {{"confidential balance without issuance flag"}},

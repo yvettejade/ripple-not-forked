@@ -685,6 +685,8 @@ ValidConfidentialMPT::visitEntry(
     bool const hasIssuer = afterSle->isFieldPresent(sfIssuerEncryptedBalance);
     if (hasSpending != hasInbox || hasSpending != hasIssuer)
         invalid_ = true;
+    if (hasSpending && !afterSle->isFieldPresent(sfHolderEncryptionKey))
+        invalid_ = true;
 
     if (hasConfidentialState(afterSle))
         confidentialHoldings_.emplace_back(id, (*afterSle)[sfAccount]);
