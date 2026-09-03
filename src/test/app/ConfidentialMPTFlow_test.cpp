@@ -3075,6 +3075,74 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             BEAST_EXPECT(
                 (*issuance)[~sfConfidentialOutstandingAmount].value_or(0) == 0);
         }
+
+        // xls-0096 Sec 11.3.2.6: MPTAmount exceeding global COA fails before
+        // proof verification (tecINSUFFICIENT_FUNDS).
+        {
+            Account const issuer{"coaIssuer"};
+            Account const alice{"coaAlice"};
+            MPTTester mpt(env, issuer, {.holders = {alice}});
+            mpt.create(
+                {.maxAmt = 50,
+                 .authorize = MPTCreate::allHolders,
+                 .pay = {{{alice}, 10}},
+                 .flags = tfMPTCanTransfer | tfMPTCanClawback |
+                     tfMPTCanHoldConfidentialBalance});
+            auto const issuanceID = mpt.issuanceID();
+            auto const issuerEncryption = key(421);
+            auto const auditorEncryption = key(423);
+            auto const aliceEncryption = key(425);
+
+            json::Value setKeys;
+            setKeys[jss::TransactionType] = jss::MPTokenIssuanceSet;
+            setKeys[sfAccount] = issuer.human();
+            setKeys[sfMPTokenIssuanceID] = to_string(issuanceID);
+            setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
+            setKeys[sfAuditorEncryptionKey] = hex(auditorEncryption.publicKey);
+            env(setKeys);
+
+            env(convertTx(
+                alice,
+                issuanceID,
+                10,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(3),
+                env.seq(alice)));
+            env(mergeTx(alice, issuanceID));
+
+            auto const aliceMpt = env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(aliceMpt))
+                return;
+            auto const aliceIssuer =
+                cm::parseCiphertext((*aliceMpt)[sfIssuerEncryptedBalance]);
+            if (!BEAST_EXPECT(aliceIssuer))
+                return;
+
+            // Proof for the true balance (10), but declare amount 11 > COA.
+            auto const clawCtx =
+                clawbackContext(issuer, issuanceID, env.seq(issuer), alice);
+            cm::ClawbackPublicInput const clawInput{
+                .issuerKey = issuerEncryption.publicKey,
+                .c1 = cm::ciphertextC1(*aliceIssuer),
+                .c2 = cm::ciphertextC2(*aliceIssuer),
+                .m = 10};
+            auto const clawProof =
+                cm::proveClawback(clawInput, issuerEncryption.secret, asSlice(clawCtx));
+            if (!BEAST_EXPECT(clawProof))
+                return;
+
+            json::Value clawback;
+            clawback[jss::TransactionType] = jss::ConfidentialMPTClawback;
+            clawback[sfAccount] = issuer.human();
+            clawback[sfHolder] = alice.human();
+            clawback[sfMPTokenIssuanceID] = to_string(issuanceID);
+            clawback[sfMPTAmount] = "11";
+            clawback[sfZKProof] = hex(*clawProof);
+            setConfidentialFee(clawback);
+            env(clawback, Ter(tecINSUFFICIENT_FUNDS));
+        }
     }
 
 
