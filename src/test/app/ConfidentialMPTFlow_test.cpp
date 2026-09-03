@@ -1025,7 +1025,25 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             env(mergeTx(vault, issuanceID));
 
             auto const vaultMpt = env.le(keylet::mptoken(issuanceID, vault.id()));
-            BEAST_EXPECT(vaultMpt);
+            if (!BEAST_EXPECT(vaultMpt))
+                return;
+            auto const version = (*vaultMpt)[sfConfidentialBalanceVersion];
+            auto const expectedInbox = confidentialMPTEncryptedZero(
+                vaultEncryption.publicKey, vault.id(), vaultIssuer.id(), issuanceID);
+            if (!BEAST_EXPECT(expectedInbox))
+                return;
+
+            // An empty inbox is still mergeable: it resets to EncZero and
+            // advances the proof version without changing supply.
+            env(mergeTx(vault, issuanceID));
+            auto const afterNoOp = env.le(keylet::mptoken(issuanceID, vault.id()));
+            if (!BEAST_EXPECT(afterNoOp))
+                return;
+            BEAST_EXPECT((*afterNoOp)[sfConfidentialBalanceVersion] == version + 1);
+            auto const inbox =
+                cm::parseCiphertext((*afterNoOp)[sfConfidentialBalanceInbox]);
+            BEAST_EXPECT(inbox && *inbox == *expectedInbox);
+
             auto const iss = env.le(keylet::mptIssuance(issuanceID));
             BEAST_EXPECT(iss && (*iss)[~sfConfidentialOutstandingAmount].value_or(0) == 80);
         }
