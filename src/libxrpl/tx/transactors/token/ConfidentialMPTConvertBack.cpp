@@ -82,7 +82,12 @@ verifyAmountCiphertext(
     return ct && cm::verifyCiphertext(pk, *ct, amount, blinding);
 }
 
-/** TransactionContextID for ConvertBack (Updated_ConfidentialMPT §4.7). */
+/** TransactionContextID for ConvertBack (Updated_ConfidentialMPT §4.7).
+ *
+ * TxSpecific := Account || CBS_Version(A). Account is repeated as the
+ * "Receiver" slot so ConvertBack keeps the same outer context layout as
+ * Send/Clawback (Updated §4.7: "Receiver is set equal to Account").
+ */
 [[nodiscard]] uint256
 makeConvertBackContext(STTx const& tx, std::uint32_t cbsVersion)
 {

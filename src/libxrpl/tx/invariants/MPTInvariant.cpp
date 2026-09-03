@@ -708,9 +708,12 @@ ValidConfidentialMPT::finalize(
     ReadView const& view,
     beast::Journal const& j) const
 {
-    if (!view.rules().enabled(featureConfidentialTransfer) || !isTesSuccess(result))
+    if (!view.rules().enabled(featureConfidentialTransfer))
         return true;
 
+    // Structural failures must reject on both invariant passes. ApplyContext
+    // re-invokes finalize with tecINVARIANT_FAILED to upgrade to tef; skipping
+    // when !isTesSuccess would incorrectly allow that second pass to succeed.
     if (invalid_)
     {
         JLOG(j.fatal()) << "Invariant failed: invalid Confidential MPT ledger state";
@@ -739,6 +742,11 @@ ValidConfidentialMPT::finalize(
             }
         }
     }
+
+    // Transaction-accounting deltas are only meaningful when the transaction
+    // claimed success; failed applies must not mutate supply.
+    if (!isTesSuccess(result))
+        return true;
 
     for (auto const& [id, state] : state_)
     {
