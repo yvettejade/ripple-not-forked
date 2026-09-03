@@ -268,6 +268,13 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         enable[sfIssuerEncryptionKey] = hex(issuerKey.publicKey);
         env(enable, Txflags(tfMPTSetCanHoldConfidentialBalance));
 
+        json::Value auditorOnly;
+        auditorOnly[jss::TransactionType] = jss::MPTokenIssuanceSet;
+        auditorOnly[sfAccount] = mutableIssuer.human();
+        auditorOnly[sfMPTokenIssuanceID] = to_string(mutableIssuance.issuanceID());
+        auditorOnly[sfAuditorEncryptionKey] = hex(key(39).publicKey);
+        env(auditorOnly, Ter(temMALFORMED));
+
         json::Value badFeeCreate;
         badFeeCreate[jss::TransactionType] = jss::MPTokenIssuanceCreate;
         badFeeCreate[sfAccount] = issuer.human();
@@ -1028,7 +1035,7 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
     void
     testAmendmentDisabled()
     {
-        testcase("Convert and MergeInbox temDISABLED when amendment off");
+        testcase("confidential transactions and issuance changes disabled");
         using namespace test::jtx;
 
         Env env(*this, testableAmendments() - featureConfidentialTransfer);
@@ -1049,6 +1056,21 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
                 env.seq(alice)),
             Ter(temDISABLED));
         env(mergeTx(alice, id), Ter(temDISABLED));
+
+        json::Value create;
+        create[jss::TransactionType] = jss::MPTokenIssuanceCreate;
+        create[sfAccount] = issuer.human();
+        env(
+            create,
+            Txflags(tfMPTCanHoldConfidentialBalance),
+            Ter(temDISABLED));
+
+        json::Value set;
+        set[jss::TransactionType] = jss::MPTokenIssuanceSet;
+        set[sfAccount] = issuer.human();
+        set[sfMPTokenIssuanceID] = to_string(id);
+        set[sfIssuerEncryptionKey] = hex(key(11).publicKey);
+        env(set, Txflags(tfMPTSetCanHoldConfidentialBalance), Ter(temDISABLED));
     }
 
     void
