@@ -1477,7 +1477,6 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             mpt.create(
                 {.maxAmt = 50,
                  .authorize = MPTCreate::allHolders,
-                 .pay = {{{alice}, 10}},
                  .flags = tfMPTCanTransfer | tfMPTRequireAuth | tfMPTCanHoldConfidentialBalance});
             auto const issuanceID = mpt.issuanceID();
             auto const issuerEncryption = key(51);
@@ -1489,15 +1488,15 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             setKeys[sfIssuerEncryptionKey] = hex(issuerEncryption.publicKey);
             env(setKeys);
 
+            // Convert does not gate lsfMPTRequireAuth; MergeInbox does.
             env(convertTxIssuerOnly(
                 alice,
                 issuanceID,
-                10,
+                0,
                 aliceEncryption,
                 issuerEncryption,
                 scalar(2),
                 env.seq(alice)));
-            mpt.authorize({.account = issuer, .holder = alice, .flags = tfMPTUnauthorize});
             env(mergeTx(alice, issuanceID), Ter(tecNO_AUTH));
         }
 
