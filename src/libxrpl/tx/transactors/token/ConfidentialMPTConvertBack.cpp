@@ -6,6 +6,7 @@
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
+#include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -126,6 +127,12 @@ ConfidentialMPTConvertBack::getFlagsMask(PreflightContext const& ctx)
 NotTEC
 ConfidentialMPTConvertBack::preflight(PreflightContext const& ctx)
 {
+    // The issuer is encoded in MPTokenIssuanceID, so this data-verification
+    // rule does not require a ledger read (xls-0096 §10.4.1.2).
+    if (ctx.tx[sfAccount] ==
+        MPTIssue{ctx.tx[sfMPTokenIssuanceID]}.getIssuer())
+        return temMALFORMED;
+
     auto const amount = ctx.tx[sfMPTAmount];
     if (amount == 0 || amount > kMaxMpTokenAmount)
         return temBAD_AMOUNT;

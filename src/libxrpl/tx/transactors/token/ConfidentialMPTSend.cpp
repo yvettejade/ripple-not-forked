@@ -13,6 +13,7 @@
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
+#include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -351,6 +352,11 @@ ConfidentialMPTSend::preflight(PreflightContext const& ctx)
         return temMALFORMED;
 
     if (account == destination)
+        return temMALFORMED;
+
+    // The issuer is encoded in MPTokenIssuanceID, so this data-verification
+    // rule does not require a ledger read (xls-0096 §8.3.1.2).
+    if (account == MPTIssue{tx[sfMPTokenIssuanceID]}.getIssuer())
         return temMALFORMED;
 
     // Commitment points: exactly 33-byte valid compressed points.

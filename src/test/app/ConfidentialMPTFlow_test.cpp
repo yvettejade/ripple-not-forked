@@ -750,6 +750,16 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
                 scalar(3),
                 env.seq(issuer)),
             Ter(temMALFORMED));
+        env(convertTx(
+                issuer,
+                makeMptID(999, issuer),
+                0,
+                aliceEncryption,
+                issuerEncryption,
+                auditorEncryption,
+                scalar(3),
+                env.seq(issuer)),
+            Ter(temMALFORMED));
 
         // Issuer cannot MergeInbox.
         env(mergeTx(issuer, issuanceID), Ter(temMALFORMED));
@@ -3918,7 +3928,8 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             }
             {
                 auto tx = base;
-                tx[sfMPTokenIssuanceID] = to_string(makeMptID(1, alice));
+                tx[sfMPTokenIssuanceID] =
+                    to_string(makeMptID(999, issuer));
                 env(tx, Ter(tecOBJECT_NOT_FOUND));
             }
         }
@@ -5024,7 +5035,8 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             json::Value convertBack;
             convertBack[jss::TransactionType] = jss::ConfidentialMPTConvertBack;
             convertBack[sfAccount] = alice.human();
-            convertBack[sfMPTokenIssuanceID] = to_string(makeMptID(1, alice));
+            convertBack[sfMPTokenIssuanceID] =
+                to_string(makeMptID(999, issuer));
             convertBack[sfMPTAmount] = std::to_string(amount);
             convertBack[sfHolderEncryptedAmount] = hex(*holderWithdrawal);
             convertBack[sfIssuerEncryptedAmount] = hex(*issuerWithdrawal);
@@ -5624,7 +5636,11 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             env.fund(XRP(10'000), alice);
             MPTTester mpt(env, issuer);
             mpt.create({.flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
-            env(mergeTx(alice, makeMptID(1, alice)), Ter(tecOBJECT_NOT_FOUND));
+            // Issuer role is malformed even when the issuance object is absent.
+            env(mergeTx(alice, makeMptID(1, alice)), Ter(temMALFORMED));
+            env(
+                mergeTx(alice, makeMptID(999, issuer)),
+                Ter(tecOBJECT_NOT_FOUND));
             env(mergeTx(alice, mpt.issuanceID()), Ter(tecOBJECT_NOT_FOUND));
         }
 

@@ -113,6 +113,19 @@ class ConfidentialMPTSend_xls0096_875f_test : public beast::unit_test::Suite
 
         auto const id = makeMptID(env.seq(alice), alice);
 
+        // Sender role is derivable from the ID and rejected in preflight.
+        {
+            auto jv = makeSendJson(alice, bob, id);
+            auto const pt = validPointHex();
+            auto const ct = pt + pt;
+            jv[sfBalanceCommitment] = pt;
+            jv[sfAmountCommitment] = pt;
+            jv[sfSenderEncryptedAmount] = ct;
+            jv[sfDestinationEncryptedAmount] = ct;
+            jv[sfIssuerEncryptedAmount] = ct;
+            env(jv, Ter(temMALFORMED));
+        }
+
         // Sender == Destination
         {
             auto jv = makeSendJson(alice, alice, id);

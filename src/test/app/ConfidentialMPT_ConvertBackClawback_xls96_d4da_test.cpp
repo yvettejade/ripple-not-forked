@@ -141,12 +141,15 @@ class ConfidentialMPT_ConvertBackClawback_xls96_d4da_test : public beast::unit_t
         using namespace test::jtx;
 
         Env env(*this, testableAmendments().set(featureConfidentialTransfer));
+        Account const alice{"alice"};
         Account const bob{"bob"};
-        env.fund(XRP(10'000), bob);
+        env.fund(XRP(10'000), alice, bob);
         env.close();
 
-        auto const id = makeMptID(1, bob);
+        auto const id = makeMptID(1, alice);
 
+        // Issuer role is derivable from the ID and rejected in preflight.
+        env(makeConvertBackJson(alice, id), Ter(temMALFORMED));
         {
             auto jv = makeConvertBackJson(bob, id, /*amount=*/0);
             env(jv, Ter(temBAD_AMOUNT));
@@ -193,6 +196,8 @@ class ConfidentialMPT_ConvertBackClawback_xls96_d4da_test : public beast::unit_t
 
         auto const id = makeMptID(env.seq(alice), alice);
 
+        // Non-issuer role is derivable from the ID and rejected in preflight.
+        env(makeClawbackJson(bob, alice, id), Ter(temMALFORMED));
         {
             auto jv = makeClawbackJson(alice, alice, id);
             env(jv, Ter(temMALFORMED));

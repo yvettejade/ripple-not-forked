@@ -7,6 +7,7 @@
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
+#include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -132,6 +133,13 @@ ConfidentialMPTConvert::preflight(PreflightContext const& ctx)
 {
     // featureConfidentialTransfer is gated by the TRANSACTION macro
     // (temDISABLED when disabled).
+
+    // The issuer is encoded in MPTokenIssuanceID. Confidential conversion is
+    // holder-only (§7 dedicated-account model), so reject the issuer without
+    // requiring the issuance object to exist.
+    if (ctx.tx[sfAccount] ==
+        MPTIssue{ctx.tx[sfMPTokenIssuanceID]}.getIssuer())
+        return temMALFORMED;
 
     bool const hasKey = ctx.tx.isFieldPresent(sfHolderEncryptionKey);
     bool const hasProof = ctx.tx.isFieldPresent(sfZKProof);
