@@ -406,8 +406,13 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             env.seq(bob)));
 
         auto const aliceMpt = env.le(keylet::mptoken(issuanceID, alice.id()));
-        if (!BEAST_EXPECT(aliceMpt))
+        auto const issuanceAfterConvert = env.le(keylet::mptIssuance(issuanceID));
+        if (!BEAST_EXPECT(aliceMpt && issuanceAfterConvert))
             return;
+        BEAST_EXPECT((*issuanceAfterConvert)[sfOutstandingAmount] == 100);
+        BEAST_EXPECT(
+            (*issuanceAfterConvert)[~sfConfidentialOutstandingAmount].value_or(0) == 100);
+        BEAST_EXPECT((*aliceMpt)[~sfMPTAmount].value_or(0) == 0);
         auto const aliceSpending = cm::parseCiphertext((*aliceMpt)[sfConfidentialBalanceSpending]);
         if (!BEAST_EXPECT(aliceSpending))
             return;
@@ -487,7 +492,14 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
 
         env(fset(bob, asfDepositAuth));
         env(send, Ter(tecNO_PERMISSION));
-        env(deposit::auth(bob, alice));
+
+        // XLS §8.3.2.1: an unaccepted credential is invalid even when supplied.
+        char const credentialType[] = "confidential-mpt";
+        env(credentials::create(alice, issuer, credentialType));
+        env.close();
+        auto const credential =
+            credentials::ledgerEntry(env, alice, issuer, credentialType);
+        auto const credentialID = credential[jss::result][jss::index].asString();
 
         sendCtx = sendContext(alice, issuanceID, env.seq(alice), bob, aliceVersion);
         sigma = cm::proveSendSigma(sendInput, sendWitness, asSlice(sendCtx));
@@ -502,12 +514,36 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         if (!BEAST_EXPECT(sigma && range))
             return;
         send[sfZKProof] = joinedHex(*sigma, *range);
-        env(send);
+        env(send, credentials::Ids({credentialID}), Ter(tecBAD_CREDENTIALS));
+
+        // Once accepted and preauthorized by credential type, DepositAuth allows Send.
+        env(credentials::accept(alice, issuer, credentialType));
+        env.close();
+        env(deposit::authCredentials(bob, {{issuer, credentialType}}));
+        env.close();
+        sendCtx = sendContext(alice, issuanceID, env.seq(alice), bob, aliceVersion);
+        sigma = cm::proveSendSigma(sendInput, sendWitness, asSlice(sendCtx));
+        range = cm::proveAggregatedBulletproof(
+            *amountCommitment,
+            *remainderCommitment,
+            amount,
+            sendRandomness,
+            aliceBalance - amount,
+            remainderBlinding,
+            asSlice(sendCtx));
+        if (!BEAST_EXPECT(sigma && range))
+            return;
+        send[sfZKProof] = joinedHex(*sigma, *range);
+        env(send, credentials::Ids({credentialID}));
 
         env(mergeTx(bob, issuanceID));
         auto const bobMpt = env.le(keylet::mptoken(issuanceID, bob.id()));
-        if (!BEAST_EXPECT(bobMpt))
+        auto const issuanceAfterSend = env.le(keylet::mptIssuance(issuanceID));
+        if (!BEAST_EXPECT(bobMpt && issuanceAfterSend))
             return;
+        BEAST_EXPECT((*issuanceAfterSend)[sfOutstandingAmount] == 100);
+        BEAST_EXPECT(
+            (*issuanceAfterSend)[~sfConfidentialOutstandingAmount].value_or(0) == 100);
         auto const bobSpending = cm::parseCiphertext((*bobMpt)[sfConfidentialBalanceSpending]);
         if (!BEAST_EXPECT(bobSpending))
             return;
@@ -558,8 +594,15 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
         env(convertBack);
 
         auto const aliceAfterSend = env.le(keylet::mptoken(issuanceID, alice.id()));
-        if (!BEAST_EXPECT(aliceAfterSend))
+        auto const bobAfterConvertBack = env.le(keylet::mptoken(issuanceID, bob.id()));
+        auto const issuanceAfterConvertBack = env.le(keylet::mptIssuance(issuanceID));
+        if (!BEAST_EXPECT(
+                aliceAfterSend && bobAfterConvertBack && issuanceAfterConvertBack))
             return;
+        BEAST_EXPECT((*issuanceAfterConvertBack)[sfOutstandingAmount] == 100);
+        BEAST_EXPECT(
+            (*issuanceAfterConvertBack)[~sfConfidentialOutstandingAmount].value_or(0) == 70);
+        BEAST_EXPECT((*bobAfterConvertBack)[sfMPTAmount] == amount);
         auto const aliceIssuerBalance =
             cm::parseCiphertext((*aliceAfterSend)[sfIssuerEncryptedBalance]);
         if (!BEAST_EXPECT(aliceIssuerBalance))
