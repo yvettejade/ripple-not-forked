@@ -3292,11 +3292,11 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
             send[sfZKProof] = joinedHex(*sigma, *range);
             setConfidentialFee(send);
 
+            // testFlow already covers tecNO_PERMISSION under DepositAuth.
+            // Here: account preauth (deposit::auth) alone permits Send.
             env(fset(bob, asfDepositAuth));
-            env(send, Ter(tecNO_PERMISSION));
             env(deposit::auth(bob, alice));
             env.close();
-            // Re-bind sequence after the failed attempt.
             auto const sendCtx2 =
                 sendContext(alice, issuanceID, env.seq(alice), bob, aliceVersion);
             auto const sigma2 =
@@ -3394,26 +3394,31 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
                 scalar(2),
                 env.seq(alice)));
 
-            auto const after = env.le(keylet::mptIssuance(issuanceID));
-            auto const aliceMpt = env.le(keylet::mptoken(issuanceID, alice.id()));
-            if (!BEAST_EXPECT(after && aliceMpt))
+            auto const afterConvert = env.le(keylet::mptIssuance(issuanceID));
+            auto const aliceAfterConvert =
+                env.le(keylet::mptoken(issuanceID, alice.id()));
+            if (!BEAST_EXPECT(afterConvert && aliceAfterConvert))
                 return;
-            BEAST_EXPECT((*after)[sfOutstandingAmount] == oaBefore);
+            BEAST_EXPECT((*afterConvert)[sfOutstandingAmount] == oaBefore);
             BEAST_EXPECT(
-                (*after)[~sfConfidentialOutstandingAmount].value_or(0) == coaBefore);
-            BEAST_EXPECT(aliceMpt->isFieldPresent(sfHolderEncryptionKey));
+                (*afterConvert)[~sfConfidentialOutstandingAmount].value_or(0) ==
+                coaBefore);
+            BEAST_EXPECT(aliceAfterConvert->isFieldPresent(sfHolderEncryptionKey));
+            BEAST_EXPECT((*aliceAfterConvert)[~sfMPTAmount].value_or(0) == 10);
+
+            // Convert initializes spending to EncZero and credits Enc(0,r)
+            // into inbox. Only spending equals the deterministic EncZero
+            // ciphertext before MergeInbox.
             auto const expectedZero = confidentialMPTEncryptedZero(
                 aliceEncryption.publicKey, alice.id(), issuer.id(), issuanceID);
             if (!BEAST_EXPECT(expectedZero))
                 return;
-            auto const spending =
-                cm::parseCiphertext((*aliceMpt)[sfConfidentialBalanceSpending]);
-            auto const inbox =
-                cm::parseCiphertext((*aliceMpt)[sfConfidentialBalanceInbox]);
+            auto const spending = cm::parseCiphertext(
+                (*aliceAfterConvert)[sfConfidentialBalanceSpending]);
+            auto const inbox = cm::parseCiphertext(
+                (*aliceAfterConvert)[sfConfidentialBalanceInbox]);
             BEAST_EXPECT(spending && *spending == *expectedZero);
-            BEAST_EXPECT(inbox && *inbox == *expectedZero);
-            // Public MPT balance is unchanged by a zero Convert.
-            BEAST_EXPECT((*aliceMpt)[~sfMPTAmount].value_or(0) == 10);
+            BEAST_EXPECT(inbox && *inbox != *expectedZero);
         }
 
         // Sec 6.4 / Send defense-in-depth: non-zero TransferFee on a confidential
@@ -3470,7 +3475,7 @@ class ConfidentialMPTFlow_test : public beast::unit_test::Suite
                     if (!sle)
                         return false;
                     auto replacement = std::make_shared<SLE>(*sle, sle->key());
-                    (*replacement)[sfTransferFee] = 1;
+                    replacement->setFieldU16(sfTransferFee, 1);
                     view.rawReplace(replacement);
                     return true;
                 }));
