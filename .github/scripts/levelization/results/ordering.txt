@@ -45,12 +45,14 @@ libxrpl.shamap > xrpl.shamap
 libxrpl.tx > xrpl.basics
 libxrpl.tx > xrpl.conditions
 libxrpl.tx > xrpl.core
+libxrpl.tx > xrpl.crypto
 libxrpl.tx > xrpl.json
 libxrpl.tx > xrpl.ledger
 libxrpl.tx > xrpl.protocol
 libxrpl.tx > xrpl.server
 libxrpl.tx > xrpl.tx
 test.app > test.jtx
+test.app > test.toplevel
 test.app > test.unit_test
 test.app > xrpl.basics
 test.app > xrpl.core
