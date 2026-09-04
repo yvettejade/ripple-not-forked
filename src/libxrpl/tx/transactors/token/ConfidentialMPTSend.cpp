@@ -9,6 +9,7 @@
 #include <xrpl/ledger/View.h>
 #include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
 #include <xrpl/ledger/helpers/CredentialHelpers.h>
+#include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/Protocol.h>
@@ -217,6 +218,13 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     auto const sleDest = ctx.view.read(keylet::mptoken(issuanceID, destination));
     if (!sleDest)
         return tecOBJECT_NOT_FOUND;
+
+    // Match Payment: enforce RequireAuth / DomainID / lsfMPTAuthorized for both.
+    MPTIssue const mptIssue{issuanceID};
+    if (auto const ter = requireAuth(ctx.view, mptIssue, sender); !isTesSuccess(ter))
+        return ter;
+    if (auto const ter = requireAuth(ctx.view, mptIssue, destination); !isTesSuccess(ter))
+        return ter;
 
     // Both parties must already be confidential-initialized.
     if (!sleSender->isFieldPresent(sfHolderEncryptionKey) ||
