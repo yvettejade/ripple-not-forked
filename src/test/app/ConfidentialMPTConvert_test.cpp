@@ -598,6 +598,134 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
         env.close();
     }
 
+    void
+    testHolderLocked()
+    {
+        testcase("holder MPToken locked rejects convert");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        env.fund(XRP(10000), alice, bob);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        mpt.authorize({.account = bob});
+        mpt.pay(alice, bob, 100);
+
+        // Lock holder MPToken only.
+        mpt.set({.account = alice, .holder = bob, .flags = tfMPTLock});
+        BEAST_EXPECT(env.le(keylet::mptoken(mpt.issuanceID(), bob.id()))->isFlag(lsfMPTLocked));
+        BEAST_EXPECT(!env.le(keylet::mptIssuance(mpt.issuanceID()))->isFlag(lsfMPTLocked));
+
+        auto const sk = parseScalarHex(kScalar1);
+        auto const pk = parsePointHex(kKeyG);
+        auto const r = parseScalarHex(kScalar2);
+        BEAST_EXPECT(sk && pk && r);
+        std::uint64_t const amount = 10;
+        auto const ct = encryptHex(amount, *pk, *r);
+        auto const baseFee = env.current()->fees().base;
+
+        auto const beforeMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto const beforeIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        auto const pubBefore = (*beforeMpt)[sfMPTAmount];
+        auto const confBefore = (*beforeIss)[sfConfidentialOutstandingAmount];
+        BEAST_EXPECT(!beforeMpt->isFieldPresent(sfHolderEncryptionKey));
+        BEAST_EXPECT(!beforeMpt->isFieldPresent(sfConfidentialBalanceInbox));
+        BEAST_EXPECT(!beforeMpt->isFieldPresent(sfIssuerEncryptedBalance));
+
+        env(convertJV(
+                bob,
+                mpt.issuanceID(),
+                amount,
+                ct,
+                ct,
+                kScalar2,
+                std::string(kKeyG),
+                proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob))),
+            Fee(10 * baseFee),
+            Ter(tecLOCKED));
+        env.close();
+
+        auto const afterMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto const afterIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT((*afterMpt)[sfMPTAmount] == pubBefore);
+        BEAST_EXPECT((*afterIss)[sfConfidentialOutstandingAmount] == confBefore);
+        BEAST_EXPECT(!afterMpt->isFieldPresent(sfHolderEncryptionKey));
+        BEAST_EXPECT(!afterMpt->isFieldPresent(sfConfidentialBalanceInbox));
+        BEAST_EXPECT(!afterMpt->isFieldPresent(sfIssuerEncryptedBalance));
+        BEAST_EXPECT(!afterMpt->isFieldPresent(sfConfidentialBalanceSpending));
+    }
+
+    void
+    testIssuanceLocked()
+    {
+        testcase("issuance locked rejects convert");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        env.fund(XRP(10000), alice, bob);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        mpt.authorize({.account = bob});
+        mpt.pay(alice, bob, 100);
+
+        // Lock issuance only (holder token unlocked).
+        mpt.set({.account = alice, .flags = tfMPTLock});
+        BEAST_EXPECT(env.le(keylet::mptIssuance(mpt.issuanceID()))->isFlag(lsfMPTLocked));
+        BEAST_EXPECT(!env.le(keylet::mptoken(mpt.issuanceID(), bob.id()))->isFlag(lsfMPTLocked));
+
+        auto const sk = parseScalarHex(kScalar1);
+        auto const pk = parsePointHex(kKeyG);
+        auto const r = parseScalarHex(kScalar2);
+        BEAST_EXPECT(sk && pk && r);
+        std::uint64_t const amount = 10;
+        auto const ct = encryptHex(amount, *pk, *r);
+        auto const baseFee = env.current()->fees().base;
+
+        auto const beforeMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto const beforeIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        auto const pubBefore = (*beforeMpt)[sfMPTAmount];
+        auto const confBefore = (*beforeIss)[sfConfidentialOutstandingAmount];
+        BEAST_EXPECT(!beforeMpt->isFieldPresent(sfHolderEncryptionKey));
+        BEAST_EXPECT(!beforeMpt->isFieldPresent(sfConfidentialBalanceInbox));
+        BEAST_EXPECT(!beforeMpt->isFieldPresent(sfIssuerEncryptedBalance));
+
+        env(convertJV(
+                bob,
+                mpt.issuanceID(),
+                amount,
+                ct,
+                ct,
+                kScalar2,
+                std::string(kKeyG),
+                proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob))),
+            Fee(10 * baseFee),
+            Ter(tecLOCKED));
+        env.close();
+
+        auto const afterMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto const afterIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT((*afterMpt)[sfMPTAmount] == pubBefore);
+        BEAST_EXPECT((*afterIss)[sfConfidentialOutstandingAmount] == confBefore);
+        BEAST_EXPECT(!afterMpt->isFieldPresent(sfHolderEncryptionKey));
+        BEAST_EXPECT(!afterMpt->isFieldPresent(sfConfidentialBalanceInbox));
+        BEAST_EXPECT(!afterMpt->isFieldPresent(sfIssuerEncryptedBalance));
+        BEAST_EXPECT(!afterMpt->isFieldPresent(sfConfidentialBalanceSpending));
+    }
+
 public:
     void
     run() override
@@ -612,6 +740,8 @@ public:
         testAuditorRequired();
         testDeleteBlocked();
         testFeeMultiplier();
+        testHolderLocked();
+        testIssuanceLocked();
     }
 };
 
