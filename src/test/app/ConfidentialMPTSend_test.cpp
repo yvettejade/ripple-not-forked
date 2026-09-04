@@ -664,6 +664,55 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
             Ter(tecNO_PERMISSION));
     }
 
+    // TransferFee mutex: ConfidentialMPTSend::preclaim rejects nonzero
+    // TransferFee, but create+set cannot produce confidential + nonzero fee
+    // together. Coverage lives in ConfidentialMPTIssuance_test::testTransferFeeMutex;
+    // no Send jtx forces that unreachable ledger state.
+
+    void
+    testSendLocked()
+    {
+        testcase("send while issuance locked");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        fundConvertMerge(env, alice, bob, mpt, 100);
+        fundConvertMerge(env, alice, charlie, mpt, 0);
+
+        auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 10);
+        BEAST_EXPECT(w);
+        if (!w)
+            return;
+
+        mpt.set({.flags = tfMPTLock});
+        env.close();
+
+        auto const fee = Fee(10 * env.current()->fees().base);
+        env(sendJV(
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex),
+            fee,
+            Ter(tecLOCKED));
+    }
+
     void
     testRequireAuthSuccess()
     {
@@ -811,6 +860,7 @@ public:
         testTamperedProof();
         testFeeMultiplier();
         testDepositAuth();
+        testSendLocked();
         testRequireAuthSuccess();
         testRequireAuthSenderRevoked();
         testRequireAuthDestUnauthorized();
