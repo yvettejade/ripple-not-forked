@@ -239,6 +239,14 @@ fieldMul(Secp256k1Field const& a, Secp256k1Field const& b);
 [[nodiscard]] Secp256k1Field
 fieldNegate(Secp256k1Field const& a);
 
+/** (a - b) mod n. */
+[[nodiscard]] Secp256k1Field
+fieldSub(Secp256k1Field const& a, Secp256k1Field const& b);
+
+/** Modular inverse in F_n; nullopt if a is zero. */
+[[nodiscard]] std::optional<Secp256k1Field>
+fieldInverse(Secp256k1Field const& a);
+
 /** Return field * G, or nullopt if field is zero (point at infinity). */
 [[nodiscard]] std::optional<Secp256k1Point>
 generatorMultiply(Secp256k1Field const& field);

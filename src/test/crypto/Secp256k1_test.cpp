@@ -404,6 +404,26 @@ public:
     }
 
     void
+    testFieldInverseAndSub()
+    {
+        testcase("field inverse and subtraction");
+        auto const two = Secp256k1Field::fromUint64(2);
+        auto const three = Secp256k1Field::fromUint64(3);
+        auto const five = Secp256k1Field::fromUint64(5);
+        BEAST_EXPECT(fieldAdd(two, three).serialize() == five.serialize());
+        BEAST_EXPECT(fieldSub(five, two).serialize() == three.serialize());
+        BEAST_EXPECT(fieldSub(two, two).isZero());
+        BEAST_EXPECT(!fieldInverse(Secp256k1Field::zero()));
+        auto const inv2 = fieldInverse(two);
+        BEAST_EXPECT(inv2);
+        BEAST_EXPECT(fieldMul(two, *inv2).serialize() == Secp256k1Field::fromUint64(1).serialize());
+        auto const inv3 = fieldInverse(three);
+        BEAST_EXPECT(inv3);
+        BEAST_EXPECT(
+            fieldMul(three, *inv3).serialize() == Secp256k1Field::fromUint64(1).serialize());
+    }
+
+    void
     run() override
     {
         testPointParseSerialize();
@@ -415,6 +435,7 @@ public:
         testElGamalEncryptHomomorphic();
         testElGamalDeterministicKnown();
         testInfinityViaAddNegatives();
+        testFieldInverseAndSub();
     }
 };
 
