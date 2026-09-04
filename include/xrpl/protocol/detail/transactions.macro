@@ -1127,6 +1127,26 @@ TRANSACTION(ttCONFIDENTIAL_MPT_CONVERT_BACK, 87, ConfidentialMPTConvertBack,
     {sfZKProof, SoeRequired},
 }))
 
+/** Confidential transfer between holders (XLS-0096). */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
+#endif
+TRANSACTION(ttCONFIDENTIAL_MPT_SEND, 88, ConfidentialMPTSend,
+    Delegation::NotDelegable,
+    featureConfidentialTransfer,
+    NoPriv, ({
+    {sfDestination, SoeRequired},
+    {sfMPTokenIssuanceID, SoeRequired},
+    {sfSenderEncryptedAmount, SoeRequired},
+    {sfDestinationEncryptedAmount, SoeRequired},
+    {sfIssuerEncryptedAmount, SoeRequired},
+    {sfAuditorEncryptedAmount, SoeOptional},
+    {sfZKProof, SoeRequired},
+    {sfBalanceCommitment, SoeRequired},
+    {sfAmountCommitment, SoeRequired},
+    {sfCredentialIDs, SoeOptional},
+}))
+
 /** Issuer clawback of a holder's entire confidential balance (XLS-0096). */
 #if TRANSACTION_INCLUDE
 #   include <xrpl/tx/transactors/token/ConfidentialMPTClawback.h>
