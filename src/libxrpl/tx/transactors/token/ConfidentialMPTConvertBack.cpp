@@ -227,6 +227,28 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     if (!verifyRange64(*pcRem, bp))
         return tecBAD_PROOF;
 
+    // Homomorphic debit must not be the point at infinity.
+    if (!spendingCt->subtract(*holderCt))
+        return tecBAD_PROOF;
+    auto const currentIssuer =
+        parseElGamalCiphertext(makeSlice(sleMpt->getFieldVL(sfIssuerEncryptedBalance)));
+    if (!currentIssuer)
+        return tecNO_PERMISSION;  // LCOV_EXCL_LINE
+    if (!currentIssuer->subtract(*issuerCt))
+        return tecBAD_PROOF;
+    if (hasAuditorAmt)
+    {
+        auto const auditorCt = parseElGamalCiphertext(tx[sfAuditorEncryptedAmount]);
+        if (!auditorCt)
+            return temBAD_CIPHERTEXT;  // LCOV_EXCL_LINE
+        auto const currentAuditor =
+            parseElGamalCiphertext(makeSlice(sleMpt->getFieldVL(sfAuditorEncryptedBalance)));
+        if (!currentAuditor)
+            return tecNO_PERMISSION;  // LCOV_EXCL_LINE
+        if (!currentAuditor->subtract(*auditorCt))
+            return tecBAD_PROOF;
+    }
+
     return tesSUCCESS;
 }
 

@@ -346,6 +346,28 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     if (!currentInbox->add(*inboxPlus))
         return tecBAD_PROOF;
 
+    // Homomorphic debit must not be the point at infinity.
+    if (!balanceCt->subtract(*senderCt))
+        return tecBAD_PROOF;
+    auto const currentIssuer =
+        parseElGamalCiphertext(makeSlice(sleSender->getFieldVL(sfIssuerEncryptedBalance)));
+    if (!currentIssuer)
+        return tecNO_PERMISSION;  // LCOV_EXCL_LINE
+    if (!currentIssuer->subtract(*issuerCt))
+        return tecBAD_PROOF;
+    if (hasAuditorAmt)
+    {
+        auto const auditorCt = parseElGamalCiphertext(tx[sfAuditorEncryptedAmount]);
+        if (!auditorCt)
+            return temBAD_CIPHERTEXT;  // LCOV_EXCL_LINE
+        auto const currentAuditor =
+            parseElGamalCiphertext(makeSlice(sleSender->getFieldVL(sfAuditorEncryptedBalance)));
+        if (!currentAuditor)
+            return tecNO_PERMISSION;  // LCOV_EXCL_LINE
+        if (!currentAuditor->subtract(*auditorCt))
+            return tecBAD_PROOF;
+    }
+
     return tesSUCCESS;
 }
 
