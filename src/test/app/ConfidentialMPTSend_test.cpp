@@ -46,7 +46,7 @@
 namespace xrpl {
 namespace test {
 
-class ConfidentialMPTSend_test : public beast::unit_test::suite
+class ConfidentialMPTSend_test : public beast::unit_test::Suite
 {
     static constexpr char const* kKeyG =
         "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
