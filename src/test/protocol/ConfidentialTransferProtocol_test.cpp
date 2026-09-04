@@ -82,6 +82,25 @@ class ConfidentialTransferProtocol_test : public beast::unit_test::Suite
         BEAST_EXPECT(sfIssuerEncryptedBalance.fieldValue == 37);
         BEAST_EXPECT(sfAuditorEncryptedBalance.fieldType == STI_VL);
         BEAST_EXPECT(sfAuditorEncryptedBalance.fieldValue == 38);
+        BEAST_EXPECT(sfHolderEncryptedAmount.fieldType == STI_VL);
+        BEAST_EXPECT(sfHolderEncryptedAmount.fieldValue == 39);
+        BEAST_EXPECT(sfIssuerEncryptedAmount.fieldType == STI_VL);
+        BEAST_EXPECT(sfIssuerEncryptedAmount.fieldValue == 40);
+        BEAST_EXPECT(sfAuditorEncryptedAmount.fieldType == STI_VL);
+        BEAST_EXPECT(sfAuditorEncryptedAmount.fieldValue == 41);
+        BEAST_EXPECT(sfZKProof.fieldType == STI_VL);
+        BEAST_EXPECT(sfZKProof.fieldValue == 42);
+        BEAST_EXPECT(sfSenderEncryptedAmount.fieldType == STI_VL);
+        BEAST_EXPECT(sfSenderEncryptedAmount.fieldValue == 43);
+        BEAST_EXPECT(sfDestinationEncryptedAmount.fieldType == STI_VL);
+        BEAST_EXPECT(sfDestinationEncryptedAmount.fieldValue == 44);
+        BEAST_EXPECT(sfBalanceCommitment.fieldType == STI_VL);
+        BEAST_EXPECT(sfBalanceCommitment.fieldValue == 45);
+        BEAST_EXPECT(sfAmountCommitment.fieldType == STI_VL);
+        BEAST_EXPECT(sfAmountCommitment.fieldValue == 46);
+
+        BEAST_EXPECT(sfBlindingFactor.fieldType == STI_UINT256);
+        BEAST_EXPECT(sfBlindingFactor.fieldValue == 40);
 
         // Distinct from DynamicMPT opt-in mutability field.
         BEAST_EXPECT(sfMutableFlags.fieldValue == 53);
@@ -202,6 +221,17 @@ class ConfidentialTransferProtocol_test : public beast::unit_test::Suite
         BEAST_EXPECT(std::string(jss::AuditorEncryptedBalance.cStr()) == "AuditorEncryptedBalance");
         BEAST_EXPECT(
             std::string(jss::ConfidentialBalanceVersion.cStr()) == "ConfidentialBalanceVersion");
+
+        BEAST_EXPECT(std::string(jss::HolderEncryptedAmount.cStr()) == "HolderEncryptedAmount");
+        BEAST_EXPECT(std::string(jss::IssuerEncryptedAmount.cStr()) == "IssuerEncryptedAmount");
+        BEAST_EXPECT(std::string(jss::AuditorEncryptedAmount.cStr()) == "AuditorEncryptedAmount");
+        BEAST_EXPECT(std::string(jss::ZKProof.cStr()) == "ZKProof");
+        BEAST_EXPECT(std::string(jss::BlindingFactor.cStr()) == "BlindingFactor");
+        BEAST_EXPECT(std::string(jss::SenderEncryptedAmount.cStr()) == "SenderEncryptedAmount");
+        BEAST_EXPECT(
+            std::string(jss::DestinationEncryptedAmount.cStr()) == "DestinationEncryptedAmount");
+        BEAST_EXPECT(std::string(jss::BalanceCommitment.cStr()) == "BalanceCommitment");
+        BEAST_EXPECT(std::string(jss::AmountCommitment.cStr()) == "AmountCommitment");
 
         BEAST_EXPECT(sfIssuerEncryptionKey.getJsonName() == jss::IssuerEncryptionKey);
         BEAST_EXPECT(sfImmutableFlags.getJsonName() == jss::ImmutableFlags);

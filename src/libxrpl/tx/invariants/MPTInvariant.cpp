@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 namespace xrpl {
 
@@ -394,6 +395,16 @@ ValidMPTPayment::visitEntry(
                 return false;
             }
             data_[makeKey(sle)].outstanding[static_cast<std::size_t>(order)] = outstanding;
+            // Track COA when the confidential transfer amendment is active so
+            // finalize can enforce outstanding' = outstanding + Δpublic + Δcoa.
+            auto const coa = sle[sfConfidentialOutstandingAmount];
+            if (coa > kMaxMpTokenAmount)
+            {
+                overflow_ = true;
+                return false;
+            }
+            data_[makeKey(sle)].confidentialOutstanding[static_cast<std::size_t>(order)] =
+                static_cast<std::int64_t>(coa);
         }
         else if (type == ltMPTOKEN)
         {
@@ -451,20 +462,31 @@ ValidMPTPayment::finalize(
         }
 
         auto const signedMax = static_cast<std::int64_t>(kMaxMpTokenAmount);
+        bool const confidential = view.rules().enabled(featureConfidentialTransfer);
         for (auto const& [id, data] : data_)
         {
             (void)id;
             static constexpr auto kIBefore = static_cast<std::size_t>(Order::Before);
             static constexpr auto kIAfter = static_cast<std::size_t>(Order::After);
+
+            // With featureConfidentialTransfer: outstanding_after must equal
+            // outstanding_before + public_mpt_delta + coa_delta. Without the
+            // amendment, keep the original outstanding-only equation.
+            auto const coaDelta = confidential
+                ? (data.confidentialOutstanding[kIAfter] - data.confidentialOutstanding[kIBefore])
+                : std::int64_t{0};
+            auto const expectedDelta = data.mptAmount + coaDelta;
+
             bool const addOverflows =
-                (data.mptAmount > 0 && data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
-                (data.mptAmount < 0 && data.outstanding[kIBefore] < (-signedMax - data.mptAmount));
+                (expectedDelta > 0 && data.outstanding[kIBefore] > (signedMax - expectedDelta)) ||
+                (expectedDelta < 0 && data.outstanding[kIBefore] < (-signedMax - expectedDelta));
             if (addOverflows ||
-                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + data.mptAmount))
+                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + expectedDelta))
             {
                 JLOG(j.fatal()) << "Invariant failed: invalid OutstandingAmount balance "
                                 << data.outstanding[kIBefore] << " " << data.outstanding[kIAfter]
-                                << " " << data.mptAmount;
+                                << " " << data.mptAmount
+                                << (confidential ? (" coaDelta=" + std::to_string(coaDelta)) : "");
                 return invariantPasses;
             }
         }
