@@ -224,6 +224,11 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
     if (tx.isFlag(tfMPTUnlock) && !granularPermissions.contains(MPTokenIssuanceUnlock))
         return terNO_DELEGATE_PERMISSION;
 
+    // No granular permission exists for enabling confidential balance; the
+    // delegate must have full MPTokenIssuanceSet permission.
+    if (tx.isFlag(tfMPTSetCanHoldConfidentialBalance))
+        return terNO_DELEGATE_PERMISSION;
+
     return tesSUCCESS;
 }
 
