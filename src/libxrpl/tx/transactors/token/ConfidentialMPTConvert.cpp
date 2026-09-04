@@ -175,6 +175,10 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (!sleMpt)
         return tecOBJECT_NOT_FOUND;
 
+    // Match ConfidentialMPTMergeInbox: either holder or issuance lock blocks.
+    if (sleMpt->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
+        return tecLOCKED;
+
     if ((*sleMpt)[sfMPTAmount] < amount)
         return tecINSUFFICIENT_FUNDS;
 
