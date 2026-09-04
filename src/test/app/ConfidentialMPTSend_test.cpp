@@ -173,11 +173,14 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         jtx::Account const& alice,
         jtx::Account const& holder,
         jtx::MPTTester& mpt,
-        std::uint64_t amount)
+        std::uint64_t amount,
+        bool requireAuth = false)
     {
         using namespace jtx;
         // Caller creates issuance once; this only funds one holder.
         mpt.authorize({.account = holder});
+        if (requireAuth)
+            mpt.authorize({.account = alice, .holder = holder});
         if (amount > 0)
             mpt.pay(alice, holder, amount > 1000 ? amount : 1000);
 
@@ -661,6 +664,140 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
             Ter(tecNO_PERMISSION));
     }
 
+    void
+    testRequireAuthSuccess()
+    {
+        testcase("RequireAuth: both authorized send succeeds");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTRequireAuth});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+
+        fundConvertMerge(env, alice, bob, mpt, 100, true);
+        fundConvertMerge(env, alice, charlie, mpt, 0, true);
+
+        auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 25);
+        BEAST_EXPECT(w);
+        if (!w)
+            return;
+        auto const fee = Fee(10 * env.current()->fees().base);
+        env(sendJV(
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex),
+            fee);
+        env.close();
+    }
+
+    void
+    testRequireAuthSenderRevoked()
+    {
+        // Holder converted while authorized cannot Send after being unauthorized.
+        testcase("RequireAuth: sender revoked after convert");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTRequireAuth});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+
+        fundConvertMerge(env, alice, bob, mpt, 100, true);
+        fundConvertMerge(env, alice, charlie, mpt, 0, true);
+
+        // Issuer revokes bob after he already holds confidential balance.
+        mpt.authorize({.account = alice, .holder = bob, .flags = tfMPTUnauthorize});
+        BEAST_EXPECT(!mpt.checkFlags(lsfMPTAuthorized, bob));
+
+        auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 20);
+        BEAST_EXPECT(w);
+        if (!w)
+            return;
+        auto const fee = Fee(10 * env.current()->fees().base);
+        env(sendJV(
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex),
+            fee,
+            Ter(tecNO_AUTH));
+    }
+
+    void
+    testRequireAuthDestUnauthorized()
+    {
+        // Unauthorized destination cannot receive a confidential send.
+        testcase("RequireAuth: destination unauthorized");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTRequireAuth});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+
+        fundConvertMerge(env, alice, bob, mpt, 100, true);
+        fundConvertMerge(env, alice, charlie, mpt, 0, true);
+
+        // Revoke destination after confidential init; sender remains authorized.
+        mpt.authorize({.account = alice, .holder = charlie, .flags = tfMPTUnauthorize});
+        BEAST_EXPECT(mpt.checkFlags(lsfMPTAuthorized, bob));
+        BEAST_EXPECT(!mpt.checkFlags(lsfMPTAuthorized, charlie));
+
+        auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 20);
+        BEAST_EXPECT(w);
+        if (!w)
+            return;
+        auto const fee = Fee(10 * env.current()->fees().base);
+        env(sendJV(
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex),
+            fee,
+            Ter(tecNO_AUTH));
+    }
+
 public:
     void
     run() override
@@ -674,6 +811,9 @@ public:
         testTamperedProof();
         testFeeMultiplier();
         testDepositAuth();
+        testRequireAuthSuccess();
+        testRequireAuthSenderRevoked();
+        testRequireAuthDestUnauthorized();
     }
 };
 
