@@ -210,10 +210,13 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
     if (isTesSuccess(checkTxPermission(sle, tx)))
         return tesSUCCESS;
 
-    // this is added in case more flags will be added for MPTokenIssuanceSet
-    // in the future. Currently unreachable.
-    if ((tx.getFlags() & tfMPTokenIssuanceSetMask) != 0u)
-        return terNO_DELEGATE_PERMISSION;  // LCOV_EXCL_LINE
+    // Granular permissions cover only lock and unlock. Other Set flags
+    // and confidential key fields require full MPTokenIssuanceSet.
+    if ((tx.getFlags() & ~(tfUniversal | tfMPTLock | tfMPTUnlock)) != 0u)
+        return terNO_DELEGATE_PERMISSION;
+
+    if (tx.isFieldPresent(sfIssuerEncryptionKey) || tx.isFieldPresent(sfAuditorEncryptionKey))
+        return terNO_DELEGATE_PERMISSION;
 
     std::unordered_set<GranularPermissionType> granularPermissions;
     loadGranularPermission(sle, ttMPTOKEN_ISSUANCE_SET, granularPermissions);

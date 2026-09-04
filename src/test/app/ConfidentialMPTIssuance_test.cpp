@@ -421,6 +421,89 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
     }
 
     void
+    testDelegateConfidential()
+    {
+        testcase("delegate cannot set confidential issuance fields");
+        using namespace jtx;
+
+        // Lock-only (or otherwise limited) delegates cannot enable
+        // confidential or install write-once encryption keys.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.fund = false});
+            mpt.create({.ownerCount = 1, .flags = tfMPTCanTransfer | tfMPTCanLock});
+            env(delegate::set(alice, bob, {"MPTokenIssuanceLock"}));
+            env.close();
+
+            mpt.set(
+                {.flags = tfMPTSetCanHoldConfidentialBalance,
+                 .issuerEncryptionKey = kKeyG,
+                 .auditorEncryptionKey = kKey2G,
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+
+            // Combined with a granted lock must still be rejected.
+            mpt.set(
+                {.flags = tfMPTLock | tfMPTSetCanHoldConfidentialBalance,
+                 .issuerEncryptionKey = kKeyG,
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+
+            // Lock-only still works.
+            mpt.set({.account = alice, .flags = tfMPTLock, .delegate = bob});
+        }
+
+        // Keys alone on an already-confidential issuance are also gated.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.fund = false});
+            mpt.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock});
+            env(delegate::set(alice, bob, {"MPTokenIssuanceLock"}));
+            env.close();
+
+            mpt.set(
+                {.issuerEncryptionKey = kKeyG, .delegate = bob, .err = terNO_DELEGATE_PERMISSION});
+        }
+
+        // Full MPTokenIssuanceSet permission can enable and install keys.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.fund = false});
+            mpt.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+            env(delegate::set(alice, bob, {"MPTokenIssuanceSet"}));
+            env.close();
+
+            mpt.set(
+                {.flags = tfMPTSetCanHoldConfidentialBalance,
+                 .issuerEncryptionKey = kKeyG,
+                 .auditorEncryptionKey = kKey2G,
+                 .delegate = bob});
+            auto const sle = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            BEAST_EXPECT(sle);
+            BEAST_EXPECT(sle->isFlag(lsfMPTCanHoldConfidentialBalance));
+            BEAST_EXPECT(sle->isFieldPresent(sfIssuerEncryptionKey));
+            BEAST_EXPECT(sle->isFieldPresent(sfAuditorEncryptionKey));
+        }
+    }
+
+    void
     run() override
     {
         testAmendmentDisabled();
@@ -428,6 +511,7 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         testSetKeysAndFlags();
         testTransferFeeMutex();
         testDestroyWithCOA();
+        testDelegateConfidential();
     }
 };
 
