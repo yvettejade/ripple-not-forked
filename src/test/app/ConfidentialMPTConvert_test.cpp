@@ -219,6 +219,10 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
 
         auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
         BEAST_EXPECT(sleIss);
+        // ValidMPTPayment COA conservation (OA' = OA + Δpublic + ΔCOA):
+        // public MPTAmount 1000→900 (Δpublic=-100), COA 0→100 (ΔCOA=+100),
+        // OutstandingAmount unchanged at 1000. See Invariants_test
+        // testConfidentialMPT positive ValidMPTPayment COA check.
         BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == 100);
         BEAST_EXPECT((*sleIss)[sfOutstandingAmount] == 1000);
 
@@ -598,6 +602,100 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
         env.close();
     }
 
+    void
+    testMergeFailurePaths()
+    {
+        testcase("merge inbox failure paths");
+        using namespace jtx;
+
+        // Issuer merge → tecNO_PERMISSION (also covered in testIssuerConvertFails).
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            auto const baseFee = env.current()->fees().base;
+            env(mergeJV(alice, mpt.issuanceID()), Fee(10 * baseFee), Ter(tecNO_PERMISSION));
+        }
+
+        // Amendment off merge → temDISABLED (also in testAmendmentDisabled).
+        {
+            Env env{*this, withoutConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+            mpt.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+            mpt.authorize({.account = bob});
+            env(mergeJV(bob, mpt.issuanceID()), Ter(temDISABLED));
+        }
+
+        // Merge without confidential fields on the MPToken → tecNO_PERMISSION.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            mpt.authorize({.account = bob});
+            mpt.pay(alice, bob, 100);
+            // Bob never Converted — no inbox/spending/holder key.
+            auto const baseFee = env.current()->fees().base;
+            env(mergeJV(bob, mpt.issuanceID()), Fee(10 * baseFee), Ter(tecNO_PERMISSION));
+        }
+
+        // Issuance locked → tecLOCKED.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            mpt.authorize({.account = bob});
+            mpt.pay(alice, bob, 100);
+
+            auto const sk = parseScalarHex(kScalar1);
+            auto const pk = parsePointHex(kKeyG);
+            auto const r = parseScalarHex(kScalar2);
+            auto const ct = encryptHex(50, *pk, *r);
+            auto const baseFee = env.current()->fees().base;
+            env(convertJV(
+                    bob,
+                    mpt.issuanceID(),
+                    50,
+                    ct,
+                    ct,
+                    kScalar2,
+                    std::string(kKeyG),
+                    proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob))),
+                Fee(10 * baseFee));
+            env.close();
+
+            mpt.set({.flags = tfMPTLock});
+            env.close();
+            env(mergeJV(bob, mpt.issuanceID()), Fee(10 * baseFee), Ter(tecLOCKED));
+        }
+    }
+
 public:
     void
     run() override
@@ -612,6 +710,7 @@ public:
         testAuditorRequired();
         testDeleteBlocked();
         testFeeMultiplier();
+        testMergeFailurePaths();
     }
 };
 

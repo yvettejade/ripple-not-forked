@@ -4660,6 +4660,63 @@ class Invariants_test : public beast::unit_test::Suite
                 inv.visitEntry(false, nullptr, after);
                 BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
             }
+
+            {
+                // ValidMPTPayment COA conservation for Convert-like deltas:
+                // OA' = OA + Δpublic + ΔCOA. Before OA=1000 COA=0 holder=1000;
+                // after OA=1000 COA=100 holder=900 → Δpublic=-100, ΔCOA=+100.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                Account const a2{"A2"};
+                env.fund(XRP(1000), a2);
+                env.close();
+                OpenView view2{*env.current()};
+
+                auto beforeIss = makeIssuance(a1.id(), 1);
+                (*beforeIss)[sfOutstandingAmount] = 1000;
+                (*beforeIss)[sfConfidentialOutstandingAmount] = 0;
+                auto afterIss = std::make_shared<SLE>(*beforeIss);
+                (*afterIss)[sfConfidentialOutstandingAmount] = 100;
+
+                auto beforeTok = makeToken(a2.id(), id);
+                (*beforeTok)[sfMPTAmount] = 1000;
+                auto afterTok = std::make_shared<SLE>(*beforeTok);
+                (*afterTok)[sfMPTAmount] = 900;
+
+                ValidMPTPayment inv;
+                inv.visitEntry(false, beforeIss, afterIss);
+                inv.visitEntry(false, beforeTok, afterTok);
+                BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view2, jlog));
+            }
+
+            {
+                // ValidMPTPayment rejects Convert-like public decrease without
+                // matching COA increase (OA unchanged, ΔCOA=0, Δpublic=-100).
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                Account const a2{"A2b"};
+                env.fund(XRP(1000), a2);
+                env.close();
+                OpenView view2{*env.current()};
+
+                auto beforeIss = makeIssuance(a1.id(), 2);
+                (*beforeIss)[sfOutstandingAmount] = 1000;
+                (*beforeIss)[sfConfidentialOutstandingAmount] = 0;
+                auto afterIss = std::make_shared<SLE>(*beforeIss);
+
+                auto beforeTok = makeToken(a2.id(), makeMptID(2, a1.id()));
+                (*beforeTok)[sfMPTAmount] = 1000;
+                auto afterTok = std::make_shared<SLE>(*beforeTok);
+                (*afterTok)[sfMPTAmount] = 900;
+
+                ValidMPTPayment inv;
+                inv.visitEntry(false, beforeIss, afterIss);
+                inv.visitEntry(false, beforeTok, afterTok);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view2, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find("invalid OutstandingAmount balance") !=
+                    std::string::npos);
+            }
         }
 
         // Amendment off: malformed confidential state must not fail this
