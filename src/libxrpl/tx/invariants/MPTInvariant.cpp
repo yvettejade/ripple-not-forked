@@ -695,13 +695,15 @@ ValidConfidentialMPT::finalize(
     ReadView const& view,
     beast::Journal const& j)
 {
-    // Match ValidMPTPayment: only evaluate ledger-state consistency after a
-    // successful apply. Failed txs must not leave dirty confidential state;
-    // other invariants cover unexpected mutations on failure paths.
-    if (!isTesSuccess(result))
+    if (!view.rules().enabled(featureConfidentialTransfer))
         return true;
 
-    if (!view.rules().enabled(featureConfidentialTransfer))
+    // Enforce on tesSUCCESS and fee-claiming tec* paths. Invariant processing
+    // still runs when a fee is claimed, so dirty confidential mutations on a
+    // tec* result must fail (same idea as ValidPermissionedDomain rejecting
+    // dirty state on failed txs). Clean tec paths with no dirty confidential
+    // flags continue to pass. Other failure classes (ter*/tef*) are skipped.
+    if (!(isTesSuccess(result) || isTecClaim(result)))
         return true;
 
     bool passes = true;

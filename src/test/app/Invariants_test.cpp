@@ -4660,6 +4660,77 @@ class Invariants_test : public beast::unit_test::Suite
                 inv.visitEntry(false, nullptr, after);
                 BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
             }
+
+            // Fee-claiming tec* paths still enforce dirty confidential state.
+            // Representative tec: tecPATH_DRY (any isTecClaim result works).
+            {
+                // tec*: malformed encrypted fields must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeToken(a1.id(), id);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "confidential MPToken encrypted field consistency") != std::string::npos);
+            }
+
+            {
+                // tec*: spending modified without version change must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto before = makeToken(a1.id(), id);
+                before->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                before->setFieldVL(sfIssuerEncryptedBalance, ctA);
+                (*before)[sfConfidentialBalanceVersion] = 1;
+                auto after = std::make_shared<SLE>(*before);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctB);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, before, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "confidential spending modified without version change") !=
+                    std::string::npos);
+            }
+
+            {
+                // tec*: COA > OA must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeIssuance(a1.id(), 1);
+                (*after)[sfOutstandingAmount] = 10;
+                (*after)[sfConfidentialOutstandingAmount] = 20;
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "ConfidentialOutstandingAmount exceeds OutstandingAmount") !=
+                    std::string::npos);
+            }
+
+            {
+                // Clean tec*: no confidential mutations visited — passes.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                ValidConfidentialMPT inv;
+                BEAST_EXPECT(inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+            }
+
+            {
+                // Clean tec*: valid confidential state (no dirty flags) — passes.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeToken(a1.id(), id);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                after->setFieldVL(sfIssuerEncryptedBalance, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+            }
         }
 
         // Amendment off: malformed confidential state must not fail this
@@ -4679,6 +4750,8 @@ class Invariants_test : public beast::unit_test::Suite
             ValidConfidentialMPT inv;
             inv.visitEntry(false, nullptr, after);
             BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+            // Amendment gating also applies on fee-claiming tec* paths.
+            BEAST_EXPECT(inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
         }
 
         // End-to-end through checkInvariants: encrypted field inconsistency.

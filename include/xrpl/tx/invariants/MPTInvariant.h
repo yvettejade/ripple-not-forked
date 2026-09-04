@@ -125,6 +125,11 @@ private:
  *  3. COA bounds: 0 ≤ ConfidentialOutstandingAmount ≤ OutstandingAmount on
  *     every touched MPTokenIssuance (non-negativity is inherent for UINT64).
  *
+ * Checks run on tesSUCCESS and on fee-claiming tec* results (invariants still
+ * process when a fee is claimed). Dirty confidential mutations on a tec* path
+ * fail; clean tec paths with no dirty flags pass. Gated on
+ * featureConfidentialTransfer.
+ *
  * Auditor-balance presence when an auditor key is configured on the issuance
  * is enforced by the transactors (tecNO_PERMISSION / preclaim); it is not a
  * stated ledger-object invariant in XLS-0096 §7.4, so it is not checked here.
