@@ -442,6 +442,36 @@ fieldNegate(Secp256k1Field const& a)
     return *Secp256k1Field::parse(makeSlice(out));
 }
 
+Secp256k1Field
+fieldSub(Secp256k1Field const& a, Secp256k1Field const& b)
+{
+    return fieldAdd(a, fieldNegate(b));
+}
+
+std::optional<Secp256k1Field>
+fieldInverse(Secp256k1Field const& a)
+{
+    if (a.isZero())
+        return std::nullopt;
+
+    BN_CTX* ctx = BN_CTX_new();
+    BIGNUM* ba = BN_bin2bn(a.data(), 32, nullptr);
+    BIGNUM* br = BN_mod_inverse(nullptr, ba, curveOrderBN(), ctx);
+    if (!br)
+    {
+        // LCOV_EXCL_START
+        BN_clear_free(ba);
+        BN_CTX_free(ctx);
+        return std::nullopt;
+        // LCOV_EXCL_STOP
+    }
+    auto out = bnToBe32(br);
+    BN_clear_free(ba);
+    BN_clear_free(br);
+    BN_CTX_free(ctx);
+    return Secp256k1Field::parse(makeSlice(out));
+}
+
 std::optional<Secp256k1Point>
 generatorMultiply(Secp256k1Field const& field)
 {
