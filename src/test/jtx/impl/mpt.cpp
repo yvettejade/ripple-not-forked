@@ -420,6 +420,11 @@ MPTTester::set(MPTSet const& arg)
                     {
                         flags &= ~lsfMPTLocked;
                     }
+
+                    if (*arg.flags & tfMPTSetCanHoldConfidentialBalance)
+                    {
+                        flags |= lsfMPTCanHoldConfidentialBalance;
+                    }
                 }
 
                 if (arg.mutableFlags)
