@@ -31,6 +31,10 @@ namespace xrpl {
 bool
 MPTokenIssuanceSet::checkExtraFeatures(PreflightContext const& ctx)
 {
+    if (ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance) &&
+        !ctx.rules.enabled(featureConfidentialTransfer))
+        return false;
+
     return !ctx.tx.isFieldPresent(sfDomainID) ||
         (ctx.rules.enabled(featurePermissionedDomains) &&
          ctx.rules.enabled(featureSingleAssetVault));
@@ -94,6 +98,17 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
     auto const holderID = ctx.tx[~sfHolder];
     if (holderID && accountID == holderID)
         return temMALFORMED;
+
+    // Confidential issuance flags apply to the issuance, not a holder
+    // MPToken.
+    if (holderID && ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance))
+        return temMALFORMED;
+
+    // Confidential balance and a non-zero TransferFee are mutually exclusive.
+    // Check before the generic DynamicMPT "flags with mutate" rejection so
+    // this combination surfaces the transfer-fee-specific result.
+    if (ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance) && (transferFee.value_or(0) != 0u))
+        return temBAD_TRANSFER_FEE;
 
     if (ctx.rules.enabled(featureSingleAssetVault) || ctx.rules.enabled(featureDynamicMPT))
     {
@@ -167,6 +182,11 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
         return terNO_DELEGATE_PERMISSION;
 
     if (tx.isFlag(tfMPTUnlock) && !granularPermissions.contains(MPTokenIssuanceUnlock))
+        return terNO_DELEGATE_PERMISSION;
+
+    // No granular permission exists for enabling confidential balance; the
+    // delegate must have full MPTokenIssuanceSet permission.
+    if (tx.isFlag(tfMPTSetCanHoldConfidentialBalance))
         return terNO_DELEGATE_PERMISSION;
 
     return tesSUCCESS;
@@ -259,6 +279,23 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
 
         if (!isMutableFlag(lsmfMPTCanMutateTransferFee))
             return tecNO_PERMISSION;
+
+        // Cannot add a TransferFee once confidential balance is enabled.
+        if (fee > 0u && sleMptIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
+            return tecNO_PERMISSION;
+    }
+
+    if (ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance))
+    {
+        // Cannot enable confidential balance when ImmutableFlags locks it.
+        if (auto const immutableFlags = (*sleMptIssuance)[~sfImmutableFlags];
+            immutableFlags && ((*immutableFlags & lsifMPTCanHoldConfidentialBalance) != 0u))
+            return tecNO_PERMISSION;
+
+        // Cannot enable confidential balance when a non-zero TransferFee is
+        // already present on the issuance.
+        if ((*sleMptIssuance)[sfTransferFee] != 0)
+            return tecNO_PERMISSION;
     }
 
     return tesSUCCESS;
@@ -294,6 +331,12 @@ MPTokenIssuanceSet::doApply()
     else if (ctx_.tx.isFlag(tfMPTUnlock))
     {
         flagsOut &= ~lsfMPTLocked;
+    }
+
+    // Enabling confidential balance is one-way; there is no clear flag.
+    if (ctx_.tx.isFlag(tfMPTSetCanHoldConfidentialBalance))
+    {
+        flagsOut |= lsfMPTCanHoldConfidentialBalance;
     }
 
     if (auto const mutableFlags = ctx_.tx[~sfMutableFlags].value_or(0))

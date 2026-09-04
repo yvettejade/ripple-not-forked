@@ -33,12 +33,18 @@ JSS(Asset);                       // in: AMM Asset1
 JSS(Asset2);                      // in: AMM Asset2
 JSS(AssetClass);                  // in: Oracle
 JSS(AssetPrice);                  // in: Oracle
+JSS(AuditorEncryptedBalance);     // field: XLS-0096 confidential MPT
+JSS(AuditorEncryptionKey);        // field: XLS-0096 confidential MPT
 JSS(AuthAccount);                 // in: AMM Auction Slot
 JSS(AuthAccounts);                // in: AMM Auction Slot
 JSS(BaseAsset);                   // in: Oracle
 JSS(BidMax);                      // in: AMM Bid
 JSS(BidMin);                      // in: AMM Bid
 JSS(ClearFlag);                   // field.
+JSS(ConfidentialBalanceInbox);    // field: XLS-0096 confidential MPT
+JSS(ConfidentialBalanceSpending); // field: XLS-0096 confidential MPT
+JSS(ConfidentialBalanceVersion);  // field: XLS-0096 confidential MPT
+JSS(ConfidentialOutstandingAmount); // field: XLS-0096 confidential MPT
 JSS(Counterparty);                // field.
 JSS(CounterpartySignature);       // field.
 JSS(DeliverMax);                  // out: alias to Amount
@@ -48,8 +54,12 @@ JSS(EPrice);                      // in: AMM Deposit option
 JSS(Fee);                         // in/out: TransactionSign; field.
 JSS(Flags);                       // in/out: TransactionSign; field.
 JSS(Holder);                      // field.
+JSS(HolderEncryptionKey);         // field: XLS-0096 confidential MPT
+JSS(ImmutableFlags);              // field: XLS-0096 confidential MPT
 JSS(Invalid);                     //
 JSS(Issuer);                      // in: Credential transactions
+JSS(IssuerEncryptedBalance);      // field: XLS-0096 confidential MPT
+JSS(IssuerEncryptionKey);         // field: XLS-0096 confidential MPT
 JSS(IssuingChainDoor);            // field.
 JSS(IssuingChainIssue);           // field.
 JSS(LastLedgerSequence);          // in: TransactionSign; field
