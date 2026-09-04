@@ -52,6 +52,7 @@
 #include <xrpl/tx/Transactor.h>
 #include <xrpl/tx/applySteps.h>
 #include <xrpl/tx/invariants/DirectoryInvariant.h>
+#include <xrpl/tx/invariants/MPTInvariant.h>
 #include <xrpl/tx/invariants/VaultInvariant.h>
 
 #include <algorithm>
@@ -4514,6 +4515,283 @@ class Invariants_test : public beast::unit_test::Suite
     }
 
     void
+    testConfidentialMPT()
+    {
+        using namespace test::jtx;
+        testcase << "Confidential MPT";
+
+        STTx const dummyTx{ttACCOUNT_SET, [](STObject&) {}};
+        Blob const ctA{0x01, 0x02, 0x03};
+        Blob const ctB{0x04, 0x05, 0x06};
+
+        auto makeToken = [](AccountID const& acct, MPTID const& id) {
+            auto sle = std::make_shared<SLE>(keylet::mptoken(id, acct));
+            sle->setAccountID(sfAccount, acct);
+            (*sle)[sfMPTokenIssuanceID] = id;
+            return sle;
+        };
+
+        auto makeIssuance = [](AccountID const& issuer, std::uint32_t seq) {
+            MPTID const id = makeMptID(seq, issuer);
+            auto sle = std::make_shared<SLE>(keylet::mptIssuance(id));
+            sle->setAccountID(sfIssuer, issuer);
+            sle->setFieldU32(sfSequence, seq);
+            return sle;
+        };
+
+        // Direct ValidConfidentialMPT checks (synthetic before/after SLEs).
+        {
+            Env env{*this, defaultAmendments() | featureConfidentialTransfer};
+            Account const a1{"A1"};
+            env.fund(XRP(1000), a1);
+            env.close();
+
+            OpenView view{*env.current()};
+            MPTID const id = makeMptID(1, a1.id());
+
+            {
+                // Happy path: spending + issuer encrypted balance together.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeToken(a1.id(), id);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                after->setFieldVL(sfIssuerEncryptedBalance, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+            }
+
+            {
+                // Encrypted field consistency: spending without issuer.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeToken(a1.id(), id);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "confidential MPToken encrypted field consistency") != std::string::npos);
+            }
+
+            {
+                // Encrypted field consistency: issuer without spending/inbox.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeToken(a1.id(), id);
+                after->setFieldVL(sfIssuerEncryptedBalance, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+            }
+
+            {
+                // Version: spending modified without version change.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto before = makeToken(a1.id(), id);
+                before->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                before->setFieldVL(sfIssuerEncryptedBalance, ctA);
+                (*before)[sfConfidentialBalanceVersion] = 1;
+                auto after = std::make_shared<SLE>(*before);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctB);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, before, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "confidential spending modified without version change") !=
+                    std::string::npos);
+            }
+
+            {
+                // Version: spending modified and version bumped — passes.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto before = makeToken(a1.id(), id);
+                before->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                before->setFieldVL(sfIssuerEncryptedBalance, ctA);
+                (*before)[sfConfidentialBalanceVersion] = 1;
+                auto after = std::make_shared<SLE>(*before);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctB);
+                (*after)[sfConfidentialBalanceVersion] = 2;
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, before, after);
+                BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+            }
+
+            {
+                // Init (absent → present spending) does not require version bump.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeToken(a1.id(), id);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                after->setFieldVL(sfIssuerEncryptedBalance, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, makeToken(a1.id(), id), after);
+                BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+            }
+
+            {
+                // COA > OA.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeIssuance(a1.id(), 1);
+                (*after)[sfOutstandingAmount] = 10;
+                (*after)[sfConfidentialOutstandingAmount] = 20;
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "ConfidentialOutstandingAmount exceeds OutstandingAmount") !=
+                    std::string::npos);
+            }
+
+            {
+                // COA == OA — passes.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeIssuance(a1.id(), 1);
+                (*after)[sfOutstandingAmount] = 20;
+                (*after)[sfConfidentialOutstandingAmount] = 20;
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+            }
+
+            // Fee-claiming tec* paths still enforce dirty confidential state.
+            // Representative tec: tecPATH_DRY (any isTecClaim result works).
+            {
+                // tec*: malformed encrypted fields must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeToken(a1.id(), id);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "confidential MPToken encrypted field consistency") != std::string::npos);
+            }
+
+            {
+                // tec*: spending modified without version change must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto before = makeToken(a1.id(), id);
+                before->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                before->setFieldVL(sfIssuerEncryptedBalance, ctA);
+                (*before)[sfConfidentialBalanceVersion] = 1;
+                auto after = std::make_shared<SLE>(*before);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctB);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, before, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "confidential spending modified without version change") !=
+                    std::string::npos);
+            }
+
+            {
+                // tec*: COA > OA must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeIssuance(a1.id(), 1);
+                (*after)[sfOutstandingAmount] = 10;
+                (*after)[sfConfidentialOutstandingAmount] = 20;
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "ConfidentialOutstandingAmount exceeds OutstandingAmount") !=
+                    std::string::npos);
+            }
+
+            {
+                // Clean tec*: no confidential mutations visited — passes.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                ValidConfidentialMPT inv;
+                BEAST_EXPECT(inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+            }
+
+            {
+                // Clean tec*: valid confidential state (no dirty flags) — passes.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto after = makeToken(a1.id(), id);
+                after->setFieldVL(sfConfidentialBalanceSpending, ctA);
+                after->setFieldVL(sfIssuerEncryptedBalance, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(false, nullptr, after);
+                BEAST_EXPECT(inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+            }
+        }
+
+        // Amendment off: malformed confidential state must not fail this
+        // invariant (checks are gated).
+        {
+            Env env{*this, defaultAmendments() - featureConfidentialTransfer};
+            Account const a1{"A1"};
+            env.fund(XRP(1000), a1);
+            env.close();
+            OpenView view{*env.current()};
+            test::StreamSink sink{beast::Severity::Warning};
+            beast::Journal const jlog{sink};
+            MPTID const id = makeMptID(1, a1.id());
+            auto after = makeToken(a1.id(), id);
+            after->setFieldVL(sfConfidentialBalanceSpending, ctA);
+            // Missing issuer encrypted balance — would fail if gated on.
+            ValidConfidentialMPT inv;
+            inv.visitEntry(false, nullptr, after);
+            BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+            // Amendment gating also applies on fee-claiming tec* paths.
+            BEAST_EXPECT(inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+        }
+
+        // End-to-end through checkInvariants: encrypted field inconsistency.
+        doInvariantCheck(
+            Env{*this, defaultAmendments() | featureConfidentialTransfer},
+            {{"confidential MPToken encrypted field consistency"}},
+            [](Account const& a1, Account const& a2, ApplyContext& ac) {
+                auto const sle = ac.view().peek(keylet::account(a1.id()));
+                if (!sle)
+                    return false;
+                MPTIssue const mpt{makeMptID(sle->getFieldU32(sfSequence), a1)};
+                auto sleNew = std::make_shared<SLE>(keylet::mptoken(mpt.getMptID(), a2));
+                sleNew->setAccountID(sfAccount, a2.id());
+                (*sleNew)[sfMPTokenIssuanceID] = mpt.getMptID();
+                sleNew->setFieldVL(sfConfidentialBalanceSpending, Blob{1, 2, 3});
+                ac.view().insert(sleNew);
+                return true;
+            });
+
+        // End-to-end: COA > OA on a touched issuance.
+        doInvariantCheck(
+            Env{*this, defaultAmendments() | featureConfidentialTransfer},
+            {{"ConfidentialOutstandingAmount exceeds OutstandingAmount"}},
+            [](Account const& a1, Account const&, ApplyContext& ac) {
+                auto const sle = ac.view().peek(keylet::account(a1.id()));
+                if (!sle)
+                    return false;
+                MPTIssue const mpt{makeMptID(sle->getFieldU32(sfSequence), a1)};
+                auto sleNew = std::make_shared<SLE>(keylet::mptIssuance(mpt.getMptID()));
+                sleNew->setAccountID(sfIssuer, a1.id());
+                sleNew->setFieldU32(sfSequence, sle->getFieldU32(sfSequence));
+                sleNew->setFieldU64(sfOutstandingAmount, 50);
+                sleNew->setFieldU64(sfMaximumAmount, 100);
+                sleNew->setFieldU64(sfConfidentialOutstandingAmount, 75);
+                ac.view().insert(sleNew);
+                return true;
+            });
+    }
+
+    void
     testAMM()
     {
         testcase << "AMM";
@@ -4911,6 +5189,7 @@ public:
         testValidLoanBroker();
         testVault();
         testMPT();
+        testConfidentialMPT();
         testInvariantOverwrite(defaultAmendments());
         testInvariantOverwrite(defaultAmendments() - fixCleanup3_1_3);
         testVaultComputeCoarsestScale();

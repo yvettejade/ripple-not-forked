@@ -638,4 +638,94 @@ ValidMPTTransfer::finalize(
     return true;
 }
 
+void
+ValidConfidentialMPT::visitEntry(
+    bool isDelete,
+    std::shared_ptr<SLE const> const& before,
+    std::shared_ptr<SLE const> const& after)
+{
+    // Only examine the post-transaction object. Deletion of MPTokens that
+    // still carry confidential fields is already blocked by MPTokenAuthorize
+    // / destroy paths; skip deleted entries here.
+    if (!after || isDelete)
+        return;
+
+    if (after->getType() == ltMPTOKEN)
+    {
+        bool const hasSpending = after->isFieldPresent(sfConfidentialBalanceSpending);
+        bool const hasInbox = after->isFieldPresent(sfConfidentialBalanceInbox);
+        bool const hasIssuer = after->isFieldPresent(sfIssuerEncryptedBalance);
+        // (spending ∨ inbox) ⇔ issuer encrypted balance
+        if ((hasSpending || hasInbox) != hasIssuer)
+            badEncryptedFields_ = true;
+
+        // Spec: "If spending is modified, then version must be changed."
+        // First-time initialization (absent → present) sets version to 0 and
+        // is not treated as a modification that requires a version bump.
+        if (before && before->getType() == ltMPTOKEN &&
+            before->isFieldPresent(sfConfidentialBalanceSpending))
+        {
+            bool const spendingModified = !hasSpending ||
+                (before->getFieldVL(sfConfidentialBalanceSpending) !=
+                 after->getFieldVL(sfConfidentialBalanceSpending));
+            if (spendingModified)
+            {
+                auto const verBefore =
+                    (*before)[~sfConfidentialBalanceVersion].value_or(std::uint32_t{0});
+                auto const verAfter =
+                    (*after)[~sfConfidentialBalanceVersion].value_or(std::uint32_t{0});
+                if (verBefore == verAfter)
+                    badVersionModification_ = true;
+            }
+        }
+    }
+    else if (after->getType() == ltMPTOKEN_ISSUANCE)
+    {
+        // UINT64 cannot be negative; enforce COA ≤ OA.
+        if ((*after)[sfConfidentialOutstandingAmount] > (*after)[sfOutstandingAmount])
+            badCoaBounds_ = true;
+    }
+}
+
+bool
+ValidConfidentialMPT::finalize(
+    STTx const&,
+    TER const result,
+    XRPAmount const,
+    ReadView const& view,
+    beast::Journal const& j)
+{
+    if (!view.rules().enabled(featureConfidentialTransfer))
+        return true;
+
+    // Enforce on tesSUCCESS and fee-claiming tec* paths. Invariant processing
+    // still runs when a fee is claimed, so dirty confidential mutations on a
+    // tec* result must fail (same idea as ValidPermissionedDomain rejecting
+    // dirty state on failed txs). Clean tec paths with no dirty confidential
+    // flags continue to pass. Other failure classes (ter*/tef*) are skipped.
+    if (!(isTesSuccess(result) || isTecClaim(result)))
+        return true;
+
+    bool passes = true;
+    if (badEncryptedFields_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: confidential MPToken encrypted "
+                           "field consistency";
+        passes = false;
+    }
+    if (badVersionModification_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: confidential spending modified "
+                           "without version change";
+        passes = false;
+    }
+    if (badCoaBounds_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: ConfidentialOutstandingAmount "
+                           "exceeds OutstandingAmount";
+        passes = false;
+    }
+    return passes;
+}
+
 }  // namespace xrpl
