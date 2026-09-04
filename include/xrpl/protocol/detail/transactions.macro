@@ -1109,6 +1109,38 @@ TRANSACTION(ttCONFIDENTIAL_MPT_MERGE_INBOX, 86, ConfidentialMPTMergeInbox,
     {sfMPTokenIssuanceID, SoeRequired},
 }))
 
+/** Convert confidential MPT back to public form (XLS-0096). */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTConvertBack.h>
+#endif
+TRANSACTION(ttCONFIDENTIAL_MPT_CONVERT_BACK, 87, ConfidentialMPTConvertBack,
+    Delegation::NotDelegable,
+    featureConfidentialTransfer,
+    NoPriv, ({
+    {sfMPTokenIssuanceID, SoeRequired},
+    {sfMPTAmount, SoeRequired},
+    {sfHolderEncryptedAmount, SoeRequired},
+    {sfIssuerEncryptedAmount, SoeRequired},
+    {sfAuditorEncryptedAmount, SoeOptional},
+    {sfBlindingFactor, SoeRequired},
+    {sfBalanceCommitment, SoeRequired},
+    {sfZKProof, SoeRequired},
+}))
+
+/** Issuer clawback of a holder's entire confidential balance (XLS-0096). */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTClawback.h>
+#endif
+TRANSACTION(ttCONFIDENTIAL_MPT_CLAWBACK, 89, ConfidentialMPTClawback,
+    Delegation::NotDelegable,
+    featureConfidentialTransfer,
+    NoPriv, ({
+    {sfMPTokenIssuanceID, SoeRequired},
+    {sfHolder, SoeRequired},
+    {sfMPTAmount, SoeRequired},
+    {sfZKProof, SoeRequired},
+}))
+
 /** This system-generated transaction type is used to update the status of the various amendments.
 
     For details, see: https://xrpl.org/amendments.html

@@ -55,19 +55,19 @@ encZero(
     MPTID const& issuanceID,
     Secp256k1Point const& publicKey);
 
-/** Core txContextID binding for Convert register PoK.
+/** SHA-512-half of uint16 txType (BE) || Account (20) || issuance (24) ||
+    uint32 sequence-or-ticket (BE) || optional TxSpecific suffix.
 
-    SHA-512-half of uint16 txType (BE) || Account (20) || issuance (24) ||
-    uint32 sequence-or-ticket (BE).
-
-    Spec gap: Convert PoK addendum does not define TxSpecific data; this
-    implementation uses the core binding only (no TxSpecific suffix).
+    Convert register PoK: empty TxSpecific (addendum omits it).
+    ConvertBack: Account || CBS_Version (uint32 BE).
+    Clawback: Holder || 0 (uint32 BE).
 */
 [[nodiscard]] std::array<std::uint8_t, 32>
 confidentialTxContextID(
     std::uint16_t txType,
     AccountID const& account,
     MPTID const& issuanceID,
-    std::uint32_t sequenceOrTicket);
+    std::uint32_t sequenceOrTicket,
+    Slice txSpecific = {});
 
 }  // namespace xrpl
