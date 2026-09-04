@@ -50,14 +50,46 @@ parsePk(Blob const& key)
 }
 
 [[nodiscard]] TER
-homomorphicSubtract(SLE& sle, SF_VL const& field, Slice subtraction)
+homomorphicSubtract(
+    SLE& sle,
+    SF_VL const& field,
+    Slice subtraction,
+    AccountID const& account,
+    AccountID const& issuer,
+    MPTID const& issuanceID,
+    Secp256k1Point const& pk)
 {
     if (!sle.isFieldPresent(field))
         return tefINTERNAL;  // LCOV_EXCL_LINE
+    auto const left = parseElGamalCiphertext(makeSlice(sle.getFieldVL(field)));
+    auto const right = parseElGamalCiphertext(subtraction);
+    if (!left || !right)
+        return tefINTERNAL;  // LCOV_EXCL_LINE
+    // Enc(b, r) - Enc(b, r) is the identity and cannot be serialized.
+    // Store the canonical EncZero used everywhere else for a zero balance.
+    if (*left == *right)
+    {
+        auto zero = encZero(account, issuer, issuanceID, pk);
+        if (!zero)
+            return tefINTERNAL;  // LCOV_EXCL_LINE
+        sle.setFieldVL(field, *zero);
+        return tesSUCCESS;
+    }
     auto const diff = homomorphicSubCiphertexts(makeSlice(sle.getFieldVL(field)), subtraction);
     if (!diff)
         return tefINTERNAL;
     sle.setFieldVL(field, *diff);
+    return tesSUCCESS;
+}
+
+// Same r (matching C1) and a different plaintext yields Enc(Δm, 0), whose
+// C1 is the identity and cannot be serialized. Equal ciphertexts are a
+// zero remainder and are stored as EncZero in doApply.
+[[nodiscard]] TER
+rejectReusedNonce(ElGamalCiphertext const& onLedger, ElGamalCiphertext const& submitted)
+{
+    if (onLedger.c1() == submitted.c1() && !(onLedger == submitted))
+        return tecBAD_PROOF;
     return tesSUCCESS;
 }
 
@@ -191,6 +223,15 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
             return temBAD_CIPHERTEXT;  // LCOV_EXCL_LINE
         if (!verifyPlaintextElGamal(*auditorCt, amount, *auditorPk, *blinding))
             return tecBAD_PROOF;
+        if (sleMpt->isFieldPresent(sfAuditorEncryptedBalance))
+        {
+            auto const auditorBal = parseElGamalCiphertext(
+                makeSlice(sleMpt->getFieldVL(sfAuditorEncryptedBalance)));
+            if (!auditorBal)
+                return tecNO_PERMISSION;  // LCOV_EXCL_LINE
+            if (auto const ter = rejectReusedNonce(*auditorBal, *auditorCt))
+                return ter;
+        }
     }
 
     auto const pcB = Secp256k1Point::parse(tx[sfBalanceCommitment]);
@@ -201,6 +242,15 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
         parseElGamalCiphertext(makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)));
     if (!spendingCt)
         return tecNO_PERMISSION;
+    if (auto const ter = rejectReusedNonce(*spendingCt, *holderCt))
+        return ter;
+
+    auto const issuerBal =
+        parseElGamalCiphertext(makeSlice(sleMpt->getFieldVL(sfIssuerEncryptedBalance)));
+    if (!issuerBal)
+        return tecNO_PERMISSION;  // LCOV_EXCL_LINE
+    if (auto const ter = rejectReusedNonce(*issuerBal, *issuerCt))
+        return ter;
 
     auto const version = (*sleMpt)[~sfConfidentialBalanceVersion].value_or(0);
     auto const specific = convertBackTxSpecific(account, version);
@@ -247,16 +297,45 @@ ConfidentialMPTConvertBack::doApply()
     (*sleIssuance)[sfConfidentialOutstandingAmount] =
         (*sleIssuance)[sfConfidentialOutstandingAmount] - amount;
 
+    auto const issuer = (*sleIssuance)[sfIssuer];
+    auto const holderPk = parsePk(sleMpt->getFieldVL(sfHolderEncryptionKey));
+    auto const issuerPk = parsePk(sleIssuance->getFieldVL(sfIssuerEncryptionKey));
+    if (!holderPk || !issuerPk)
+        return tefINTERNAL;  // LCOV_EXCL_LINE
+
     if (auto const ter = homomorphicSubtract(
-            *sleMpt, sfConfidentialBalanceSpending, tx[sfHolderEncryptedAmount]))
+            *sleMpt,
+            sfConfidentialBalanceSpending,
+            tx[sfHolderEncryptedAmount],
+            account,
+            issuer,
+            issuanceID,
+            *holderPk))
         return ter;
-    if (auto const ter =
-            homomorphicSubtract(*sleMpt, sfIssuerEncryptedBalance, tx[sfIssuerEncryptedAmount]))
+    if (auto const ter = homomorphicSubtract(
+            *sleMpt,
+            sfIssuerEncryptedBalance,
+            tx[sfIssuerEncryptedAmount],
+            account,
+            issuer,
+            issuanceID,
+            *issuerPk))
         return ter;
     if (tx.isFieldPresent(sfAuditorEncryptedAmount))
     {
+        if (!sleIssuance->isFieldPresent(sfAuditorEncryptionKey))
+            return tefINTERNAL;  // LCOV_EXCL_LINE
+        auto const auditorPk = parsePk(sleIssuance->getFieldVL(sfAuditorEncryptionKey));
+        if (!auditorPk)
+            return tefINTERNAL;  // LCOV_EXCL_LINE
         if (auto const ter = homomorphicSubtract(
-                *sleMpt, sfAuditorEncryptedBalance, tx[sfAuditorEncryptedAmount]))
+                *sleMpt,
+                sfAuditorEncryptedBalance,
+                tx[sfAuditorEncryptedAmount],
+                account,
+                issuer,
+                issuanceID,
+                *auditorPk))
             return ter;
     }
 

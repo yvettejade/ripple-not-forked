@@ -41,6 +41,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace xrpl {
@@ -126,6 +127,29 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
         jv[jss::TransactionType] = jss::ConfidentialMPTMergeInbox;
         jv[sfMPTokenIssuanceID] = to_string(issuanceID);
         return jv;
+    }
+
+    static std::optional<Secp256k1Scalar>
+    spendingNonceAfterFirstConvertMerge(
+        AccountID const& holder,
+        AccountID const& issuer,
+        MPTID const& issuanceID,
+        Secp256k1Scalar const& convertR)
+    {
+        constexpr std::string_view kTag = "EncZero";
+        std::vector<std::uint8_t> msg;
+        msg.reserve(kTag.size() + AccountID::kBytes + AccountID::kBytes + MPTID::kBytes);
+        msg.insert(msg.end(), kTag.begin(), kTag.end());
+        msg.insert(msg.end(), holder.data(), holder.data() + AccountID::kBytes);
+        msg.insert(msg.end(), issuer.data(), issuer.data() + AccountID::kBytes);
+        msg.insert(msg.end(), issuanceID.data(), issuanceID.data() + MPTID::kBytes);
+        auto const rz = hashToCurveScalar(makeSlice(msg));
+        if (!rz)
+            return std::nullopt;
+        auto const rSpend = fieldAdd(
+            fieldAdd(Secp256k1Field::fromScalar(*rz), Secp256k1Field::fromScalar(*rz)),
+            Secp256k1Field::fromScalar(convertR));
+        return rSpend.toScalar();
     }
 
     static std::array<std::uint8_t, 24>
@@ -307,6 +331,104 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
     }
 
     void
+    testConvertBackReusedNonce()
+    {
+        testcase("convert-back reused spending nonce");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        env.fund(XRP(10000), alice, bob);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+        fundConvertMerge(
+            env, alice, bob, mpt, 100, tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer);
+
+        auto const pk = parsePointHex(kKeyG);
+        auto const convertR = parseScalarHex(kScalar2);
+        auto const rSpend = spendingNonceAfterFirstConvertMerge(
+            bob.id(), alice.id(), mpt.issuanceID(), *convertR);
+        BEAST_EXPECT(pk && convertR && rSpend);
+
+        auto sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto const spending =
+            parseElGamalCiphertext(makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)));
+        auto const expectSpend = ElGamalCiphertext::encrypt(100, *pk, *rSpend);
+        BEAST_EXPECT(spending && expectSpend && *spending == *expectSpend);
+
+        auto const rHex = strHex(rSpend->serialize());
+        auto const baseFee = env.current()->fees().base;
+
+        // Partial convert-back with reused r: remainder Enc(b-m, 0) is unrepresentable.
+        {
+            auto const holderCt = encryptHex(40, *pk, *rSpend);
+            auto const issuerCt = encryptHex(40, *pk, *rSpend);
+            env(convertBackJV(
+                    bob,
+                    mpt.issuanceID(),
+                    40,
+                    holderCt,
+                    issuerCt,
+                    rHex,
+                    std::string(kKeyG),
+                    std::string(1632, '0')),
+                Fee(10 * baseFee),
+                Ter(tecBAD_PROOF));
+        }
+
+        // Full convert-back with reused r: zero remainder becomes EncZero.
+        auto const sk = parseScalarHex(kScalar1);
+        auto const rho = parseScalarHex(kScalar2);
+        std::uint64_t const b = 100;
+        std::uint64_t const m = 100;
+        auto const version = (*sleMpt)[sfConfidentialBalanceVersion];
+        auto const pcB = pedersenCommit(b, *rho);
+        auto const specific = convertBackSpecific(bob.id(), version);
+        auto const ctxID = confidentialTxContextID(
+            static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT_BACK),
+            bob.id(),
+            mpt.issuanceID(),
+            env.seq(bob),
+            makeSlice(specific));
+        auto const sigma =
+            proveConvertBackSigma(b, *rho, *sk, *pk, *spending, *pcB, makeSlice(ctxID));
+        auto const mG = generatorMultiply(Secp256k1Field::fromUint64(m));
+        BEAST_EXPECT(sigma && pcB && mG);
+        auto const pcRem = pointSubtract(*pcB, *mG);
+        BEAST_EXPECT(pcRem);
+        auto const bp = proveRange64(0, *rho, *pcRem);
+        BEAST_EXPECT(bp);
+
+        std::array<std::uint8_t, kConvertBackSigmaSize + kSingleBulletproofSize> zk{};
+        std::memcpy(zk.data(), sigma->data(), kConvertBackSigmaSize);
+        std::memcpy(zk.data() + kConvertBackSigmaSize, bp->data(), kSingleBulletproofSize);
+
+        auto const holderCt = encryptHex(m, *pk, *rSpend);
+        auto const issuerCt = encryptHex(m, *pk, *rSpend);
+        env(convertBackJV(
+                bob,
+                mpt.issuanceID(),
+                m,
+                holderCt,
+                issuerCt,
+                rHex,
+                strHex(pcB->serialize()),
+                strHex(makeSlice(zk))),
+            Fee(10 * baseFee));
+        env.close();
+
+        sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT((*sleMpt)[sfMPTAmount] == 1000);
+        BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == 0);
+        auto const expectZero = encZero(bob.id(), alice.id(), mpt.issuanceID(), *pk);
+        BEAST_EXPECT(
+            strHex(sleMpt->getFieldVL(sfConfidentialBalanceSpending)) == strHex(*expectZero));
+    }
+
+    void
     testConvertBackDisabledAndZero()
     {
         testcase("convert-back disabled and amount 0");
@@ -434,6 +556,7 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
     run() override
     {
         testConvertBackHappy();
+        testConvertBackReusedNonce();
         testConvertBackDisabledAndZero();
         testClawbackHappy();
         testClawbackFailures();
