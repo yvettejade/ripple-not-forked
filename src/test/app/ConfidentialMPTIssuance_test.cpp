@@ -18,6 +18,7 @@
 //==============================================================================
 
 #include <test/jtx.h>
+#include <test/jtx/delegate.h>
 #include <test/jtx/mpt.h>
 
 #include <xrpl/basics/strHex.h>
@@ -421,6 +422,122 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
     }
 
     void
+    testDelegateConfidential()
+    {
+        testcase("delegate: granular rejects confidential; full set allows");
+        using namespace jtx;
+
+        auto assertNoConfidential = [&](Env& env, MPTTester const& mpt) {
+            auto const sle = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            BEAST_EXPECT(sle);
+            BEAST_EXPECT(!sle->isFlag(lsfMPTCanHoldConfidentialBalance));
+            BEAST_EXPECT(!sle->isFieldPresent(sfIssuerEncryptionKey));
+            BEAST_EXPECT(!sle->isFieldPresent(sfAuditorEncryptionKey));
+        };
+
+        auto assertNoKeys = [&](Env& env, MPTTester const& mpt) {
+            auto const sle = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            BEAST_EXPECT(sle);
+            BEAST_EXPECT(sle->isFlag(lsfMPTCanHoldConfidentialBalance));
+            BEAST_EXPECT(!sle->isFieldPresent(sfIssuerEncryptionKey));
+            BEAST_EXPECT(!sle->isFieldPresent(sfAuditorEncryptionKey));
+        };
+
+        // Granular lock/unlock must not enable confidential flag.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(100000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.fund = false});
+            mpt.create({.ownerCount = 1, .flags = tfMPTCanTransfer | tfMPTCanLock});
+            env(delegate::set(alice, bob, {"MPTokenIssuanceLock", "MPTokenIssuanceUnlock"}));
+            env.close();
+
+            mpt.set(
+                {.account = alice,
+                 .flags = tfMPTSetCanHoldConfidentialBalance,
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+            assertNoConfidential(env, mpt);
+
+            mpt.set(
+                {.account = alice,
+                 .flags = tfMPTSetCanHoldConfidentialBalance,
+                 .issuerEncryptionKey = kKeyG,
+                 .auditorEncryptionKey = kKey2G,
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+            assertNoConfidential(env, mpt);
+
+            // Granular lock still works.
+            mpt.set({.account = alice, .flags = tfMPTLock, .delegate = bob});
+            BEAST_EXPECT(env.le(keylet::mptIssuance(mpt.issuanceID()))->isFlag(lsfMPTLocked));
+        }
+
+        // Granular lock/unlock must not upload write-once encryption keys.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(100000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.fund = false});
+            mpt.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock});
+            env(delegate::set(alice, bob, {"MPTokenIssuanceLock", "MPTokenIssuanceUnlock"}));
+            env.close();
+
+            mpt.set(
+                {.account = alice,
+                 .issuerEncryptionKey = kKeyG,
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+            assertNoKeys(env, mpt);
+
+            mpt.set(
+                {.account = alice,
+                 .issuerEncryptionKey = kKeyG,
+                 .auditorEncryptionKey = kKey2G,
+                 .delegate = bob,
+                 .err = terNO_DELEGATE_PERMISSION});
+            assertNoKeys(env, mpt);
+        }
+
+        // Full MPTokenIssuanceSet permission may enable confidential and upload keys.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(100000), alice, bob);
+            env.close();
+
+            MPTTester mpt(env, alice, {.fund = false});
+            mpt.create({.ownerCount = 1, .flags = tfMPTCanTransfer | tfMPTCanLock});
+            env(delegate::set(alice, bob, {"MPTokenIssuanceSet"}));
+            env.close();
+
+            mpt.set(
+                {.account = alice,
+                 .flags = tfMPTSetCanHoldConfidentialBalance,
+                 .issuerEncryptionKey = kKeyG,
+                 .auditorEncryptionKey = kKey2G,
+                 .delegate = bob});
+            auto const sle = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            BEAST_EXPECT(sle);
+            BEAST_EXPECT(sle->isFlag(lsfMPTCanHoldConfidentialBalance));
+            BEAST_EXPECT(sle->isFieldPresent(sfIssuerEncryptionKey));
+            BEAST_EXPECT(sle->isFieldPresent(sfAuditorEncryptionKey));
+            BEAST_EXPECT(strHex(sle->getFieldVL(sfIssuerEncryptionKey)) == kKeyG);
+            BEAST_EXPECT(strHex(sle->getFieldVL(sfAuditorEncryptionKey)) == kKey2G);
+        }
+    }
+
+    void
     run() override
     {
         testAmendmentDisabled();
@@ -428,6 +545,7 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         testSetKeysAndFlags();
         testTransferFeeMutex();
         testDestroyWithCOA();
+        testDelegateConfidential();
     }
 };
 
