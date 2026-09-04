@@ -163,6 +163,8 @@ MPTTester::createJV(MPTCreate const& arg)
         jv[sfDomainID] = to_string(*arg.domainID);
     if (arg.mutableFlags)
         jv[sfMutableFlags] = *arg.mutableFlags;
+    if (arg.immutableFlags)
+        jv[sfImmutableFlags] = *arg.immutableFlags;
     jv[sfTransactionType] = jss::MPTokenIssuanceCreate;
 
     return jv;
@@ -181,6 +183,7 @@ MPTTester::create(MPTCreate const& arg)
          .transferFee = arg.transferFee,
          .metadata = arg.metadata,
          .mutableFlags = arg.mutableFlags,
+         .immutableFlags = arg.immutableFlags,
          .domainID = arg.domainID});
     if (!isTesSuccess(submit(arg, jv)))
     {
@@ -385,6 +388,10 @@ MPTTester::setJV(MPTSet const& arg)
         jv[sfTransferFee] = *arg.transferFee;
     if (arg.metadata)
         jv[sfMPTokenMetadata] = strHex(*arg.metadata);
+    if (arg.issuerEncryptionKey)
+        jv[sfIssuerEncryptionKey] = *arg.issuerEncryptionKey;
+    if (arg.auditorEncryptionKey)
+        jv[sfAuditorEncryptionKey] = *arg.auditorEncryptionKey;
     jv[sfTransactionType] = jss::MPTokenIssuanceSet;
 
     return jv;
@@ -402,6 +409,8 @@ MPTTester::set(MPTSet const& arg)
          .mutableFlags = arg.mutableFlags,
          .transferFee = arg.transferFee,
          .metadata = arg.metadata,
+         .issuerEncryptionKey = arg.issuerEncryptionKey,
+         .auditorEncryptionKey = arg.auditorEncryptionKey,
          .delegate = arg.delegate,
          .domainID = arg.domainID});
     if (submit(arg, jv) == tesSUCCESS && ((arg.flags.value_or(0) != 0u) || arg.mutableFlags))
@@ -420,6 +429,10 @@ MPTTester::set(MPTSet const& arg)
                     {
                         flags &= ~lsfMPTLocked;
                     }
+
+                    // Set-flag value differs from the ledger flag value.
+                    if (*arg.flags & tfMPTSetCanHoldConfidentialBalance)
+                        flags |= lsfMPTCanHoldConfidentialBalance;
                 }
 
                 if (arg.mutableFlags)

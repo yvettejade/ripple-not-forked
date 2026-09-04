@@ -37,6 +37,12 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfMutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    // Confidential create flags/fields require featureConfidentialTransfer.
+    if ((ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) ||
+         ctx.tx.isFieldPresent(sfImmutableFlags)) &&
+        !ctx.rules.enabled(featureConfidentialTransfer))
+        return false;
+
     return true;
 }
 
@@ -70,6 +76,20 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
         // must also be set.
         if (fee > 0u && !ctx.tx.isFlag(tfMPTCanTransfer))
             return temMALFORMED;
+
+        // Transfer fees and confidential balances are mutually exclusive
+        // (XLS-0096 §6.4).
+        if (fee > 0u && ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance))
+            return temBAD_TRANSFER_FEE;
+    }
+
+    // Only lsifMPTCanHoldConfidentialBalance may appear in ImmutableFlags.
+    // Create with lsif set and lsf unset permanently blocks enabling
+    // confidentiality later via Set (XLS-0096 §6.3.1).
+    if (auto const immutableFlags = ctx.tx[~sfImmutableFlags])
+    {
+        if ((*immutableFlags & ~lsifMPTCanHoldConfidentialBalance) != 0u)
+            return temINVALID_FLAG;
     }
 
     if (auto const domain = ctx.tx[~sfDomainID])
@@ -147,6 +167,19 @@ MPTokenIssuanceCreate::create(ApplyView& view, beast::Journal journal, MPTCreate
         if (args.mutableFlags)
             (*mptIssuance)[sfMutableFlags] = *args.mutableFlags;
 
+        if (args.immutableFlags)
+        {
+            // Create with lsif set and lsf unset permanently blocks enabling
+            // confidentiality (XLS-0096 §6.3.1).
+            (*mptIssuance)[sfImmutableFlags] = *args.immutableFlags;
+        }
+
+        // Spec §12.1: Set is the only way to register encryption keys.
+        // Create-time enable of lsf therefore requires a subsequent Set to
+        // upload keys before Convert.
+        // sfConfidentialOutstandingAmount is SoeDefault (absent reads as 0);
+        // do not set it explicitly to 0 — STAmount/SField rejects default.
+
         if (args.referenceHolding)
         {
             // Defensive: the holding must already exist and be of an
@@ -190,6 +223,7 @@ MPTokenIssuanceCreate::doApply()
             .metadata = tx[~sfMPTokenMetadata],
             .domainId = tx[~sfDomainID],
             .mutableFlags = tx[~sfMutableFlags],
+            .immutableFlags = tx[~sfImmutableFlags],
         });
     return result ? tesSUCCESS : result.error();
 }
