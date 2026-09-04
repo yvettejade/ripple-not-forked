@@ -39,7 +39,14 @@ MPTokenIssuanceSet::checkExtraFeatures(PreflightContext const& ctx)
 std::uint32_t
 MPTokenIssuanceSet::getFlagsMask(PreflightContext const& ctx)
 {
-    return tfMPTokenIssuanceSetMask;
+    // tfMPTokenIssuanceSetMask is built assuming ConfidentialTransfer is
+    // enabled.
+    if (ctx.rules.enabled(featureConfidentialTransfer))
+        return tfMPTokenIssuanceSetMask;
+    // If ConfidentialTransfer is not enabled, add
+    // tfMPTSetCanHoldConfidentialBalance to the mask, indicating it is not
+    // allowed. Otherwise the flag is accepted and ignored in doApply.
+    return tfMPTokenIssuanceSetMask | tfMPTSetCanHoldConfidentialBalance;
 }
 
 // Maps set/clear mutable flags in an MPTokenIssuanceSet transaction to the

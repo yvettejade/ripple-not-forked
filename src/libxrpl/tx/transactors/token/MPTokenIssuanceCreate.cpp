@@ -43,8 +43,15 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
 std::uint32_t
 MPTokenIssuanceCreate::getFlagsMask(PreflightContext const& ctx)
 {
-    // This mask is only compared against sfFlags
-    return tfMPTokenIssuanceCreateMask;
+    // This mask is only compared against sfFlags.
+    // tfMPTokenIssuanceCreateMask is built assuming ConfidentialTransfer is
+    // enabled.
+    if (ctx.rules.enabled(featureConfidentialTransfer))
+        return tfMPTokenIssuanceCreateMask;
+    // If ConfidentialTransfer is not enabled, add
+    // tfMPTCanHoldConfidentialBalance to the mask, indicating it is not
+    // allowed. Otherwise create copies it onto ledger sfFlags.
+    return tfMPTokenIssuanceCreateMask | tfMPTCanHoldConfidentialBalance;
 }
 
 NotTEC
