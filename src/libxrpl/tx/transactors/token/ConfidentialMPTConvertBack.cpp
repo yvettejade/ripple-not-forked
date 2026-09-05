@@ -227,6 +227,27 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     if (!verifyRange64(*pcRem, bp))
         return tecBAD_PROOF;
 
+    // Sender-side balance updates must be representable before doApply.
+    // Equal amount/balance ciphertexts yield the point at infinity under
+    // homomorphic subtraction; reject as tecBAD_PROOF (not tefINTERNAL).
+    if (!homomorphicSubCiphertexts(
+            makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)),
+            tx[sfHolderEncryptedAmount]))
+        return tecBAD_PROOF;
+    if (!homomorphicSubCiphertexts(
+            makeSlice(sleMpt->getFieldVL(sfIssuerEncryptedBalance)), tx[sfIssuerEncryptedAmount]))
+        return tecBAD_PROOF;
+    if (hasAuditorAmt)
+    {
+        // Mirror must exist before doApply subtraction (else tefINTERNAL).
+        if (!sleMpt->isFieldPresent(sfAuditorEncryptedBalance))
+            return tecNO_PERMISSION;
+        if (!homomorphicSubCiphertexts(
+                makeSlice(sleMpt->getFieldVL(sfAuditorEncryptedBalance)),
+                tx[sfAuditorEncryptedAmount]))
+            return tecBAD_PROOF;
+    }
+
     return tesSUCCESS;
 }
 
