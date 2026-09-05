@@ -243,8 +243,9 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         return tecNO_PERMISSION;
     if (hasAuditorKey)
     {
-        if (!sleSender->isFieldPresent(sfAuditorEncryptedBalance) ||
-            !sleDest->isFieldPresent(sfAuditorEncryptedBalance))
+        // Destination mirror needed for doApply credit; sender mirror is
+        // checked with the subtraction representability prechecks below.
+        if (!sleDest->isFieldPresent(sfAuditorEncryptedBalance))
             return tecNO_PERMISSION;
     }
 
@@ -345,6 +346,28 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         return tecNO_PERMISSION;  // LCOV_EXCL_LINE
     if (!currentInbox->add(*inboxPlus))
         return tecBAD_PROOF;
+
+    // Sender-side balance updates must be representable before doApply.
+    // Equal amount/balance ciphertexts yield the point at infinity under
+    // homomorphic subtraction; reject as tecBAD_PROOF (not tefINTERNAL).
+    if (!homomorphicSubCiphertexts(
+            makeSlice(sleSender->getFieldVL(sfConfidentialBalanceSpending)),
+            tx[sfSenderEncryptedAmount]))
+        return tecBAD_PROOF;
+    if (!homomorphicSubCiphertexts(
+            makeSlice(sleSender->getFieldVL(sfIssuerEncryptedBalance)),
+            tx[sfIssuerEncryptedAmount]))
+        return tecBAD_PROOF;
+    if (hasAuditorAmt)
+    {
+        // Mirror must exist before doApply subtraction (else tefINTERNAL).
+        if (!sleSender->isFieldPresent(sfAuditorEncryptedBalance))
+            return tecNO_PERMISSION;
+        if (!homomorphicSubCiphertexts(
+                makeSlice(sleSender->getFieldVL(sfAuditorEncryptedBalance)),
+                tx[sfAuditorEncryptedAmount]))
+            return tecBAD_PROOF;
+    }
 
     return tesSUCCESS;
 }
