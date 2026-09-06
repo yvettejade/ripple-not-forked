@@ -103,6 +103,8 @@ test.core > xrpl.rdb
 test.core > xrpl.server
 test.crypto > xrpl.basics
 test.crypto > xrpl.crypto
+test.crypto > xrpl.ledger
+test.crypto > xrpl.protocol
 test.csf > xrpl.basics
 test.csf > xrpld.consensus
 test.csf > xrpl.json
@@ -112,6 +114,7 @@ test.json > test.jtx
 test.json > xrpl.json
 test.jtx > xrpl.basics
 test.jtx > xrpl.core
+test.jtx > xrpl.crypto
 test.jtx > xrpld.app
 test.jtx > xrpld.core
 test.jtx > xrpld.rpc
@@ -246,6 +249,7 @@ xrpl.shamap > xrpl.protocol
 xrpl.tx > xrpl.basics
 xrpl.tx > xrpl.core
 xrpl.tx > xrpl.ledger
+xrpl.tx > xrpl.protocol
 xrpld.app > test.unit_test
 xrpld.app > xrpl.basics
 xrpld.app > xrpl.core
