@@ -112,6 +112,7 @@ test.json > test.jtx
 test.json > xrpl.json
 test.jtx > xrpl.basics
 test.jtx > xrpl.core
+test.jtx > xrpl.crypto
 test.jtx > xrpld.app
 test.jtx > xrpld.core
 test.jtx > xrpld.rpc
