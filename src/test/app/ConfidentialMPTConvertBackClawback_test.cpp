@@ -55,10 +55,15 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
     // Compressed 2·G — distinct auditor public key.
     static constexpr char const* kKey2G =
         "02C6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5";
+    // Compressed 3·G — distinct issuer public key (holder uses 1·G).
+    static constexpr char const* kKey3G =
+        "02F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9";
     static constexpr char const* kScalar1 =
         "0000000000000000000000000000000000000000000000000000000000000001";
     static constexpr char const* kScalar2 =
         "0000000000000000000000000000000000000000000000000000000000000002";
+    static constexpr char const* kScalar3 =
+        "0000000000000000000000000000000000000000000000000000000000000003";
 
     FeatureBitset
     withConfidential()
@@ -1100,6 +1105,9 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
     void
     testClawbackWithAuditor()
     {
+        // Distinct role keys: holder=1·G, issuer=3·G, auditor=2·G. EncZero
+        // resets must use the matching pk per field; swapped holder/issuer
+        // arguments in production would fail these exact equality checks.
         testcase("clawback with auditor resets EncZero fields");
         using namespace jtx;
 
@@ -1116,25 +1124,36 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
              .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanClawback});
         mpt.set(
             {.flags = tfMPTSetCanHoldConfidentialBalance,
-             .issuerEncryptionKey = kKeyG,
+             .issuerEncryptionKey = kKey3G,
              .auditorEncryptionKey = kKey2G});
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
 
-        auto const sk = parseScalarHex(kScalar1);
-        auto const pk = parsePointHex(kKeyG);
+        auto const holderSk = parseScalarHex(kScalar1);
+        auto const holderPk = parsePointHex(kKeyG);
+        auto const issuerSk = parseScalarHex(kScalar3);
+        auto const issuerPk = parsePointHex(kKey3G);
         auto const auditorPk = parsePointHex(kKey2G);
         auto const r = parseScalarHex(kScalar2);
-        BEAST_EXPECT(sk && pk && auditorPk && r);
-        auto const holderCt = encryptHex(bal, *pk, *r);
-        auto const issuerCt = encryptHex(bal, *pk, *r);
+        BEAST_EXPECT(holderSk && holderPk && issuerSk && issuerPk && auditorPk && r);
+
+        auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sleIss);
+        BEAST_EXPECT(strHex(sleIss->getFieldVL(sfIssuerEncryptionKey)) == kKey3G);
+        BEAST_EXPECT(strHex(sleIss->getFieldVL(sfAuditorEncryptionKey)) == kKey2G);
+
+        auto const holderCt = encryptHex(bal, *holderPk, *r);
+        auto const issuerCt = encryptHex(bal, *issuerPk, *r);
         auto const auditorCt = encryptHex(bal, *auditorPk, *r);
+        BEAST_EXPECT(!holderCt.empty() && !issuerCt.empty() && !auditorCt.empty());
+        BEAST_EXPECT(holderCt != issuerCt && holderCt != auditorCt && issuerCt != auditorCt);
+
         auto const ctxID = confidentialTxContextID(
             static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT),
             bob.id(),
             mpt.issuanceID(),
             env.seq(bob));
-        auto const pok = proveRegisterPoK(*sk, *pk, makeSlice(ctxID));
+        auto const pok = proveRegisterPoK(*holderSk, *holderPk, makeSlice(ctxID));
         auto const baseFee = env.current()->fees().base;
         env(convertJV(
                 bob,
@@ -1154,6 +1173,7 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
         auto sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
         BEAST_EXPECT(sleMpt);
         BEAST_EXPECT(sleMpt->isFieldPresent(sfAuditorEncryptedBalance));
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfHolderEncryptionKey)) == kKeyG);
         auto const version = (*sleMpt)[sfConfidentialBalanceVersion];
         auto const issuerBal =
             parseElGamalCiphertext(makeSlice(sleMpt->getFieldVL(sfIssuerEncryptedBalance)));
@@ -1165,7 +1185,9 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
             mpt.issuanceID(),
             env.seq(alice),
             makeSlice(specific));
-        auto const proof = proveClawbackSigma(bal, *sk, *pk, *issuerBal, makeSlice(clawCtx));
+        // Clawback sigma is under the issuer key against the issuer mirror.
+        auto const proof =
+            proveClawbackSigma(bal, *issuerSk, *issuerPk, *issuerBal, makeSlice(clawCtx));
         BEAST_EXPECT(proof);
 
         env(clawbackJV(alice, bob, mpt.issuanceID(), bal, strHex(makeSlice(*proof))),
@@ -1173,21 +1195,27 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
         env.close();
 
         sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
-        auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
         BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == 0);
         BEAST_EXPECT((*sleIss)[sfOutstandingAmount] == 900);
         BEAST_EXPECT((*sleMpt)[sfConfidentialBalanceVersion] == version + 1);
-        auto const expectHolder = encZero(bob.id(), alice.id(), mpt.issuanceID(), *pk);
-        auto const expectIssuer = encZero(bob.id(), alice.id(), mpt.issuanceID(), *pk);
+
+        auto const expectHolder = encZero(bob.id(), alice.id(), mpt.issuanceID(), *holderPk);
+        auto const expectIssuer = encZero(bob.id(), alice.id(), mpt.issuanceID(), *issuerPk);
         auto const expectAuditor = encZero(bob.id(), alice.id(), mpt.issuanceID(), *auditorPk);
         BEAST_EXPECT(expectHolder && expectIssuer && expectAuditor);
+        auto const holderZeroHex = strHex(*expectHolder);
+        auto const issuerZeroHex = strHex(*expectIssuer);
+        auto const auditorZeroHex = strHex(*expectAuditor);
+        // Same EncZero randomness, distinct pks → pairwise-distinct ciphertexts.
         BEAST_EXPECT(
-            strHex(sleMpt->getFieldVL(sfConfidentialBalanceSpending)) == strHex(*expectHolder));
-        BEAST_EXPECT(
-            strHex(sleMpt->getFieldVL(sfConfidentialBalanceInbox)) == strHex(*expectHolder));
-        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfIssuerEncryptedBalance)) == strHex(*expectIssuer));
-        BEAST_EXPECT(
-            strHex(sleMpt->getFieldVL(sfAuditorEncryptedBalance)) == strHex(*expectAuditor));
+            holderZeroHex != issuerZeroHex && holderZeroHex != auditorZeroHex &&
+            issuerZeroHex != auditorZeroHex);
+
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfConfidentialBalanceSpending)) == holderZeroHex);
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfConfidentialBalanceInbox)) == holderZeroHex);
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfIssuerEncryptedBalance)) == issuerZeroHex);
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfAuditorEncryptedBalance)) == auditorZeroHex);
     }
 
     void
