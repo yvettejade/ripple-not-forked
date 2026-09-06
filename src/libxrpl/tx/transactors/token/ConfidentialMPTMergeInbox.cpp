@@ -88,6 +88,11 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
     if (sleMpt->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
         return tecLOCKED;
 
+    if (!homomorphicAddCiphertexts(
+            makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)),
+            makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceInbox))))
+        return tecINTERNAL;
+
     return tesSUCCESS;
 }
 
@@ -116,7 +121,7 @@ ConfidentialMPTMergeInbox::doApply()
         makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)),
         makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceInbox)));
     if (!merged)
-        return tefINTERNAL;  // LCOV_EXCL_LINE
+        return tecINTERNAL;  // Defense: preclaim should have caught this.
     sleMpt->setFieldVL(sfConfidentialBalanceSpending, *merged);
 
     // inbox = EncZero(holder). Issuer/auditor mirrors are totals and unchanged.

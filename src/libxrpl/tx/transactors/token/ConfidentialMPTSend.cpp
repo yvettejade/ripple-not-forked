@@ -178,6 +178,10 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     if (!sleDestAcct)
         return tecNO_TARGET;
 
+    // Match Payment / AccountDelete: RequireDestTag before proof work.
+    if (sleDestAcct->isFlag(lsfRequireDestTag) && !tx.isFieldPresent(sfDestinationTag))
+        return tecDST_TAG_NEEDED;
+
     if (ctx.view.rules().enabled(featureCredentials))
     {
         if (auto const err = credentials::valid(tx, ctx.view, sender, ctx.j); !isTesSuccess(err))

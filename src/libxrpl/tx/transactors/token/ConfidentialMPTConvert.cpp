@@ -7,8 +7,10 @@
 #include <xrpl/crypto/Secp256k1.h>
 #include <xrpl/ledger/View.h>
 #include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
+#include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -21,7 +23,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <vector>
 
 namespace xrpl {
 namespace {
@@ -44,40 +45,30 @@ parsePk(Blob const& key)
     return Secp256k1Point::parse(makeSlice(key));
 }
 
-[[nodiscard]] std::optional<Secp256k1Point>
-parsePk(Slice key)
+// Existing ciphertext fields must accept addition; absent fields use direct assign.
+[[nodiscard]] TER
+checkHomomorphicCredit(SLE const& sle, SF_VL const& field, Slice addition)
 {
-    if (key.size() != Secp256k1Point::kSerializedSize)
-        return std::nullopt;
-    return Secp256k1Point::parse(key);
+    if (!sle.isFieldPresent(field))
+        return tesSUCCESS;
+    if (!homomorphicAddCiphertexts(makeSlice(sle.getFieldVL(field)), addition))
+        return tecINTERNAL;
+    return tesSUCCESS;
 }
 
 [[nodiscard]] TER
-homomorphicAccumulate(
-    SLE& sle,
-    SF_VL const& field,
-    Slice addition,
-    AccountID const& account,
-    AccountID const& issuer,
-    MPTID const& issuanceID,
-    Secp256k1Point const& pk)
+homomorphicAccumulate(SLE& sle, SF_VL const& field, Slice addition)
 {
     if (!sle.isFieldPresent(field))
     {
-        // Spec: absent balance treated as EncZero then add.
-        auto zero = encZero(account, issuer, issuanceID, pk);
-        if (!zero)
-            return tefINTERNAL;  // LCOV_EXCL_LINE
-        auto sum = homomorphicAddCiphertexts(makeSlice(*zero), addition);
-        if (!sum)
-            return tefINTERNAL;  // LCOV_EXCL_LINE
-        sle.setFieldVL(field, *sum);
+        // First write: assign submitted CT directly (not EncZero ⊕ C).
+        sle.setFieldVL(field, addition);
         return tesSUCCESS;
     }
 
     auto sum = homomorphicAddCiphertexts(makeSlice(sle.getFieldVL(field)), addition);
     if (!sum)
-        return tefINTERNAL;  // LCOV_EXCL_LINE
+        return tecINTERNAL;  // Defense: preclaim should have caught this.
     sle.setFieldVL(field, *sum);
     return tesSUCCESS;
 }
@@ -175,6 +166,10 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (!sleMpt)
         return tecOBJECT_NOT_FOUND;
 
+    // Classic lsfMPTAuthorized and DomainID authorization.
+    if (auto const ter = requireAuth(ctx.view, MPTIssue{issuanceID}, account); !isTesSuccess(ter))
+        return ter;
+
     // Match ConfidentialMPTMergeInbox: either holder or issuance lock blocks.
     if (sleMpt->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
         return tecLOCKED;
@@ -260,6 +255,19 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
             return tecBAD_PROOF;
     }
 
+    if (auto const ter = checkHomomorphicCredit(
+            *sleMpt, sfConfidentialBalanceInbox, tx[sfHolderEncryptedAmount]))
+        return ter;
+    if (auto const ter =
+            checkHomomorphicCredit(*sleMpt, sfIssuerEncryptedBalance, tx[sfIssuerEncryptedAmount]))
+        return ter;
+    if (hasAuditorAmt)
+    {
+        if (auto const ter = checkHomomorphicCredit(
+                *sleMpt, sfAuditorEncryptedBalance, tx[sfAuditorEncryptedAmount]))
+            return ter;
+    }
+
     return tesSUCCESS;
 }
 
@@ -299,43 +307,19 @@ ConfidentialMPTConvert::doApply()
     if (!holderPk)
         return tefINTERNAL;  // LCOV_EXCL_LINE
 
-    auto const issuerPk = parsePk(sleIssuance->getFieldVL(sfIssuerEncryptionKey));
-    if (!issuerPk)
-        return tefINTERNAL;  // LCOV_EXCL_LINE
-
-    if (auto const ter = homomorphicAccumulate(
-            *sleMpt,
-            sfConfidentialBalanceInbox,
-            tx[sfHolderEncryptedAmount],
-            account,
-            issuer,
-            issuanceID,
-            *holderPk))
+    // Credits are either first-write assignment or preclaim-validated additions.
+    if (auto const ter =
+            homomorphicAccumulate(*sleMpt, sfConfidentialBalanceInbox, tx[sfHolderEncryptedAmount]))
         return ter;
 
-    if (auto const ter = homomorphicAccumulate(
-            *sleMpt,
-            sfIssuerEncryptedBalance,
-            tx[sfIssuerEncryptedAmount],
-            account,
-            issuer,
-            issuanceID,
-            *issuerPk))
+    if (auto const ter =
+            homomorphicAccumulate(*sleMpt, sfIssuerEncryptedBalance, tx[sfIssuerEncryptedAmount]))
         return ter;
 
     if (tx.isFieldPresent(sfAuditorEncryptedAmount))
     {
-        auto const auditorPk = parsePk(sleIssuance->getFieldVL(sfAuditorEncryptionKey));
-        if (!auditorPk)
-            return tefINTERNAL;  // LCOV_EXCL_LINE
         if (auto const ter = homomorphicAccumulate(
-                *sleMpt,
-                sfAuditorEncryptedBalance,
-                tx[sfAuditorEncryptedAmount],
-                account,
-                issuer,
-                issuanceID,
-                *auditorPk))
+                *sleMpt, sfAuditorEncryptedBalance, tx[sfAuditorEncryptedAmount]))
             return ter;
     }
 
