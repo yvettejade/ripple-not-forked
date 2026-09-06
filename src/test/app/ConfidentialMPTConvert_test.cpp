@@ -990,6 +990,251 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
         BEAST_EXPECT((*sleMpt)[sfMPTAmount] == 900);
     }
 
+    void
+    testUnauthorizedMergeInbox()
+    {
+        // Holder is authorized, converts to inbox; issuer unauthorizes before
+        // merge. MergeInbox returns tecNO_AUTH with no state mutation.
+        testcase("unauthorized merge inbox -> tecNO_AUTH");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        env.fund(XRP(10000), alice, bob);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTRequireAuth});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        mpt.authorize({.account = bob});
+        mpt.authorize({.account = alice, .holder = bob});
+        mpt.pay(alice, bob, 1000);
+
+        auto const sk = parseScalarHex(kScalar1);
+        auto const pk = parsePointHex(kKeyG);
+        auto const r = parseScalarHex(kScalar2);
+        BEAST_EXPECT(sk && pk && r);
+
+        std::uint64_t const amount = 100;
+        auto const holderCt = encryptHex(amount, *pk, *r);
+        auto const issuerCt = encryptHex(amount, *pk, *r);
+        auto const proof = proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob));
+        auto const baseFee = env.current()->fees().base;
+        BEAST_EXPECT(!holderCt.empty() && !issuerCt.empty() && !proof.empty());
+
+        env(convertJV(
+                bob,
+                mpt.issuanceID(),
+                amount,
+                holderCt,
+                issuerCt,
+                kScalar2,
+                std::string(kKeyG),
+                proof),
+            Fee(10 * baseFee));
+        env.close();
+
+        mpt.authorize({.account = alice, .holder = bob, .flags = tfMPTUnauthorize});
+        auto const sleTok = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        BEAST_EXPECT(sleTok);
+        BEAST_EXPECT(!sleTok->isFlag(lsfMPTAuthorized));
+
+        auto const sleBefore = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto const sleIssBefore = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sleBefore && sleIssBefore);
+        auto const inboxBefore = sleBefore->getFieldVL(sfConfidentialBalanceInbox);
+        auto const spendingBefore = sleBefore->getFieldVL(sfConfidentialBalanceSpending);
+        auto const versionBefore = (*sleBefore)[~sfConfidentialBalanceVersion].value_or(0);
+        auto const coaBefore = (*sleIssBefore)[sfConfidentialOutstandingAmount];
+
+        env(mergeJV(bob, mpt.issuanceID()), Fee(10 * baseFee), Ter(tecNO_AUTH));
+        env.close();
+
+        auto const sleAfter = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto const sleIssAfter = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sleAfter && sleIssAfter);
+        BEAST_EXPECT(sleAfter->getFieldVL(sfConfidentialBalanceInbox) == inboxBefore);
+        BEAST_EXPECT(sleAfter->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
+        BEAST_EXPECT((*sleAfter)[~sfConfidentialBalanceVersion].value_or(0) == versionBefore);
+        BEAST_EXPECT((*sleIssAfter)[sfConfidentialOutstandingAmount] == coaBefore);
+    }
+
+    void
+    testDomainAuthMergeInbox()
+    {
+        // Domain credential authorizes without lsfMPTAuthorized: Convert then
+        // MergeInbox succeed (canonical requireAuth, not the old flag check).
+        testcase("domain auth merge inbox success");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const credIssuer{"credIssuer"};
+        env.fund(XRP(10000), alice, bob, credIssuer);
+        env.close();
+
+        std::string const credType = "credential";
+        auto const domainId = [&]() {
+            pdomain::Credentials const credentials{{.issuer = credIssuer, .credType = credType}};
+            env(pdomain::setTx(credIssuer, credentials));
+            return pdomain::getNewDomain(env.meta());
+        }();
+        env(credentials::create(bob, credIssuer, credType));
+        env(credentials::accept(bob, credIssuer, credType));
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTRequireAuth,
+             .domainID = domainId});
+        BEAST_EXPECT(mpt.checkDomainID(domainId));
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        // Holder creates MPToken only — never receives lsfMPTAuthorized.
+        mpt.authorize({.account = bob});
+        {
+            auto const sleTok = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            BEAST_EXPECT(sleTok);
+            BEAST_EXPECT(!sleTok->isFlag(lsfMPTAuthorized));
+        }
+        mpt.pay(alice, bob, 1000);
+
+        auto const sk = parseScalarHex(kScalar1);
+        auto const pk = parsePointHex(kKeyG);
+        auto const r = parseScalarHex(kScalar2);
+        BEAST_EXPECT(sk && pk && r);
+
+        std::uint64_t const amount = 100;
+        auto const holderCt = encryptHex(amount, *pk, *r);
+        auto const issuerCt = encryptHex(amount, *pk, *r);
+        auto const proof = proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob));
+        auto const baseFee = env.current()->fees().base;
+        BEAST_EXPECT(!holderCt.empty() && !issuerCt.empty() && !proof.empty());
+
+        env(convertJV(
+                bob,
+                mpt.issuanceID(),
+                amount,
+                holderCt,
+                issuerCt,
+                kScalar2,
+                std::string(kKeyG),
+                proof),
+            Fee(10 * baseFee));
+        env.close();
+
+        auto sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        BEAST_EXPECT(sleMpt);
+        BEAST_EXPECT(!sleMpt->isFlag(lsfMPTAuthorized));
+        BEAST_EXPECT((*sleMpt)[~sfConfidentialBalanceVersion].value_or(0) == 0);
+        auto const spendingBefore = sleMpt->getFieldVL(sfConfidentialBalanceSpending);
+        auto const expectZero = encZero(bob.id(), alice.id(), mpt.issuanceID(), *pk);
+        BEAST_EXPECT(expectZero);
+        BEAST_EXPECT(strHex(spendingBefore) == strHex(*expectZero));
+
+        env(mergeJV(bob, mpt.issuanceID()), Fee(10 * baseFee));
+        env.close();
+
+        sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        BEAST_EXPECT(sleMpt);
+        BEAST_EXPECT(!sleMpt->isFlag(lsfMPTAuthorized));
+        BEAST_EXPECT((*sleMpt)[sfConfidentialBalanceVersion] == 1);
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfConfidentialBalanceInbox)) == strHex(*expectZero));
+        // Spending absorbed inbox (homomorphic sum); no longer EncZero. Byte
+        // equality with prior inbox is not required — EncZero⊕C may rescale.
+        BEAST_EXPECT(sleMpt->getFieldVL(sfConfidentialBalanceSpending) != spendingBefore);
+        BEAST_EXPECT(
+            strHex(sleMpt->getFieldVL(sfConfidentialBalanceSpending)) != strHex(*expectZero));
+    }
+
+    void
+    testDomainAuthMergeInboxReject()
+    {
+        // Convert succeeds via domain credential; credential deleted before
+        // merge → tecNO_AUTH and no inbox/spending/version/COA mutation.
+        testcase("domain auth merge inbox missing credential -> tecNO_AUTH");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const credIssuer{"credIssuer"};
+        env.fund(XRP(10000), alice, bob, credIssuer);
+        env.close();
+
+        std::string const credType = "credential";
+        auto const domainId = [&]() {
+            pdomain::Credentials const credentials{{.issuer = credIssuer, .credType = credType}};
+            env(pdomain::setTx(credIssuer, credentials));
+            return pdomain::getNewDomain(env.meta());
+        }();
+        env(credentials::create(bob, credIssuer, credType));
+        env(credentials::accept(bob, credIssuer, credType));
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+        mpt.create(
+            {.ownerCount = 1,
+             .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTRequireAuth,
+             .domainID = domainId});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        mpt.authorize({.account = bob});
+        BEAST_EXPECT(
+            !env.le(keylet::mptoken(mpt.issuanceID(), bob.id()))->isFlag(lsfMPTAuthorized));
+        mpt.pay(alice, bob, 1000);
+
+        auto const sk = parseScalarHex(kScalar1);
+        auto const pk = parsePointHex(kKeyG);
+        auto const r = parseScalarHex(kScalar2);
+        BEAST_EXPECT(sk && pk && r);
+
+        std::uint64_t const amount = 50;
+        auto const holderCt = encryptHex(amount, *pk, *r);
+        auto const issuerCt = encryptHex(amount, *pk, *r);
+        auto const proof = proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob));
+        auto const baseFee = env.current()->fees().base;
+        BEAST_EXPECT(!holderCt.empty() && !issuerCt.empty() && !proof.empty());
+
+        env(convertJV(
+                bob,
+                mpt.issuanceID(),
+                amount,
+                holderCt,
+                issuerCt,
+                kScalar2,
+                std::string(kKeyG),
+                proof),
+            Fee(10 * baseFee));
+        env.close();
+
+        env(credentials::deleteCred(credIssuer, bob, credIssuer, credType));
+        env.close();
+
+        auto const sleBefore = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto const sleIssBefore = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sleBefore && sleIssBefore);
+        BEAST_EXPECT(!sleBefore->isFlag(lsfMPTAuthorized));
+        auto const inboxBefore = sleBefore->getFieldVL(sfConfidentialBalanceInbox);
+        auto const spendingBefore = sleBefore->getFieldVL(sfConfidentialBalanceSpending);
+        auto const versionBefore = (*sleBefore)[~sfConfidentialBalanceVersion].value_or(0);
+        auto const coaBefore = (*sleIssBefore)[sfConfidentialOutstandingAmount];
+
+        env(mergeJV(bob, mpt.issuanceID()), Fee(10 * baseFee), Ter(tecNO_AUTH));
+        env.close();
+
+        auto const sleAfter = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto const sleIssAfter = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sleAfter && sleIssAfter);
+        BEAST_EXPECT(sleAfter->getFieldVL(sfConfidentialBalanceInbox) == inboxBefore);
+        BEAST_EXPECT(sleAfter->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
+        BEAST_EXPECT((*sleAfter)[~sfConfidentialBalanceVersion].value_or(0) == versionBefore);
+        BEAST_EXPECT((*sleIssAfter)[sfConfidentialOutstandingAmount] == coaBefore);
+    }
+
 public:
     void
     run() override
@@ -1009,6 +1254,9 @@ public:
         testUnauthorizedConvert();
         testM1ConvertEncZeroCancel();
         testM1MergeSpendingInboxCancel();
+        testUnauthorizedMergeInbox();
+        testDomainAuthMergeInbox();
+        testDomainAuthMergeInboxReject();
     }
 };
 
