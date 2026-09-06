@@ -18,6 +18,7 @@
 //==============================================================================
 
 #include <test/jtx.h>
+#include <test/jtx/ConfidentialProofHarness.h>
 #include <test/jtx/mpt.h>
 
 #include <xrpl/basics/Slice.h>
@@ -41,6 +42,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace xrpl {
@@ -132,12 +134,11 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
         MPTID const& issuanceID,
         std::uint32_t sequence)
     {
-        auto const ctxID = confidentialTxContextID(
-            static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT), account, issuanceID, sequence);
+        auto const ctxID = jtx::cmpt::convertContextID(account, issuanceID, sequence);
         auto const proof = proveRegisterPoK(sk, pk, makeSlice(ctxID));
         if (!proof)
             return {};
-        return strHex(makeSlice(*proof));
+        return jtx::cmpt::hexOf(*proof);
     }
 
     json::Value
@@ -1335,6 +1336,87 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
 
 public:
     void
+    testRegisterPoKBindings()
+    {
+        // Valid register PoK built under the wrong sequence, issuance, or
+        // Account/public-key statement must yield tecBAD_PROOF with no
+        // confidential ledger mutation.
+        testcase("convert register PoK bindings -> tecBAD_PROOF");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const carol{"carol"};
+        env.fund(XRP(10000), alice, bob, carol);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob, carol}, .fund = false});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        mpt.authorize({.account = bob});
+        mpt.authorize({.account = carol});
+        mpt.pay(alice, bob, 100);
+
+        MPTTester mptOther(env, alice, {.holders = {bob}, .fund = false});
+        mptOther.create(
+            {.ownerCount = 2, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mptOther.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+
+        auto const sk = parseScalarHex(kScalar1);
+        auto const pk = parsePointHex(kKeyG);
+        auto const sk2 = parseScalarHex(kScalar2);
+        auto const pk2 = parsePointHex(kKey2G);
+        auto const r = parseScalarHex(kScalar2);
+        BEAST_EXPECT(sk && pk && sk2 && pk2 && r);
+        auto const ct = encryptHex(10, *pk, *r);
+        auto const baseFee = env.current()->fees().base;
+        auto const fee = Fee(10 * baseFee);
+
+        auto snapshot = [&]() {
+            auto sle = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            BEAST_EXPECT(sle);
+            return std::make_tuple(
+                (*sle)[sfMPTAmount],
+                sle->isFieldPresent(sfHolderEncryptionKey),
+                sle->isFieldPresent(sfConfidentialBalanceInbox),
+                (*env.le(keylet::mptIssuance(mpt.issuanceID())))[sfConfidentialOutstandingAmount]);
+        };
+        auto const before = snapshot();
+
+        {
+            // Wrong sequence in PoK context.
+            auto const proof = proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob) + 1);
+            env(convertJV(bob, mpt.issuanceID(), 10, ct, ct, kScalar2, std::string(kKeyG), proof),
+                fee,
+                Ter(tecBAD_PROOF));
+        }
+        {
+            // Wrong issuance ID in PoK context.
+            auto const proof = proofHex(*sk, *pk, bob.id(), mptOther.issuanceID(), env.seq(bob));
+            env(convertJV(bob, mpt.issuanceID(), 10, ct, ct, kScalar2, std::string(kKeyG), proof),
+                fee,
+                Ter(tecBAD_PROOF));
+        }
+        {
+            // PoK for carol's account context, submitted by bob.
+            auto const proof = proofHex(*sk, *pk, carol.id(), mpt.issuanceID(), env.seq(bob));
+            env(convertJV(bob, mpt.issuanceID(), 10, ct, ct, kScalar2, std::string(kKeyG), proof),
+                fee,
+                Ter(tecBAD_PROOF));
+        }
+        {
+            // PoK for a different public key than sfHolderEncryptionKey.
+            auto const proof = proofHex(*sk2, *pk2, bob.id(), mpt.issuanceID(), env.seq(bob));
+            env(convertJV(bob, mpt.issuanceID(), 10, ct, ct, kScalar2, std::string(kKeyG), proof),
+                fee,
+                Ter(tecBAD_PROOF));
+        }
+
+        BEAST_EXPECT(snapshot() == before);
+    }
+
+    void
     run() override
     {
         testHappyPathAndMerge();
@@ -1342,6 +1424,7 @@ public:
         testAmendmentDisabled();
         testIssuerConvertFails();
         testBadProofAndBlinding();
+        testRegisterPoKBindings();
         testDuplicateKey();
         testInsufficientFunds();
         testAuditorRequired();
