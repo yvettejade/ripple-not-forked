@@ -1450,7 +1450,7 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
     testClawbackAdversarialBindings()
     {
         // Wrong sequence, wrong issuance context, and stale issuer-mirror proof
-        // after a legitimate holder ConvertBack state change.
+        // after a legitimate holder Convert state change.
         testcase("clawback adversarial bindings -> tecBAD_PROOF");
         using namespace jtx;
 
@@ -1476,8 +1476,6 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
         mptOther.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
 
         auto sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
-        auto const version = (*sleMpt)[sfConfidentialBalanceVersion];
-        auto const spendingHex = strHex(sleMpt->getFieldVL(sfConfidentialBalanceSpending));
         auto const issuerHex = strHex(sleMpt->getFieldVL(sfIssuerEncryptedBalance));
         auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
         auto const coaBefore = (*sleIss)[sfConfidentialOutstandingAmount];
@@ -1515,54 +1513,42 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
         BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == coaBefore);
 
         {
-            // Stale issuer-mirror proof after a legitimate holder ConvertBack.
-            // Prove clawback(60) against Enc(100), then ConvertBack 40 so the
-            // mirror becomes Enc(60) while COA still admits amount 60.
+            // Stale issuer-mirror proof after a legitimate holder Convert.
+            // Prove clawback(100) against Enc(100) (that blob verifies), then
+            // Convert 40 so the mirror becomes Enc(140) while COA still admits
+            // amount 100. ConvertBack cannot be used here: it lowers COA below
+            // any amount that verifyClawbackSigma can accept for Enc(100).
             auto const staleCtx = jtx::cmpt::clawbackContextID(
                 alice.id(), mpt.issuanceID(), env.seq(alice), bob.id());
             auto const staleProof =
-                proveClawbackSigma(60, *sk, *pk, *issuerCt, makeSlice(staleCtx));
+                proveClawbackSigma(100, *sk, *pk, *issuerCt, makeSlice(staleCtx));
             BEAST_EXPECT(staleProof);
+            BEAST_EXPECT(verifyClawbackSigma(
+                100, *pk, *issuerCt, makeSlice(*staleProof), makeSlice(staleCtx)));
 
-            auto const spending = parseElGamalCiphertext(
-                makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)));
-            auto const rho = parseScalarHex(kScalar2);
             auto const rAmt = parseScalarHex(kScalar1);
-            BEAST_EXPECT(spending && rho && rAmt);
-            auto const zk = makeConvertBackZk(
-                100,
-                40,
-                *rho,
-                *sk,
-                *pk,
-                *spending,
-                bob.id(),
-                mpt.issuanceID(),
-                version,
-                env.seq(bob));
-            auto const pcB = pedersenCommit(100, *rho);
-            BEAST_EXPECT(zk && pcB);
-            env(convertBackJV(
-                    bob,
-                    mpt.issuanceID(),
-                    40,
-                    encryptHex(40, *pk, *rAmt),
-                    encryptHex(40, *pk, *rAmt),
-                    kScalar1,
-                    strHex(pcB->serialize()),
-                    strHex(makeSlice(*zk))),
-                Fee(10 * baseFee));
+            BEAST_EXPECT(rAmt);
+            // Subsequent convert: holder is already opted in, so omit key/PoK.
+            json::Value conv;
+            conv[jss::Account] = bob.human();
+            conv[jss::TransactionType] = jss::ConfidentialMPTConvert;
+            conv[sfMPTokenIssuanceID] = to_string(mpt.issuanceID());
+            conv[sfMPTAmount] = std::to_string(40);
+            conv[sfHolderEncryptedAmount] = encryptHex(40, *pk, *rAmt);
+            conv[sfIssuerEncryptedAmount] = encryptHex(40, *pk, *rAmt);
+            conv[sfBlindingFactor] = kScalar1;
+            env(conv, Fee(10 * baseFee));
             env.close();
 
             // Issuer mirror changed; stale clawback proof must fail.
-            env(clawbackJV(alice, bob, mpt.issuanceID(), 60, strHex(makeSlice(*staleProof))),
+            env(clawbackJV(alice, bob, mpt.issuanceID(), 100, strHex(makeSlice(*staleProof))),
                 fee,
                 Ter(tecBAD_PROOF));
 
             sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
             sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
-            BEAST_EXPECT((*sleMpt)[sfMPTAmount] == 940);
-            BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == 60);
+            BEAST_EXPECT((*sleMpt)[sfMPTAmount] == 860);
+            BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == 140);
             BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfIssuerEncryptedBalance)) != issuerHex);
         }
 
