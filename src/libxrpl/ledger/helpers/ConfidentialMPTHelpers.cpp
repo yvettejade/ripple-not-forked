@@ -132,14 +132,21 @@ confidentialTxContextID(
     std::uint16_t txType,
     AccountID const& account,
     MPTID const& issuanceID,
-    std::uint32_t sequenceOrTicket)
+    std::uint32_t sequenceOrTicket,
+    Slice txSpecific)
 {
-    // Spec gap: Convert PoK addendum does not define TxSpecific; core binding only.
-    std::array<std::uint8_t, 2 + AccountID::kBytes + MPTID::kBytes + 4> msg{};
+    std::vector<std::uint8_t> msg(2 + AccountID::kBytes + MPTID::kBytes + 4 + txSpecific.size());
     writeUint16BE(msg.data(), txType);
     std::memcpy(msg.data() + 2, account.data(), AccountID::kBytes);
     std::memcpy(msg.data() + 2 + AccountID::kBytes, issuanceID.data(), MPTID::kBytes);
     writeUint32BE(msg.data() + 2 + AccountID::kBytes + MPTID::kBytes, sequenceOrTicket);
+    if (!txSpecific.empty())
+    {
+        std::memcpy(
+            msg.data() + 2 + AccountID::kBytes + MPTID::kBytes + 4,
+            txSpecific.data(),
+            txSpecific.size());
+    }
 
     auto const digest = sha512Half(makeSlice(msg));
     std::array<std::uint8_t, 32> out{};
