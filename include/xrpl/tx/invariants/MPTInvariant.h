@@ -124,9 +124,12 @@ private:
  *     sfConfidentialBalanceVersion must also change.
  *  3. COA bounds: 0 ≤ ConfidentialOutstandingAmount ≤ OutstandingAmount on
  *     every touched MPTokenIssuance (non-negativity is inherent for UINT64).
+ *     A deleted issuance must have ConfidentialOutstandingAmount == 0
+ *     (XLS-0096 §7.4); both before and after snapshots are inspected.
  *  4. Deletion blocker: an MPToken that carries any confidential state
  *     (sfHolderEncryptionKey, spending, inbox, issuer mirror, auditor mirror,
- *     or balance version) must not be deleted.
+ *     or balance version) must not be deleted. Either snapshot having
+ *     confidential state is enough to fail (cleanup-then-erase).
  *  5. Issuance flag consistency: an MPToken that carries any confidential
  *     state must reference an existing MPTokenIssuance with
  *     lsfMPTCanHoldConfidentialBalance. Touched issuance IDs are collected

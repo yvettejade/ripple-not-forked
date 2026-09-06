@@ -658,13 +658,24 @@ ValidConfidentialMPT::visitEntry(
             sle.isFieldPresent(sfConfidentialBalanceVersion);
     };
 
-    // Deletion blocker: MPTokens that still carry confidential state must not
-    // be removed. Prefer `after` (erased SLE), matching ValidMPTIssuance.
+    // Deletion: inspect both snapshots. ApplyStateTable::erase keeps the
+    // possibly mutated cached SLE as `after`, while `before` is the
+    // pre-transaction object. XLS-0096 §7.4 forbids deleting an MPToken
+    // once confidential fields have been initialized, and forbids destroying
+    // an issuance unless ConfidentialOutstandingAmount is 0.
     if (isDelete)
     {
-        auto const& deleted = after ? after : before;
-        if (deleted && deleted->getType() == ltMPTOKEN && hasConfidentialState(*deleted))
-            badConfidentialDelete_ = true;
+        for (auto const& sle : {before, after})
+        {
+            if (!sle)
+                continue;
+            if (sle->getType() == ltMPTOKEN && hasConfidentialState(*sle))
+                badConfidentialDelete_ = true;
+            else if (
+                sle->getType() == ltMPTOKEN_ISSUANCE &&
+                (*sle)[sfConfidentialOutstandingAmount] != 0)
+                badCoaBounds_ = true;
+        }
         return;
     }
 
