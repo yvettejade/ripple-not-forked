@@ -1350,18 +1350,151 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
     }
 
     void
+    testConvertBackActualOverdraft()
+    {
+        // Real spending = 10, ConvertBack amount = 20. Global COA stays
+        // sufficient via charlie's confidential balance so preclaim reaches
+        // proofs. Compact sigma is valid for (balance, PC_b); foreign single
+        // BP verifies only for an unrelated commitment. verifyRange64 on
+        // pcRem rejects → tecBAD_PROOF. Deleting that check would let apply.
+        testcase("convert-back actual overdraft reaches range verifier -> tecBAD_PROOF");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        std::uint64_t const bal = 10;
+        std::uint64_t const amount = 20;
+        std::uint64_t const otherBal = 100;
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+
+        auto fundHolder = [&](Account const& holder, std::uint64_t fundAmount) {
+            mpt.authorize({.account = holder});
+            if (fundAmount > 0)
+                mpt.pay(alice, holder, fundAmount > 1000 ? fundAmount : 1000);
+            auto const sk = parseScalarHex(kScalar1);
+            auto const pk = parsePointHex(kKeyG);
+            auto const r = parseScalarHex(kScalar2);
+            BEAST_EXPECT(sk && pk && r);
+            auto const holderCt = encryptHex(fundAmount, *pk, *r);
+            auto const issuerCt = encryptHex(fundAmount, *pk, *r);
+            auto const ctxID =
+                jtx::cmpt::convertContextID(holder.id(), mpt.issuanceID(), env.seq(holder));
+            auto const pok = proveRegisterPoK(*sk, *pk, makeSlice(ctxID));
+            auto const baseFee = env.current()->fees().base;
+            env(convertJV(
+                    holder,
+                    mpt.issuanceID(),
+                    fundAmount,
+                    holderCt,
+                    issuerCt,
+                    kScalar2,
+                    std::string(kKeyG),
+                    strHex(makeSlice(*pok))),
+                Fee(10 * baseFee));
+            env.close();
+            env(mergeJV(holder, mpt.issuanceID()), Fee(10 * baseFee));
+            env.close();
+        };
+        fundHolder(bob, bal);
+        fundHolder(charlie, otherBal);
+
+        auto sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        BEAST_EXPECT(sleMpt);
+        auto const version = (*sleMpt)[sfConfidentialBalanceVersion];
+        auto const mptAmountBefore = (*sleMpt)[sfMPTAmount];
+        auto const spendingHex = strHex(sleMpt->getFieldVL(sfConfidentialBalanceSpending));
+        auto const issuerHex = strHex(sleMpt->getFieldVL(sfIssuerEncryptedBalance));
+        auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        auto const coaBefore = (*sleIss)[sfConfidentialOutstandingAmount];
+        auto const oaBefore = (*sleIss)[sfOutstandingAmount];
+        BEAST_EXPECT(coaBefore >= amount);
+        BEAST_EXPECT(coaBefore == bal + otherBal);
+
+        auto const spending =
+            parseElGamalCiphertext(makeSlice(sleMpt->getFieldVL(sfConfidentialBalanceSpending)));
+        BEAST_EXPECT(spending);
+        auto const sk = parseScalarHex(kScalar1);
+        auto const pk = parsePointHex(kKeyG);
+        auto const rho = parseScalarHex(kScalar2);
+        auto const rAmt = parseScalarHex(kScalar1);
+        auto const foreignBlind = parseScalarHex(kScalar3);
+        BEAST_EXPECT(sk && pk && rho && rAmt && foreignBlind);
+
+        auto const pcB = pedersenCommit(bal, *rho);
+        BEAST_EXPECT(pcB);
+        auto const ctxID =
+            jtx::cmpt::convertBackContextID(bob.id(), mpt.issuanceID(), env.seq(bob), version);
+        auto const sigma =
+            proveConvertBackSigma(bal, *rho, *sk, *pk, *spending, *pcB, makeSlice(ctxID));
+        BEAST_EXPECT(sigma);
+        BEAST_EXPECT(
+            verifyConvertBackSigma(*pk, *spending, *pcB, makeSlice(*sigma), makeSlice(ctxID)));
+
+        auto const mG = generatorMultiply(Secp256k1Field::fromUint64(amount));
+        BEAST_EXPECT(mG);
+        auto const pcRem = pointSubtract(*pcB, *mG);
+        BEAST_EXPECT(pcRem);
+
+        // Foreign nonnegative opening: BP verifies alone, not against pcRem.
+        std::uint64_t const foreignValue = 5;
+        auto const foreignBp = jtx::cmpt::makeForeignSingleBulletproof(foreignValue, *foreignBlind);
+        BEAST_EXPECT(foreignBp && foreignBp->bulletproofIsForeign && foreignBp->foreignCommitment);
+        BEAST_EXPECT(verifyRange64(*foreignBp->foreignCommitment, makeSlice(foreignBp->proof)));
+        BEAST_EXPECT(!verifyRange64(*pcRem, makeSlice(foreignBp->proof)));
+
+        auto const annotated = jtx::cmpt::annotateConvertBackZk(
+            *sigma,
+            foreignBp->proof,
+            /*sigmaValidForBuiltStatement=*/true,
+            /*bulletproofIsForeign=*/true);
+        BEAST_EXPECT(annotated && annotated->sigmaValidForBuiltStatement);
+        BEAST_EXPECT(annotated->bulletproofIsForeign);
+
+        auto const baseFee = env.current()->fees().base;
+        env(convertBackJV(
+                bob,
+                mpt.issuanceID(),
+                amount,
+                encryptHex(amount, *pk, *rAmt),
+                encryptHex(amount, *pk, *rAmt),
+                kScalar1,
+                strHex(pcB->serialize()),
+                strHex(makeSlice(annotated->bytes))),
+            Fee(10 * baseFee),
+            Ter(tecBAD_PROOF));
+
+        sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT((*sleMpt)[sfMPTAmount] == mptAmountBefore);
+        BEAST_EXPECT((*sleMpt)[sfConfidentialBalanceVersion] == version);
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfConfidentialBalanceSpending)) == spendingHex);
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfIssuerEncryptedBalance)) == issuerHex);
+        BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == coaBefore);
+        BEAST_EXPECT((*sleIss)[sfOutstandingAmount] == oaBefore);
+    }
+
+    void
     testConvertBackAdversarialBindings()
     {
         // Sigma-only tamper; wrong blinding reconstruct; claimed balance/PC_b
-        // mismatch with a valid BP on the claimed remainder; wrong version and
-        // sequence contexts. All tecBAD_PROOF with unchanged ledger.
+        // mismatch with a valid BP on the claimed remainder; wrong version,
+        // sequence, Account (TxSpecific/context), and issuance contexts. All
+        // tecBAD_PROOF with unchanged ledger.
         testcase("convert-back adversarial bindings -> tecBAD_PROOF");
         using namespace jtx;
 
         Env env{*this, withConfidential()};
         Account const alice{"alice"};
         Account const bob{"bob"};
-        env.fund(XRP(10000), alice, bob);
+        Account const carol{"carol"};
+        env.fund(XRP(10000), alice, bob, carol);
         env.close();
 
         std::uint64_t const bal = 100;
@@ -1369,6 +1502,11 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
         MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
         fundConvertMerge(
             env, alice, bob, mpt, bal, tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer);
+
+        MPTTester mptOther(env, alice, {.holders = {bob}, .fund = false});
+        mptOther.create(
+            {.ownerCount = 2, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mptOther.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
 
         auto sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
         BEAST_EXPECT(sleMpt);
@@ -1528,6 +1666,63 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
                 kScalar1,
                 strHex(pcB->serialize()),
                 strHex(makeSlice(*zk)));
+        }
+        {
+            // Wrong Account in TxSpecific/context; submit as bob against real
+            // holder/issuance.
+            auto const pcB = pedersenCommit(bal, *rho);
+            BEAST_EXPECT(pcB);
+            auto const ctxID = jtx::cmpt::convertBackContextID(
+                carol.id(), mpt.issuanceID(), env.seq(bob), version);
+            auto const sigma =
+                proveConvertBackSigma(bal, *rho, *sk, *pk, *spending, *pcB, makeSlice(ctxID));
+            BEAST_EXPECT(sigma);
+            BEAST_EXPECT(
+                verifyConvertBackSigma(*pk, *spending, *pcB, makeSlice(*sigma), makeSlice(ctxID)));
+            auto const mG = generatorMultiply(Secp256k1Field::fromUint64(m));
+            BEAST_EXPECT(mG);
+            auto const pcRem = pointSubtract(*pcB, *mG);
+            BEAST_EXPECT(pcRem);
+            auto const bp = proveRange64(bal - m, *rho, *pcRem);
+            BEAST_EXPECT(bp);
+            auto const annotated = jtx::cmpt::annotateConvertBackZk(
+                *sigma, *bp, /*sigmaValidForBuiltStatement=*/true, /*bulletproofIsForeign=*/false);
+            BEAST_EXPECT(annotated && annotated->sigmaValidForBuiltStatement);
+            submit(
+                m,
+                encryptHex(m, *pk, *rAmt),
+                encryptHex(m, *pk, *rAmt),
+                kScalar1,
+                strHex(pcB->serialize()),
+                strHex(makeSlice(annotated->bytes)));
+        }
+        {
+            // Wrong valid issuance ID in context; submit against real issuance.
+            auto const pcB = pedersenCommit(bal, *rho);
+            BEAST_EXPECT(pcB);
+            auto const ctxID = jtx::cmpt::convertBackContextID(
+                bob.id(), mptOther.issuanceID(), env.seq(bob), version);
+            auto const sigma =
+                proveConvertBackSigma(bal, *rho, *sk, *pk, *spending, *pcB, makeSlice(ctxID));
+            BEAST_EXPECT(sigma);
+            BEAST_EXPECT(
+                verifyConvertBackSigma(*pk, *spending, *pcB, makeSlice(*sigma), makeSlice(ctxID)));
+            auto const mG = generatorMultiply(Secp256k1Field::fromUint64(m));
+            BEAST_EXPECT(mG);
+            auto const pcRem = pointSubtract(*pcB, *mG);
+            BEAST_EXPECT(pcRem);
+            auto const bp = proveRange64(bal - m, *rho, *pcRem);
+            BEAST_EXPECT(bp);
+            auto const annotated = jtx::cmpt::annotateConvertBackZk(
+                *sigma, *bp, /*sigmaValidForBuiltStatement=*/true, /*bulletproofIsForeign=*/false);
+            BEAST_EXPECT(annotated && annotated->sigmaValidForBuiltStatement);
+            submit(
+                m,
+                encryptHex(m, *pk, *rAmt),
+                encryptHex(m, *pk, *rAmt),
+                kScalar1,
+                strHex(pcB->serialize()),
+                strHex(makeSlice(annotated->bytes)));
         }
 
         sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
@@ -2235,6 +2430,7 @@ class ConfidentialMPTConvertBackClawback_test : public beast::unit_test::Suite
         testConvertBackAuditorUnrepresentableSubtraction();
         testUnauthorizedConvertBack();
         testConvertBackBulletproofTamper();
+        testConvertBackActualOverdraft();
         testConvertBackAdversarialBindings();
         testConvertBackRejectGates();
         testClawbackHappy();

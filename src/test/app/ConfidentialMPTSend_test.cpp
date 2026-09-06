@@ -282,7 +282,8 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         std::optional<std::uint32_t> contextVersion = std::nullopt,
         std::optional<std::uint32_t> contextSequence = std::nullopt,
         bool permuteDestIssuerRolesInSigma = false,
-        Secp256k1Scalar const* destAmountRandomness = nullptr)
+        Secp256k1Scalar const* destAmountRandomness = nullptr,
+        std::optional<MPTID> contextIssuanceID = std::nullopt)
     {
         auto sleSender = env.le(keylet::mptoken(issuanceID, sender.id()));
         if (!sleSender)
@@ -359,8 +360,9 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         auto const ctxDest = contextDestination.value_or(destination.id());
         auto const ctxVersion = contextVersion.value_or(version);
         auto const ctxSeq = contextSequence.value_or(env.seq(sender));
+        auto const ctxIssuance = contextIssuanceID.value_or(issuanceID);
         auto const ctxID =
-            jtx::cmpt::sendContextID(sender.id(), issuanceID, ctxSeq, ctxDest, ctxVersion);
+            jtx::cmpt::sendContextID(sender.id(), ctxIssuance, ctxSeq, ctxDest, ctxVersion);
 
         auto const sigma = proveSendSigma(
             amount,
@@ -1228,10 +1230,9 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
             Ter(tecNO_PERMISSION));
     }
 
-    // TransferFee mutex: ConfidentialMPTSend::preclaim rejects nonzero
-    // TransferFee, but create+set cannot produce confidential + nonzero fee
-    // together. Coverage lives in ConfidentialMPTIssuance_test::testTransferFeeMutex;
-    // no Send jtx forces that unreachable ledger state.
+    // TransferFee mutex: create+set cannot produce confidential + nonzero fee
+    // together. Covered by ConfidentialMPTIssuance_test::testTransferFeeMutex
+    // and OpenLedger injection in testSendHolderLocksAndTransferFee.
 
     void
     testSendLocked()
@@ -2736,8 +2737,9 @@ public:
     testSendContextAndRoleBindings()
     {
         // Internally consistent proofs for a false destination, CBS version,
-        // sequence, or permuted dest/issuer sigma roles must not apply. Also
-        // covers the explicit same-C1 gate via mismatched dest randomness.
+        // sequence, issuance ID, or permuted dest/issuer sigma roles must not
+        // apply. Also covers the explicit same-C1 gate via mismatched dest
+        // randomness.
         testcase("send context/role/C1 bindings -> tecBAD_PROOF");
         using namespace jtx;
 
@@ -2759,6 +2761,11 @@ public:
         MPTTester mpt(env, alice, {.holders = {bob, charlie, debbie}, .fund = false});
         mpt.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
         mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKey2G});
+
+        MPTTester mptOther(env, alice, {.holders = {bob}, .fund = false});
+        mptOther.create(
+            {.ownerCount = 2, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mptOther.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKey2G});
 
         auto fund = [&](Account const& holder, std::uint64_t amount) {
             mpt.authorize({.account = holder});
@@ -2985,6 +2992,33 @@ public:
                 BEAST_EXPECT(w->destCt != w->senderCt);
                 submitBad(*w);
             }
+        }
+        {
+            // Proof built under a different valid issuance ID in
+            // confidentialTxContextID; submitted against the real issuance.
+            auto const w = buildSendWitness(
+                env,
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                100,
+                25,
+                nullptr,
+                std::nullopt,
+                nullptr,
+                &*holderSk,
+                &*holderPk,
+                &*holderPk,
+                &*issuerPk,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                false,
+                nullptr,
+                mptOther.issuanceID());
+            BEAST_EXPECT(w);
+            if (w)
+                submitBad(*w);
         }
 
         BEAST_EXPECT(snapshot() == before);
