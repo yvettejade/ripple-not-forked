@@ -1136,6 +1136,7 @@ TRANSACTION(ttCONFIDENTIAL_MPT_SEND, 88, ConfidentialMPTSend,
     featureConfidentialTransfer,
     NoPriv, ({
     {sfDestination, SoeRequired},
+    {sfDestinationTag, SoeOptional},
     {sfMPTokenIssuanceID, SoeRequired},
     {sfSenderEncryptedAmount, SoeRequired},
     {sfDestinationEncryptedAmount, SoeRequired},
