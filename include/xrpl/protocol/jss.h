@@ -33,13 +33,17 @@ JSS(Asset);                       // in: AMM Asset1
 JSS(Asset2);                      // in: AMM Asset2
 JSS(AssetClass);                  // in: Oracle
 JSS(AssetPrice);                  // in: Oracle
+JSS(AmountCommitment);            // field: XLS-0096 confidential MPT
+JSS(AuditorEncryptedAmount);      // field: XLS-0096 confidential MPT
 JSS(AuditorEncryptedBalance);     // field: XLS-0096 confidential MPT
 JSS(AuditorEncryptionKey);        // field: XLS-0096 confidential MPT
 JSS(AuthAccount);                 // in: AMM Auction Slot
 JSS(AuthAccounts);                // in: AMM Auction Slot
+JSS(BalanceCommitment);           // field: XLS-0096 confidential MPT
 JSS(BaseAsset);                   // in: Oracle
 JSS(BidMax);                      // in: AMM Bid
 JSS(BidMin);                      // in: AMM Bid
+JSS(BlindingFactor);              // field: XLS-0096 confidential MPT
 JSS(ClearFlag);                   // field.
 JSS(ConfidentialBalanceInbox);    // field: XLS-0096 confidential MPT
 JSS(ConfidentialBalanceSpending); // field: XLS-0096 confidential MPT
@@ -50,14 +54,17 @@ JSS(CounterpartySignature);       // field.
 JSS(DeliverMax);                  // out: alias to Amount
 JSS(DeliverMin);                  // in: TransactionSign
 JSS(Destination);                 // in: TransactionSign; field.
+JSS(DestinationEncryptedAmount);  // field: XLS-0096 confidential MPT
 JSS(EPrice);                      // in: AMM Deposit option
 JSS(Fee);                         // in/out: TransactionSign; field.
 JSS(Flags);                       // in/out: TransactionSign; field.
 JSS(Holder);                      // field.
+JSS(HolderEncryptedAmount);       // field: XLS-0096 confidential MPT
 JSS(HolderEncryptionKey);         // field: XLS-0096 confidential MPT
 JSS(ImmutableFlags);              // field: XLS-0096 confidential MPT
 JSS(Invalid);                     //
 JSS(Issuer);                      // in: Credential transactions
+JSS(IssuerEncryptedAmount);       // field: XLS-0096 confidential MPT
 JSS(IssuerEncryptedBalance);      // field: XLS-0096 confidential MPT
 JSS(IssuerEncryptionKey);         // field: XLS-0096 confidential MPT
 JSS(IssuingChainDoor);            // field.
@@ -83,6 +90,7 @@ JSS(RawTransaction);              // in: Batch
 JSS(RawTransactions);             // in: Batch
 JSS(SLE_hit_rate);                // out: GetCounts.
 JSS(Scale);                       // field.
+JSS(SenderEncryptedAmount);       // field: XLS-0096 confidential MPT
 JSS(SettleDelay);                 // in: TransactionSign
 JSS(SendMax);                     // in: TransactionSign
 JSS(Sequence);                    // in/out: TransactionSign; field.
@@ -99,6 +107,7 @@ JSS(TransferRate);                // in: TransferRate.
 JSS(TxnSignature);                // field.
 JSS(URI);                         // field.
 JSS(VoteSlots);                   // out: AMM Vote
+JSS(ZKProof);                     // field: XLS-0096 confidential MPT
 JSS(aborted);                     // out: InboundLedger
 JSS(accepted);                    // out: LedgerToJson, OwnerInfo, SubmitTransaction
 JSS(accountState);                // out: LedgerToJson

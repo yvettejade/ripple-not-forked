@@ -75,6 +75,14 @@ public:
     challenge();
 };
 
+/** Reduce message bytes to a curve scalar via SHA-512 + first-32 + counter.
+
+    Same algorithm as CompactTranscript::challenge (spec gap on H / Z_n).
+    Used by EncZero and Fiat–Shamir challenges so callers do not reimplement.
+*/
+[[nodiscard]] std::optional<Secp256k1Scalar>
+hashToCurveScalar(Slice message);
+
 /** Schnorr PoK of sk for pk = sk·G. Domain "CMPT_POK_SK_REGISTER".
     Proof π = (e, s), 64 bytes. Equations (5)–(7).
 */

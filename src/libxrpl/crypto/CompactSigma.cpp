@@ -216,14 +216,14 @@ CompactTranscript::append(Slice bytes)
 }
 
 std::optional<Secp256k1Scalar>
-CompactTranscript::challenge()
+hashToCurveScalar(Slice message)
 {
     // Spec gap: H() and Z_n reduction are unspecified. SHA-512 + counter below.
     for (unsigned counter = 0; counter < 256; ++counter)
     {
         SHA512_CTX ctx;
         SHA512_Init(&ctx);
-        SHA512_Update(&ctx, buf_.data(), buf_.size());
+        SHA512_Update(&ctx, message.data(), message.size());
         if (counter > 0)
         {
             auto const c = static_cast<std::uint8_t>(counter - 1);
@@ -237,6 +237,12 @@ CompactTranscript::challenge()
     // LCOV_EXCL_START
     return std::nullopt;
     // LCOV_EXCL_STOP
+}
+
+std::optional<Secp256k1Scalar>
+CompactTranscript::challenge()
+{
+    return hashToCurveScalar(makeSlice(buf_));
 }
 
 //------------------------------------------------------------------------------

@@ -1080,6 +1080,35 @@ TRANSACTION(ttLOAN_PAY, 84, LoanPay,
     {sfAmount, SoeRequired, SoeMptSupported},
 }))
 
+/** Convert public MPT balance into confidential form (XLS-0096). */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
+#endif
+TRANSACTION(ttCONFIDENTIAL_MPT_CONVERT, 85, ConfidentialMPTConvert,
+    Delegation::NotDelegable,
+    featureConfidentialTransfer,
+    NoPriv, ({
+    {sfMPTokenIssuanceID, SoeRequired},
+    {sfMPTAmount, SoeRequired},
+    {sfHolderEncryptedAmount, SoeRequired},
+    {sfIssuerEncryptedAmount, SoeRequired},
+    {sfAuditorEncryptedAmount, SoeOptional},
+    {sfBlindingFactor, SoeRequired},
+    {sfHolderEncryptionKey, SoeOptional},
+    {sfZKProof, SoeOptional},
+}))
+
+/** Merge confidential inbox into spending balance (XLS-0096). */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
+#endif
+TRANSACTION(ttCONFIDENTIAL_MPT_MERGE_INBOX, 86, ConfidentialMPTMergeInbox,
+    Delegation::NotDelegable,
+    featureConfidentialTransfer,
+    NoPriv, ({
+    {sfMPTokenIssuanceID, SoeRequired},
+}))
+
 /** This system-generated transaction type is used to update the status of the various amendments.
 
     For details, see: https://xrpl.org/amendments.html

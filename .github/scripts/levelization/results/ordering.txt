@@ -9,6 +9,7 @@ libxrpl.crypto > xrpl.crypto
 libxrpl.json > xrpl.basics
 libxrpl.json > xrpl.json
 libxrpl.ledger > xrpl.basics
+libxrpl.ledger > xrpl.crypto
 libxrpl.ledger > xrpl.json
 libxrpl.ledger > xrpl.ledger
 libxrpl.ledger > xrpl.nodestore
@@ -56,6 +57,7 @@ test.app > test.toplevel
 test.app > test.unit_test
 test.app > xrpl.basics
 test.app > xrpl.core
+test.app > xrpl.crypto
 test.app > xrpld.app
 test.app > xrpld.consensus
 test.app > xrpld.core
@@ -213,6 +215,7 @@ xrpl.core > xrpl.protocol
 xrpl.crypto > xrpl.basics
 xrpl.json > xrpl.basics
 xrpl.ledger > xrpl.basics
+xrpl.ledger > xrpl.crypto
 xrpl.ledger > xrpl.protocol
 xrpl.ledger > xrpl.shamap
 xrpl.net > xrpl.basics
@@ -243,7 +246,6 @@ xrpl.shamap > xrpl.protocol
 xrpl.tx > xrpl.basics
 xrpl.tx > xrpl.core
 xrpl.tx > xrpl.ledger
-xrpl.tx > xrpl.protocol
 xrpld.app > test.unit_test
 xrpld.app > xrpl.basics
 xrpld.app > xrpl.core
