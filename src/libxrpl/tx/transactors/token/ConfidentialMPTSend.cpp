@@ -71,7 +71,7 @@ homomorphicAdd(SLE& sle, SF_VL const& field, Slice addition)
         return tefINTERNAL;  // LCOV_EXCL_LINE
     auto const sum = homomorphicAddCiphertexts(makeSlice(sle.getFieldVL(field)), addition);
     if (!sum)
-        return tefINTERNAL;
+        return tecINTERNAL;  // Defense: preclaim should have caught this.
     sle.setFieldVL(field, *sum);
     return tesSUCCESS;
 }
@@ -105,6 +105,30 @@ parseSigmaChallenge(Slice sigma)
     if (sigma.size() < Secp256k1Scalar::kSerializedSize)
         return std::nullopt;  // LCOV_EXCL_LINE
     return Secp256k1Scalar::parse(Slice(sigma.data(), Secp256k1Scalar::kSerializedSize));
+}
+
+/** amountCt ⊕ Enc(0; e) must be constructible (tecBAD_PROOF) and then
+    representable against the destination mirror (tecINTERNAL). */
+[[nodiscard]] TER
+checkDestMirrorCredit(
+    SLE const& sleDest,
+    SF_VL const& mirrorField,
+    ElGamalCiphertext const& amountCt,
+    Secp256k1Point const& pk,
+    Secp256k1Scalar const& e)
+{
+    auto const encZero = ElGamalCiphertext::encrypt(0, pk, e);
+    if (!encZero)
+        return tecBAD_PROOF;  // LCOV_EXCL_LINE
+    auto const credited = amountCt.add(*encZero);
+    if (!credited)
+        return tecBAD_PROOF;
+    auto const current = parseElGamalCiphertext(makeSlice(sleDest.getFieldVL(mirrorField)));
+    if (!current)
+        return tecNO_PERMISSION;  // LCOV_EXCL_LINE
+    if (!current->add(*credited))
+        return tecINTERNAL;
+    return tesSUCCESS;
 }
 
 }  // namespace
@@ -286,12 +310,14 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     recipientPks.push_back(*issuerPk);
     ciphertexts.push_back(*issuerCt);
 
+    std::optional<Secp256k1Point> auditorPk;
+    std::optional<ElGamalCiphertext> auditorCt;
     if (hasAuditorAmt)
     {
-        auto const auditorPk = parsePk(sleIssuance->getFieldVL(sfAuditorEncryptionKey));
+        auditorPk = parsePk(sleIssuance->getFieldVL(sfAuditorEncryptionKey));
         if (!auditorPk)
             return tecNO_PERMISSION;  // LCOV_EXCL_LINE
-        auto const auditorCt = parseElGamalCiphertext(tx[sfAuditorEncryptedAmount]);
+        auditorCt = parseElGamalCiphertext(tx[sfAuditorEncryptedAmount]);
         if (!auditorCt)
             return temBAD_CIPHERTEXT;  // LCOV_EXCL_LINE
         if (!sameC1(*senderCt, *auditorCt))
@@ -350,6 +376,19 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         return tecNO_PERMISSION;  // LCOV_EXCL_LINE
     if (!currentInbox->add(*inboxPlus))
         return tecBAD_PROOF;
+
+    // After proof/e are known: dest issuer (and optional auditor) credit
+    // amountCt ⊕ Enc(0;e) must be representable against current mirrors.
+    // Construction failures → tecBAD_PROOF; unrepresentable arithmetic → tecINTERNAL.
+    if (auto const ter =
+            checkDestMirrorCredit(*sleDest, sfIssuerEncryptedBalance, *issuerCt, *issuerPk, *e))
+        return ter;
+    if (hasAuditorAmt)
+    {
+        if (auto const ter = checkDestMirrorCredit(
+                *sleDest, sfAuditorEncryptedBalance, *auditorCt, *auditorPk, *e))
+            return ter;
+    }
 
     // Sender-side balance updates must be representable before doApply.
     // Equal amount/balance ciphertexts yield the point at infinity under
