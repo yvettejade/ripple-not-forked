@@ -30,6 +30,7 @@
 #include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/TER.h>
@@ -40,6 +41,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -1417,6 +1419,220 @@ public:
     }
 
     void
+    testConvertRejectGates()
+    {
+        // Table of attacker-reachable convert preflight/preclaim gates not
+        // already covered by focused cases (locks, auditor-required, PoK bind).
+        testcase("convert rejection gates");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        mpt.authorize({.account = bob});
+        mpt.pay(alice, bob, 1000);
+        mpt.authorize({.account = charlie});
+        mpt.pay(alice, charlie, 100);
+
+        auto const sk = parseScalarHex(kScalar1);
+        auto const pk = parsePointHex(kKeyG);
+        auto const r = parseScalarHex(kScalar2);
+        BEAST_EXPECT(sk && pk && r);
+        auto const fee = Fee(10 * env.current()->fees().base);
+        auto const ct = encryptHex(10, *pk, *r);
+        auto const proof = proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob));
+
+        auto snapBob = [&]() {
+            auto sle = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            return std::make_tuple(
+                (*sle)[sfMPTAmount],
+                (*sleIss)[sfConfidentialOutstandingAmount],
+                sle->isFieldPresent(sfHolderEncryptionKey));
+        };
+        auto const before = snapBob();
+
+        // amount > max → temBAD_AMOUNT
+        {
+            auto j =
+                convertJV(bob, mpt.issuanceID(), 10, ct, ct, kScalar2, std::string(kKeyG), proof);
+            j[sfMPTAmount.jsonName] = std::to_string(kMaxMpTokenAmount + 1);
+            env(j, fee, Ter(temBAD_AMOUNT));
+        }
+
+        // Holder key XOR ZKProof combinations + wrong register proof size.
+        env(convertJV(
+                bob, mpt.issuanceID(), 10, ct, ct, kScalar2, std::string(kKeyG), std::nullopt),
+            fee,
+            Ter(temMALFORMED));
+        env(convertJV(bob, mpt.issuanceID(), 10, ct, ct, kScalar2, std::nullopt, proof),
+            fee,
+            Ter(temMALFORMED));
+        env(convertJV(
+                bob,
+                mpt.issuanceID(),
+                10,
+                ct,
+                ct,
+                kScalar2,
+                std::string(kKeyG),
+                std::string(32, '0')),
+            fee,
+            Ter(temMALFORMED));
+
+        // Neither tx nor ledger holder key → tecNO_PERMISSION
+        env(convertJV(bob, mpt.issuanceID(), 10, ct, ct, kScalar2), fee, Ter(tecNO_PERMISSION));
+
+        // Missing issuance / missing token
+        env(convertJV(
+                bob,
+                makeMptID(1, alice.id()),
+                10,
+                ct,
+                ct,
+                kScalar2,
+                std::string(kKeyG),
+                proofHex(*sk, *pk, bob.id(), makeMptID(1, alice.id()), env.seq(bob))),
+            fee,
+            Ter(tecOBJECT_NOT_FOUND));
+        {
+            Account const ghost{"ghost"};
+            env.fund(XRP(10000), ghost);
+            env.close();
+            env(convertJV(
+                    ghost,
+                    mpt.issuanceID(),
+                    10,
+                    ct,
+                    ct,
+                    kScalar2,
+                    std::string(kKeyG),
+                    proofHex(*sk, *pk, ghost.id(), mpt.issuanceID(), env.seq(ghost))),
+                fee,
+                Ter(tecOBJECT_NOT_FOUND));
+        }
+
+        // Issuance lacks confidential flag
+        {
+            MPTTester plain(env, alice, {.holders = {charlie}, .fund = false});
+            plain.create({.flags = tfMPTCanTransfer});
+            plain.authorize({.account = charlie});
+            plain.pay(alice, charlie, 50);
+            env(convertJV(
+                    charlie,
+                    plain.issuanceID(),
+                    10,
+                    ct,
+                    ct,
+                    kScalar2,
+                    std::string(kKeyG),
+                    proofHex(*sk, *pk, charlie.id(), plain.issuanceID(), env.seq(charlie))),
+                fee,
+                Ter(tecNO_PERMISSION));
+        }
+
+        // Confidential flag set but issuer key missing
+        {
+            MPTTester noKey(env, alice, {.holders = {charlie}, .fund = false});
+            noKey.create({.flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            // Do not upload issuer key.
+            noKey.authorize({.account = charlie});
+            noKey.pay(alice, charlie, 50);
+            env(convertJV(
+                    charlie,
+                    noKey.issuanceID(),
+                    10,
+                    ct,
+                    ct,
+                    kScalar2,
+                    std::string(kKeyG),
+                    proofHex(*sk, *pk, charlie.id(), noKey.issuanceID(), env.seq(charlie))),
+                fee,
+                Ter(tecNO_PERMISSION));
+        }
+
+        // Issuer CT reconstruction failure distinct from holder (holder CT valid).
+        {
+            auto const issuerBad = encryptHex(11, *pk, *r);  // wrong amount under issuer key
+            env(convertJV(
+                    bob,
+                    mpt.issuanceID(),
+                    10,
+                    ct,
+                    issuerBad,
+                    kScalar2,
+                    std::string(kKeyG),
+                    proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob))),
+                fee,
+                Ter(tecBAD_PROOF));
+        }
+
+        // Auditor amount present without auditor key → tecNO_PERMISSION
+        {
+            auto const auditorPk = parsePointHex(kKey2G);
+            auto const auditorCt = encryptHex(10, *auditorPk, *r);
+            env(convertJV(
+                    bob,
+                    mpt.issuanceID(),
+                    10,
+                    ct,
+                    ct,
+                    kScalar2,
+                    std::string(kKeyG),
+                    proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob)),
+                    auditorCt),
+                fee,
+                Ter(tecNO_PERMISSION));
+        }
+
+        BEAST_EXPECT(snapBob() == before);
+    }
+
+    void
+    testMergeMissingObjectAndFlag()
+    {
+        // Merge gaps: issuance lacks confidential flag; MPToken missing.
+        testcase("merge missing MPToken / confidential flag");
+        using namespace jtx;
+
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+            MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+            mpt.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+            mpt.authorize({.account = bob});
+            auto const fee = Fee(10 * env.current()->fees().base);
+            env(mergeJV(bob, mpt.issuanceID()), fee, Ter(tecNO_PERMISSION));
+        }
+
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+            MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            // bob never authorized — no MPToken
+            auto const fee = Fee(10 * env.current()->fees().base);
+            env(mergeJV(bob, mpt.issuanceID()), fee, Ter(tecOBJECT_NOT_FOUND));
+            BEAST_EXPECT(!env.le(keylet::mptoken(mpt.issuanceID(), bob.id())));
+        }
+    }
+
+    void
     run() override
     {
         testHappyPathAndMerge();
@@ -1439,6 +1655,8 @@ public:
         testUnauthorizedMergeInbox();
         testDomainAuthMergeInbox();
         testDomainAuthMergeInboxReject();
+        testConvertRejectGates();
+        testMergeMissingObjectAndFlag();
     }
 };
 

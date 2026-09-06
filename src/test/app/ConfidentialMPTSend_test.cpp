@@ -19,6 +19,8 @@
 
 #include <test/jtx.h>
 #include <test/jtx/ConfidentialProofHarness.h>
+#include <test/jtx/credentials.h>
+#include <test/jtx/deposit.h>
 #include <test/jtx/mpt.h>
 
 #include <xrpl/basics/Slice.h>
@@ -32,15 +34,18 @@
 #include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/TER.h>
 #include <xrpl/protocol/TxFlags.h>
+#include <xrpl/protocol/detail/STVar.h>
 #include <xrpl/protocol/jss.h>
 
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -2915,6 +2920,775 @@ public:
         BEAST_EXPECT(sleCharlie->getFieldVL(sfConfidentialBalanceInbox) == inboxBefore);
     }
 
+    // Shared three-party confidential send fixture used by rejection-gate tables.
+    struct SendRejectFixture
+    {
+        ConfidentialMPTSend_test& suite;
+        jtx::Env env;
+        jtx::Account alice{"alice"};
+        jtx::Account bob{"bob"};
+        jtx::Account charlie{"charlie"};
+        std::unique_ptr<jtx::MPTTester> mpt;
+        std::optional<SendWitness> w;
+        XRPAmount fee{0};
+
+        explicit SendRejectFixture(ConfidentialMPTSend_test& s, std::uint32_t createFlags)
+            : suite(s), env{s, s.withConfidential()}
+        {
+            using namespace jtx;
+            env.fund(XRP(10000), alice, bob, charlie);
+            env.close();
+            mpt = std::make_unique<MPTTester>(
+                env, alice, MPTInit{.holders = {bob, charlie}, .fund = false});
+            mpt->create({.ownerCount = 1, .flags = createFlags});
+            mpt->set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            suite.fundConvertMerge(env, alice, bob, *mpt, 100);
+            suite.fundConvertMerge(env, alice, charlie, *mpt, 1);
+            w = suite.buildSendWitness(env, bob, charlie, mpt->issuanceID(), 100, 10);
+            fee = 10 * env.current()->fees().base;
+        }
+
+        json::Value
+        jv() const
+        {
+            return suite.sendJV(
+                bob,
+                charlie,
+                mpt->issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex);
+        }
+
+        auto
+        snapshot() const
+        {
+            auto sleBob = env.le(keylet::mptoken(mpt->issuanceID(), bob.id()));
+            auto sleCharlie = env.le(keylet::mptoken(mpt->issuanceID(), charlie.id()));
+            return std::make_tuple(
+                (*sleBob)[sfConfidentialBalanceVersion],
+                sleBob->getFieldVL(sfConfidentialBalanceSpending),
+                sleCharlie->getFieldVL(sfConfidentialBalanceInbox),
+                sleCharlie->getFieldVL(sfIssuerEncryptedBalance));
+        }
+    };
+
+    void
+    testSendPreflightMalformed()
+    {
+        // Distinct preflight groups: missing/malformed required CTs, optional
+        // auditor CT, and commitment sizes/points. Bad ZK length already covered.
+        testcase("send preflight malformed fields");
+        using namespace jtx;
+
+        SendRejectFixture fx{*this, tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer};
+        BEAST_EXPECT(fx.w);
+        if (!fx.w)
+            return;
+
+        auto const before = fx.snapshot();
+        auto const fee = Fee(fx.fee);
+        std::string const badCt(10, '0');
+        std::string const badPoint(32, '0');  // not 33-byte compressed point
+        std::string const invalidPoint =
+            "020000000000000000000000000000000000000000000000000000000000000000";
+
+        struct Case
+        {
+            char const* name;
+            std::function<void(json::Value&)> mutate;
+            TER expect;
+        };
+        std::vector<Case> cases = {
+            {"missing sender CT",
+             [](json::Value& j) { j.removeMember(sfSenderEncryptedAmount.jsonName); },
+             temMALFORMED},
+            {"missing dest CT",
+             [](json::Value& j) { j.removeMember(sfDestinationEncryptedAmount.jsonName); },
+             temMALFORMED},
+            {"missing issuer CT",
+             [](json::Value& j) { j.removeMember(sfIssuerEncryptedAmount.jsonName); },
+             temMALFORMED},
+            {"malformed sender CT",
+             [&](json::Value& j) { j[sfSenderEncryptedAmount.jsonName] = badCt; },
+             temBAD_CIPHERTEXT},
+            {"malformed dest CT",
+             [&](json::Value& j) { j[sfDestinationEncryptedAmount.jsonName] = badCt; },
+             temBAD_CIPHERTEXT},
+            {"malformed issuer CT",
+             [&](json::Value& j) { j[sfIssuerEncryptedAmount.jsonName] = badCt; },
+             temBAD_CIPHERTEXT},
+            {"malformed optional auditor CT",
+             [&](json::Value& j) { j[sfAuditorEncryptedAmount.jsonName] = badCt; },
+             temBAD_CIPHERTEXT},
+            {"short balance commitment",
+             [&](json::Value& j) { j[sfBalanceCommitment.jsonName] = badPoint; },
+             temMALFORMED},
+            {"invalid balance commitment point",
+             [&](json::Value& j) { j[sfBalanceCommitment.jsonName] = invalidPoint; },
+             temMALFORMED},
+            {"short amount commitment",
+             [&](json::Value& j) { j[sfAmountCommitment.jsonName] = badPoint; },
+             temMALFORMED},
+            {"invalid amount commitment point",
+             [&](json::Value& j) { j[sfAmountCommitment.jsonName] = invalidPoint; },
+             temMALFORMED},
+        };
+
+        for (auto const& c : cases)
+        {
+            auto j = fx.jv();
+            c.mutate(j);
+            fx.env(j, fee, Ter(c.expect));
+            BEAST_EXPECT(fx.snapshot() == before);
+        }
+    }
+
+    void
+    testSendCredentialRejects()
+    {
+        testcase("send CredentialIDs rejection gates");
+        using namespace jtx;
+
+        // checkFields: empty / duplicate / oversize → temMALFORMED (preflight).
+        {
+            SendRejectFixture fx{*this, tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer};
+            BEAST_EXPECT(fx.w);
+            if (!fx.w)
+                return;
+            auto const before = fx.snapshot();
+            auto const fee = Fee(fx.fee);
+            auto const bogus = "48004829F915654A81B11C4AB8218D96FED67F209B58328A72314FB6EA288BE4";
+
+            fx.env(fx.jv(), fee, credentials::Ids({}), Ter(temMALFORMED));
+            fx.env(fx.jv(), fee, credentials::Ids({bogus, bogus}), Ter(temMALFORMED));
+            {
+                std::vector<std::string> tooMany(kMaxCredentialsArraySize + 1, bogus);
+                for (std::size_t i = 0; i < tooMany.size(); ++i)
+                    tooMany[i].back() = static_cast<char>('0' + (i % 10));
+                fx.env(fx.jv(), fee, credentials::Ids(tooMany), Ter(temMALFORMED));
+            }
+            BEAST_EXPECT(fx.snapshot() == before);
+        }
+
+        // valid(): nonexistent / unaccepted / wrong subject → tecBAD_CREDENTIALS.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            Account const charlie{"charlie"};
+            Account const carol{"carol"};
+            env.fund(XRP(10000), alice, bob, charlie, carol);
+            env.close();
+
+            MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            fundConvertMerge(env, alice, bob, mpt, 100);
+            fundConvertMerge(env, alice, charlie, mpt, 0);
+            auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 10);
+            BEAST_EXPECT(w);
+            if (!w)
+                return;
+            auto const fee = Fee(10 * env.current()->fees().base);
+            auto snap = [&]() {
+                auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+                auto sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+                return std::make_tuple(
+                    (*sleBob)[sfConfidentialBalanceVersion],
+                    sleBob->getFieldVL(sfConfidentialBalanceSpending),
+                    sleCharlie->getFieldVL(sfConfidentialBalanceInbox));
+            };
+            auto const before = snap();
+            auto jv = sendJV(
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex);
+
+            auto const bogus = "48004829F915654A81B11C4AB8218D96FED67F209B58328A72314FB6EA288BE4";
+            env(jv, fee, credentials::Ids({bogus}), Ter(tecBAD_CREDENTIALS));
+
+            char const* credType = "sendCred";
+            env(credentials::create(bob, carol, credType));
+            env.close();
+            auto const unaccepted =
+                credentials::ledgerEntry(env, bob, carol, credType)[jss::result][jss::index]
+                    .asString();
+            env(jv, fee, credentials::Ids({unaccepted}), Ter(tecBAD_CREDENTIALS));
+
+            env(credentials::accept(bob, carol, credType));
+            env.close();
+            auto const accepted =
+                credentials::ledgerEntry(env, bob, carol, credType)[jss::result][jss::index]
+                    .asString();
+            // Wrong subject: charlie submits bob's credential id.
+            auto jvWrong = sendJV(
+                charlie,
+                bob,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex);
+            // Proof is for bob→charlie; this only needs credential subject gate.
+            env(jvWrong, fee, credentials::Ids({accepted}), Ter(tecBAD_CREDENTIALS));
+            BEAST_EXPECT(snap() == before);
+        }
+
+        // Expired credential: preclaim may pass; doApply → tecEXPIRED (fee claimed).
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            Account const charlie{"charlie"};
+            Account const carol{"carol"};
+            env.fund(XRP(10000), alice, bob, charlie, carol);
+            env.close();
+
+            MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            fundConvertMerge(env, alice, bob, mpt, 100);
+            fundConvertMerge(env, alice, charlie, mpt, 0);
+
+            char const* credType = "expCred";
+            auto createJv = credentials::create(bob, carol, credType);
+            auto const t = env.current()->header().parentCloseTime.time_since_epoch().count();
+            createJv[sfExpiration.jsonName] = t + 20;
+            env(createJv);
+            env.close();
+            env(credentials::accept(bob, carol, credType));
+            env.close();
+            auto const credIdx =
+                credentials::ledgerEntry(env, bob, carol, credType)[jss::result][jss::index]
+                    .asString();
+            env.close();
+            env.close();
+            env.close();
+
+            // Rebuild after bob's accept (seq++) and ledger closes so sigma binds
+            // the submit sequence; expiry is enforced in doApply after preclaim.
+            auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 10);
+            BEAST_EXPECT(w);
+            if (!w)
+                return;
+
+            auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            auto sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+            auto const version = (*sleBob)[sfConfidentialBalanceVersion];
+            auto const spendingBefore = sleBob->getFieldVL(sfConfidentialBalanceSpending);
+            auto const inboxBefore = sleCharlie->getFieldVL(sfConfidentialBalanceInbox);
+            auto const balBefore = env.balance(bob);
+            auto const seqBefore = env.seq(bob);
+            auto const feeAmt = 10 * env.current()->fees().base;
+
+            env(sendJV(
+                    bob,
+                    charlie,
+                    mpt.issuanceID(),
+                    w->senderCt,
+                    w->destCt,
+                    w->issuerCt,
+                    w->pcBHex,
+                    w->pcMHex,
+                    w->zkHex),
+                Fee(feeAmt),
+                credentials::Ids({credIdx}),
+                Ter(tecEXPIRED));
+
+            BEAST_EXPECT(env.balance(bob) == balBefore - feeAmt);
+            BEAST_EXPECT(env.seq(bob) == seqBefore + 1);
+            sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+            BEAST_EXPECT((*sleBob)[sfConfidentialBalanceVersion] == version);
+            BEAST_EXPECT(sleBob->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
+            BEAST_EXPECT(sleCharlie->getFieldVL(sfConfidentialBalanceInbox) == inboxBefore);
+        }
+    }
+
+    void
+    testSendMissingObjectsAndInit()
+    {
+        testcase("send missing objects / confidential init groups");
+        using namespace jtx;
+
+        // Destination account absent → tecNO_TARGET.
+        {
+            SendRejectFixture fx{*this, tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer};
+            BEAST_EXPECT(fx.w);
+            if (!fx.w)
+                return;
+            Account const ghost{"ghost"};
+            auto const before = fx.snapshot();
+            fx.env(
+                sendJV(
+                    fx.bob,
+                    ghost,
+                    fx.mpt->issuanceID(),
+                    fx.w->senderCt,
+                    fx.w->destCt,
+                    fx.w->issuerCt,
+                    fx.w->pcBHex,
+                    fx.w->pcMHex,
+                    fx.w->zkHex),
+                Fee(fx.fee),
+                Ter(tecNO_TARGET));
+            BEAST_EXPECT(fx.snapshot() == before);
+        }
+
+        // Issuance missing → tecOBJECT_NOT_FOUND.
+        {
+            SendRejectFixture fx{*this, tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer};
+            BEAST_EXPECT(fx.w);
+            if (!fx.w)
+                return;
+            auto const fake = makeMptID(1, fx.alice.id());
+            auto const before = fx.snapshot();
+            fx.env(
+                sendJV(
+                    fx.bob,
+                    fx.charlie,
+                    fake,
+                    fx.w->senderCt,
+                    fx.w->destCt,
+                    fx.w->issuerCt,
+                    fx.w->pcBHex,
+                    fx.w->pcMHex,
+                    fx.w->zkHex),
+                Fee(fx.fee),
+                Ter(tecOBJECT_NOT_FOUND));
+            BEAST_EXPECT(fx.snapshot() == before);
+        }
+
+        // Confidential flag absent → tecNO_PERMISSION.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            Account const charlie{"charlie"};
+            env.fund(XRP(10000), alice, bob, charlie);
+            env.close();
+            MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+            mpt.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+            mpt.authorize({.account = bob});
+            mpt.authorize({.account = charlie});
+            auto const pk = parsePointHex(kKeyG);
+            auto const r = parseScalarHex(kScalar1);
+            auto const ct = encryptHex(1, *pk, *r);
+            auto const fee = Fee(10 * env.current()->fees().base);
+            env(sendJV(
+                    bob,
+                    charlie,
+                    mpt.issuanceID(),
+                    ct,
+                    ct,
+                    ct,
+                    std::string(kKeyG),
+                    std::string(kKeyG),
+                    std::string(2 * kSendZkProofSize, '0')),
+                fee,
+                Ter(tecNO_PERMISSION));
+        }
+
+        // Sender / destination MPToken missing.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            Account const charlie{"charlie"};
+            env.fund(XRP(10000), alice, bob, charlie);
+            env.close();
+            MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            fundConvertMerge(env, alice, bob, mpt, 100);
+            // charlie never authorized → no MPToken.
+            auto const w = buildSendWitness(env, bob, bob, mpt.issuanceID(), 100, 10);
+            BEAST_EXPECT(w);
+            if (!w)
+                return;
+            auto const fee = Fee(10 * env.current()->fees().base);
+            auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            auto const spendingBefore = sleBob->getFieldVL(sfConfidentialBalanceSpending);
+            env(sendJV(
+                    bob,
+                    charlie,
+                    mpt.issuanceID(),
+                    w->senderCt,
+                    w->destCt,
+                    w->issuerCt,
+                    w->pcBHex,
+                    w->pcMHex,
+                    w->zkHex),
+                fee,
+                Ter(tecOBJECT_NOT_FOUND));
+            sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            BEAST_EXPECT(sleBob->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
+
+            // Destination authorized but sender missing: fund charlie, send from
+            // never-authorized debbie — use unfunded-as-sender via separate account.
+            Account const debbie{"debbie"};
+            env.fund(XRP(10000), debbie);
+            env.close();
+            fundConvertMerge(env, alice, charlie, mpt, 0);
+            env(sendJV(
+                    debbie,
+                    charlie,
+                    mpt.issuanceID(),
+                    w->senderCt,
+                    w->destCt,
+                    w->issuerCt,
+                    w->pcBHex,
+                    w->pcMHex,
+                    w->zkHex),
+                fee,
+                Ter(tecOBJECT_NOT_FOUND));
+        }
+
+        // Sender/dest missing each required confidential-init field (OpenLedger).
+        {
+            SendRejectFixture fx{*this, tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer};
+            BEAST_EXPECT(fx.w);
+            if (!fx.w)
+                return;
+            auto const fee = Fee(fx.fee);
+
+            struct FieldCase
+            {
+                char const* name;
+                bool sender;
+                SF_VL const* field;
+            };
+            FieldCase fields[] = {
+                {"sender HolderEncryptionKey", true, &sfHolderEncryptionKey},
+                {"sender ConfidentialBalanceSpending", true, &sfConfidentialBalanceSpending},
+                {"sender IssuerEncryptedBalance", true, &sfIssuerEncryptedBalance},
+                {"dest HolderEncryptionKey", false, &sfHolderEncryptionKey},
+                {"dest ConfidentialBalanceInbox", false, &sfConfidentialBalanceInbox},
+                {"dest IssuerEncryptedBalance", false, &sfIssuerEncryptedBalance},
+            };
+
+            for (auto const& fc : fields)
+            {
+                auto const before = fx.snapshot();
+                auto const account = fc.sender ? fx.bob.id() : fx.charlie.id();
+                auto const key = keylet::mptoken(fx.mpt->issuanceID(), account);
+                auto const saved = std::make_shared<SLE>(*fx.env.le(key), key.key);
+                auto const ok =
+                    fx.env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+                        auto const sle = view.read(key);
+                        if (!sle)
+                            return false;
+                        auto replacement = std::make_shared<SLE>(*sle, sle->key());
+                        replacement->makeFieldAbsent(*fc.field);
+                        view.rawReplace(replacement);
+                        return true;
+                    });
+                BEAST_EXPECT(ok);
+                fx.env(fx.jv(), fee, Ter(tecNO_PERMISSION));
+                // Restore stripped field before snapshot (getFieldVL throws if absent).
+                auto const restored =
+                    fx.env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+                        view.rawReplace(std::make_shared<SLE>(*saved, saved->key()));
+                        return true;
+                    });
+                BEAST_EXPECT(restored);
+                BEAST_EXPECT(fx.snapshot() == before);
+            }
+        }
+
+        // Auditor key/amount mismatch + destination auditor mirror absent.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            Account const charlie{"charlie"};
+            env.fund(XRP(10000), alice, bob, charlie);
+            env.close();
+
+            // Issuance has auditor key; send omits auditor amount.
+            MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            mpt.set(
+                {.flags = tfMPTSetCanHoldConfidentialBalance,
+                 .issuerEncryptionKey = kKeyG,
+                 .auditorEncryptionKey = kKey2G});
+            auto const sk = parseScalarHex(kScalar1);
+            auto const pk = parsePointHex(kKeyG);
+            auto const auditorPk = parsePointHex(kKey2G);
+            auto const r = parseScalarHex(kScalar2);
+            auto fundAud = [&](Account const& holder, std::uint64_t amount) {
+                mpt.authorize({.account = holder});
+                if (amount > 0)
+                    mpt.pay(alice, holder, 1000);
+                auto const holderCt = encryptHex(amount, *pk, *r);
+                auto const issuerCt = encryptHex(amount, *pk, *r);
+                auto const auditorCt = encryptHex(amount, *auditorPk, *r);
+                auto const ctxID =
+                    jtx::cmpt::convertContextID(holder.id(), mpt.issuanceID(), env.seq(holder));
+                auto const pok = proveRegisterPoK(*sk, *pk, makeSlice(ctxID));
+                auto const baseFee = env.current()->fees().base;
+                env(convertJV(
+                        holder,
+                        mpt.issuanceID(),
+                        amount,
+                        holderCt,
+                        issuerCt,
+                        kScalar2,
+                        std::string(kKeyG),
+                        strHex(makeSlice(*pok)),
+                        auditorCt),
+                    Fee(10 * baseFee));
+                env.close();
+                env(mergeJV(holder, mpt.issuanceID()), Fee(10 * baseFee));
+                env.close();
+            };
+            fundAud(bob, 50);
+            fundAud(charlie, 1);
+
+            auto w =
+                buildSendWitness(env, bob, charlie, mpt.issuanceID(), 50, 10, nullptr, *auditorPk);
+            BEAST_EXPECT(w && w->auditorCt);
+            if (!w || !w->auditorCt)
+                return;
+            auto const fee = Fee(10 * env.current()->fees().base);
+            auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            auto const spendingBefore = sleBob->getFieldVL(sfConfidentialBalanceSpending);
+
+            // Has auditor key but omit amount → tecNO_PERMISSION.
+            env(sendJV(
+                    bob,
+                    charlie,
+                    mpt.issuanceID(),
+                    w->senderCt,
+                    w->destCt,
+                    w->issuerCt,
+                    w->pcBHex,
+                    w->pcMHex,
+                    w->zkHex),
+                fee,
+                Ter(tecNO_PERMISSION));
+
+            // No auditor key but amount present.
+            {
+                Env env2{*this, withConfidential()};
+                Account const a{"alice"};
+                Account const b{"bob"};
+                Account const c{"charlie"};
+                env2.fund(XRP(10000), a, b, c);
+                env2.close();
+                MPTTester m2(env2, a, {.holders = {b, c}, .fund = false});
+                m2.create(
+                    {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+                m2.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+                fundConvertMerge(env2, a, b, m2, 50);
+                fundConvertMerge(env2, a, c, m2, 0);
+                auto w2 = buildSendWitness(env2, b, c, m2.issuanceID(), 50, 10);
+                BEAST_EXPECT(w2);
+                if (!w2)
+                    return;
+                auto j = sendJV(
+                    b,
+                    c,
+                    m2.issuanceID(),
+                    w2->senderCt,
+                    w2->destCt,
+                    w2->issuerCt,
+                    w2->pcBHex,
+                    w2->pcMHex,
+                    w2->zkHex,
+                    encryptHex(10, *auditorPk, *r));
+                env2(j, Fee(10 * env2.current()->fees().base), Ter(tecNO_PERMISSION));
+            }
+
+            // Destination auditor mirror absent (sender still has mirror).
+            // Do not env.close() before Send — close rebuilds the open ledger.
+            auto const stripped =
+                env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+                    auto const sle = view.read(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+                    if (!sle)
+                        return false;
+                    auto replacement = std::make_shared<SLE>(*sle, sle->key());
+                    replacement->makeFieldAbsent(sfAuditorEncryptedBalance);
+                    view.rawReplace(replacement);
+                    return true;
+                });
+            BEAST_EXPECT(stripped);
+            env(sendJV(
+                    bob,
+                    charlie,
+                    mpt.issuanceID(),
+                    w->senderCt,
+                    w->destCt,
+                    w->issuerCt,
+                    w->pcBHex,
+                    w->pcMHex,
+                    w->zkHex,
+                    *w->auditorCt),
+                fee,
+                Ter(tecNO_PERMISSION));
+            sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            BEAST_EXPECT(sleBob->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
+        }
+    }
+
+    void
+    testSendHolderLocksAndTransferFee()
+    {
+        testcase("send holder locks + injected TransferFee");
+        using namespace jtx;
+
+        // Holder-level sender and destination locks (issuance lock already covered).
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            Account const charlie{"charlie"};
+            env.fund(XRP(10000), alice, bob, charlie);
+            env.close();
+            MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer | tfMPTCanLock});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            fundConvertMerge(env, alice, bob, mpt, 100);
+            fundConvertMerge(env, alice, charlie, mpt, 0);
+            auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 10);
+            BEAST_EXPECT(w);
+            if (!w)
+                return;
+            auto const fee = Fee(10 * env.current()->fees().base);
+            auto snap = [&]() {
+                auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+                auto sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+                return std::make_tuple(
+                    (*sleBob)[sfConfidentialBalanceVersion],
+                    sleBob->getFieldVL(sfConfidentialBalanceSpending),
+                    sleCharlie->getFieldVL(sfConfidentialBalanceInbox));
+            };
+
+            mpt.set({.account = alice, .holder = bob, .flags = tfMPTLock});
+            env.close();
+            auto before = snap();
+            env(sendJV(
+                    bob,
+                    charlie,
+                    mpt.issuanceID(),
+                    w->senderCt,
+                    w->destCt,
+                    w->issuerCt,
+                    w->pcBHex,
+                    w->pcMHex,
+                    w->zkHex),
+                fee,
+                Ter(tecLOCKED));
+            BEAST_EXPECT(snap() == before);
+
+            mpt.set({.account = alice, .holder = bob, .flags = tfMPTUnlock});
+            env.close();
+            mpt.set({.account = alice, .holder = charlie, .flags = tfMPTLock});
+            env.close();
+            auto const w2 = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 10);
+            BEAST_EXPECT(w2);
+            if (!w2)
+                return;
+            before = snap();
+            env(sendJV(
+                    bob,
+                    charlie,
+                    mpt.issuanceID(),
+                    w2->senderCt,
+                    w2->destCt,
+                    w2->issuerCt,
+                    w2->pcBHex,
+                    w2->pcMHex,
+                    w2->zkHex),
+                fee,
+                Ter(tecLOCKED));
+            BEAST_EXPECT(snap() == before);
+        }
+
+        // Nonzero TransferFee is unreachable via create+set with confidential.
+        // Inject via OpenLedger (same convention as COA destroy / auditor strip).
+        // Rebuild SLE without SoeDefault-at-default fields — a raw SLE copy that
+        // materializes TransferFee=0 throws before we can set a nonzero fee.
+        {
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            Account const charlie{"charlie"};
+            env.fund(XRP(10000), alice, bob, charlie);
+            env.close();
+            MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            fundConvertMerge(env, alice, bob, mpt, 100);
+            fundConvertMerge(env, alice, charlie, mpt, 1);
+            auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 10);
+            BEAST_EXPECT(w);
+            if (!w)
+                return;
+
+            auto const ok = env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+                auto const sle = view.read(keylet::mptIssuance(mpt.issuanceID()));
+                if (!sle)
+                    return false;
+                STObject fields{sfLedgerEntry};
+                for (auto const& field : *sle)
+                {
+                    if (field.isDefault() &&
+                        (field.getFName() == sfTransferFee || field.getFName() == sfAssetScale ||
+                         field.getFName() == sfMutableFlags ||
+                         field.getFName() == sfConfidentialOutstandingAmount))
+                        continue;
+                    xrpl::detail::STVar var{field};
+                    fields.set(std::move(var.get()));
+                }
+                auto replacement = std::make_shared<SLE>(fields, sle->key());
+                (*replacement)[sfTransferFee] = 100;
+                view.rawReplace(replacement);
+                return true;
+            });
+            BEAST_EXPECT(ok);
+            auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            BEAST_EXPECT(sleIss && (*sleIss)[~sfTransferFee].value_or(0) == 100);
+
+            auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            auto const spendingBefore = sleBob->getFieldVL(sfConfidentialBalanceSpending);
+            auto const fee = Fee(10 * env.current()->fees().base);
+            env(sendJV(
+                    bob,
+                    charlie,
+                    mpt.issuanceID(),
+                    w->senderCt,
+                    w->destCt,
+                    w->issuerCt,
+                    w->pcBHex,
+                    w->pcMHex,
+                    w->zkHex),
+                fee,
+                Ter(tecNO_PERMISSION));
+            sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            BEAST_EXPECT(sleBob->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
+        }
+    }
+
     void
     run() override
     {
@@ -2946,6 +3720,10 @@ public:
         testSendContextAndRoleBindings();
         testSendInboxFinalAddInfinity();
         testEncZeroRerandomization();
+        testSendPreflightMalformed();
+        testSendCredentialRejects();
+        testSendMissingObjectsAndInit();
+        testSendHolderLocksAndTransferFee();
     }
 };
 
