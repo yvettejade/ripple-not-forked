@@ -4542,12 +4542,20 @@ class Invariants_test : public beast::unit_test::Suite
         // Direct ValidConfidentialMPT checks (synthetic before/after SLEs).
         {
             Env env{*this, defaultAmendments() | featureConfidentialTransfer};
+            Account const gw{"gw"};
             Account const a1{"A1"};
-            env.fund(XRP(1000), a1);
+            env.fund(XRP(10'000), gw, a1);
             env.close();
 
+            // Issuance with lsfMPTCanHoldConfidentialBalance so legitimate
+            // confidential MPToken transitions can pass the flag check.
+            MPTTester mpt(
+                {.env = env,
+                 .issuer = gw,
+                 .holders = {a1},
+                 .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            MPTID const id = mpt.issuanceID();
             OpenView view{*env.current()};
-            MPTID const id = makeMptID(1, a1.id());
 
             {
                 // Happy path: spending + issuer encrypted balance together.
@@ -4678,7 +4686,7 @@ class Invariants_test : public beast::unit_test::Suite
                 auto afterIss = std::make_shared<SLE>(*beforeIss);
                 (*afterIss)[sfConfidentialOutstandingAmount] = 100;
 
-                auto beforeTok = makeToken(a2.id(), id);
+                auto beforeTok = makeToken(a2.id(), makeMptID(1, a1.id()));
                 (*beforeTok)[sfMPTAmount] = 1000;
                 auto afterTok = std::make_shared<SLE>(*beforeTok);
                 (*afterTok)[sfMPTAmount] = 900;
@@ -4716,6 +4724,30 @@ class Invariants_test : public beast::unit_test::Suite
                 BEAST_EXPECT(
                     sink.messages().str().find("invalid OutstandingAmount balance") !=
                     std::string::npos);
+            }
+
+            {
+                // Deletion of MPToken carrying confidential state must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto deleted = makeToken(a1.id(), id);
+                deleted->setFieldVL(sfHolderEncryptionKey, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(true, deleted, deleted);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find("MPToken with confidential state deleted") !=
+                    std::string::npos);
+            }
+
+            {
+                // Deletion of plain MPToken (no confidential state) is fine.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto deleted = makeToken(a1.id(), id);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(true, deleted, deleted);
+                BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
             }
 
             // Fee-claiming tec* paths still enforce dirty confidential state.
@@ -4788,6 +4820,44 @@ class Invariants_test : public beast::unit_test::Suite
                 inv.visitEntry(false, nullptr, after);
                 BEAST_EXPECT(inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
             }
+
+            {
+                // tec*: deleting confidential MPToken must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto deleted = makeToken(a1.id(), id);
+                deleted->setFieldVL(sfAuditorEncryptedBalance, ctA);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(true, deleted, deleted);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find("MPToken with confidential state deleted") !=
+                    std::string::npos);
+            }
+        }
+
+        // Confidential fields on an issuance that lacks the confidential flag.
+        {
+            Env env{*this, defaultAmendments() | featureConfidentialTransfer};
+            Account const gw{"gw"};
+            Account const a1{"A1"};
+            env.fund(XRP(10'000), gw, a1);
+            env.close();
+            // Create without lsfMPTCanHoldConfidentialBalance.
+            MPTTester mpt({.env = env, .issuer = gw, .holders = {a1}});
+            MPTID const id = mpt.issuanceID();
+            OpenView view{*env.current()};
+            test::StreamSink sink{beast::Severity::Warning};
+            beast::Journal const jlog{sink};
+            auto after = makeToken(a1.id(), id);
+            after->setFieldVL(sfConfidentialBalanceSpending, ctA);
+            after->setFieldVL(sfIssuerEncryptedBalance, ctA);
+            ValidConfidentialMPT inv;
+            inv.visitEntry(false, nullptr, after);
+            BEAST_EXPECT(!inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+            BEAST_EXPECT(
+                sink.messages().str().find("lsfMPTCanHoldConfidentialBalance issuance") !=
+                std::string::npos);
         }
 
         // Amendment off: malformed confidential state must not fail this
@@ -4809,6 +4879,13 @@ class Invariants_test : public beast::unit_test::Suite
             BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
             // Amendment gating also applies on fee-claiming tec* paths.
             BEAST_EXPECT(inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+
+            // Deletion of confidential state is also gated off.
+            auto deleted = makeToken(a1.id(), id);
+            deleted->setFieldVL(sfHolderEncryptionKey, ctA);
+            ValidConfidentialMPT invDel;
+            invDel.visitEntry(true, deleted, deleted);
+            BEAST_EXPECT(invDel.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
         }
 
         // End-to-end through checkInvariants: encrypted field inconsistency.
@@ -4846,6 +4923,155 @@ class Invariants_test : public beast::unit_test::Suite
                 ac.view().insert(sleNew);
                 return true;
             });
+
+        // End-to-end: delete MPToken that carries confidential state.
+        {
+            MPTID id{};
+            doInvariantCheck(
+                Env{*this, defaultAmendments() | featureConfidentialTransfer},
+                {{"MPToken with confidential state deleted"}},
+                [&](Account const&, Account const& a2, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, a2));
+                    if (!sle)
+                        return false;
+                    sle->setFieldVL(sfConfidentialBalanceSpending, Blob{1, 2, 3});
+                    sle->setFieldVL(sfIssuerEncryptedBalance, Blob{1, 2, 3});
+                    ac.view().update(sle);
+                    ac.view().erase(sle);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+                [&](Account const&, Account const& a2, Env& env) {
+                    Account const gw{"gw"};
+                    env.fund(XRP(1'000), gw);
+                    MPTTester const mpt(
+                        {.env = env,
+                         .issuer = gw,
+                         .holders = {a2},
+                         .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+                    id = mpt.issuanceID();
+                    return true;
+                });
+        }
+
+        // End-to-end: confidential fields under issuance without the flag.
+        {
+            MPTID id{};
+            doInvariantCheck(
+                Env{*this, defaultAmendments() | featureConfidentialTransfer},
+                {{"lsfMPTCanHoldConfidentialBalance issuance"}},
+                [&](Account const&, Account const& a2, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, a2));
+                    if (!sle)
+                        return false;
+                    sle->setFieldVL(sfConfidentialBalanceSpending, Blob{1, 2, 3});
+                    sle->setFieldVL(sfIssuerEncryptedBalance, Blob{1, 2, 3});
+                    ac.view().update(sle);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+                [&](Account const&, Account const& a2, Env& env) {
+                    Account const gw{"gw"};
+                    env.fund(XRP(1'000), gw);
+                    // No confidential-hold flag on the issuance.
+                    MPTTester const mpt({.env = env, .issuer = gw, .holders = {a2}});
+                    id = mpt.issuanceID();
+                    return true;
+                });
+        }
+
+        // Conservation: ConfidentialTransfer on + MPTokensV2 off must still
+        // enforce OA/public/COA conservation (not log-and-pass).
+        {
+            MPTID id{};
+            doInvariantCheck(
+                Env{*this, (defaultAmendments() | featureConfidentialTransfer) - featureMPTokensV2},
+                {{"invalid OutstandingAmount balance"}},
+                [&](Account const& a1, Account const&, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, a1));
+                    if (!sle)
+                        return false;
+                    sle->setFieldU64(sfMPTAmount, 101);
+                    ac.view().update(sle);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttPAYMENT, [](STObject&) {}},
+                {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+                [&](Account const& a1, Account const&, Env& env) {
+                    Account const gw("gw");
+                    env.fund(XRP(1'000), gw);
+                    MPTTester const mpt(
+                        {.env = env, .issuer = gw, .holders = {a1}, .pay = 100, .maxAmt = 100});
+                    id = mpt.issuanceID();
+                    return true;
+                });
+        }
+
+        // Conservation: both ConfidentialTransfer and MPTokensV2 off —
+        // ValidMPTPayment logs but does not fail (amendment-off compatibility).
+        {
+            MPTID id{};
+            doInvariantCheck(
+                Env{*this, defaultAmendments() - featureConfidentialTransfer - featureMPTokensV2},
+                {{"invalid OutstandingAmount balance"}},
+                [&](Account const& a1, Account const&, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, a1));
+                    if (!sle)
+                        return false;
+                    sle->setFieldU64(sfMPTAmount, 101);
+                    ac.view().update(sle);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttPAYMENT, [](STObject&) {}},
+                {tesSUCCESS, tesSUCCESS},
+                [&](Account const& a1, Account const&, Env& env) {
+                    Account const gw("gw");
+                    env.fund(XRP(1'000), gw);
+                    MPTTester const mpt(
+                        {.env = env, .issuer = gw, .holders = {a1}, .pay = 100, .maxAmt = 100});
+                    id = mpt.issuanceID();
+                    return true;
+                });
+        }
+
+        // End-to-end: legitimate confidential field setup still passes when
+        // the issuance has lsfMPTCanHoldConfidentialBalance.
+        {
+            MPTID id{};
+            doInvariantCheck(
+                Env{*this, defaultAmendments() | featureConfidentialTransfer},
+                {},
+                [&](Account const&, Account const& a2, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, a2));
+                    if (!sle)
+                        return false;
+                    sle->setFieldVL(sfConfidentialBalanceSpending, Blob{1, 2, 3});
+                    sle->setFieldVL(sfIssuerEncryptedBalance, Blob{1, 2, 3});
+                    (*sle)[sfConfidentialBalanceVersion] = 0;
+                    ac.view().update(sle);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                {tesSUCCESS, tesSUCCESS},
+                [&](Account const&, Account const& a2, Env& env) {
+                    Account const gw{"gw"};
+                    env.fund(XRP(1'000), gw);
+                    MPTTester const mpt(
+                        {.env = env,
+                         .issuer = gw,
+                         .holders = {a2},
+                         .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+                    id = mpt.issuanceID();
+                    return true;
+                });
+        }
     }
 
     void
