@@ -190,6 +190,8 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
             BEAST_EXPECT(sle->isFieldPresent(sfAuditorEncryptionKey));
             BEAST_EXPECT(strHex(sle->getFieldVL(sfIssuerEncryptionKey)) == kKeyG);
             BEAST_EXPECT(strHex(sle->getFieldVL(sfAuditorEncryptionKey)) == kKey2G);
+            // Set must not invent a nonzero COA.
+            BEAST_EXPECT((*sle)[sfConfidentialOutstandingAmount] == 0);
         }
 
         // Auditor without issuer on THIS tx → temMALFORMED.

@@ -307,8 +307,18 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
         BEAST_EXPECT(sleMpt);
         BEAST_EXPECT((*sleMpt)[sfMPTAmount] == 50);
         BEAST_EXPECT(sleMpt->isFieldPresent(sfHolderEncryptionKey));
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfHolderEncryptionKey)) == kKeyG);
+        BEAST_EXPECT((*sleMpt)[~sfConfidentialBalanceVersion].value_or(~0u) == 0);
+        auto const expectZero = encZero(bob.id(), alice.id(), mpt.issuanceID(), *pk);
+        BEAST_EXPECT(expectZero);
+        BEAST_EXPECT(
+            strHex(sleMpt->getFieldVL(sfConfidentialBalanceSpending)) == strHex(*expectZero));
+        // First-init inbox/issuer are the submitted plaintext-zero amount CTs.
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfConfidentialBalanceInbox)) == holderCt);
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfIssuerEncryptedBalance)) == issuerCt);
         auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
         BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == 0);
+        BEAST_EXPECT((*sleIss)[sfOutstandingAmount] == 50);
     }
 
     void
@@ -622,10 +632,33 @@ class ConfidentialMPTConvert_test : public beast::unit_test::Suite
 
         // Default autofill fee is 1× base → insufficient for 10× require.
         env(jv, Ter(telINSUF_FEE_P));
+        {
+            auto sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            BEAST_EXPECT(sleMpt);
+            BEAST_EXPECT((*sleMpt)[sfMPTAmount] == 100);
+            BEAST_EXPECT(!sleMpt->isFieldPresent(sfHolderEncryptionKey));
+            auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == 0);
+        }
 
         // Same payload with explicit 10× succeeds.
         env(jv, Fee(10 * baseFee));
         env.close();
+
+        auto sleMpt = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        BEAST_EXPECT(sleMpt);
+        BEAST_EXPECT((*sleMpt)[sfMPTAmount] == 99);
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfHolderEncryptionKey)) == kKeyG);
+        BEAST_EXPECT((*sleMpt)[~sfConfidentialBalanceVersion].value_or(~0u) == 0);
+        auto const expectZero = encZero(bob.id(), alice.id(), mpt.issuanceID(), *pk);
+        BEAST_EXPECT(expectZero);
+        BEAST_EXPECT(
+            strHex(sleMpt->getFieldVL(sfConfidentialBalanceSpending)) == strHex(*expectZero));
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfConfidentialBalanceInbox)) == ct);
+        BEAST_EXPECT(strHex(sleMpt->getFieldVL(sfIssuerEncryptedBalance)) == ct);
+        auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == 1);
+        BEAST_EXPECT((*sleIss)[sfOutstandingAmount] == 100);
     }
 
     void
