@@ -4686,7 +4686,7 @@ class Invariants_test : public beast::unit_test::Suite
                 auto afterIss = std::make_shared<SLE>(*beforeIss);
                 (*afterIss)[sfConfidentialOutstandingAmount] = 100;
 
-                auto beforeTok = makeToken(a2.id(), id);
+                auto beforeTok = makeToken(a2.id(), makeMptID(1, a1.id()));
                 (*beforeTok)[sfMPTAmount] = 1000;
                 auto afterTok = std::make_shared<SLE>(*beforeTok);
                 (*afterTok)[sfMPTAmount] = 900;
