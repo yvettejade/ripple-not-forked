@@ -1631,8 +1631,9 @@ public:
     void
     testMergeMissingObjectAndFlag()
     {
-        // Merge gaps: issuance lacks confidential flag; MPToken missing.
-        testcase("merge missing MPToken / confidential flag");
+        // Merge gaps: issuance lacks confidential flag; MPToken missing;
+        // nonexistent issuance ID.
+        testcase("merge missing MPToken / confidential flag / issuance");
         using namespace jtx;
 
         {
@@ -1662,6 +1663,62 @@ public:
             auto const fee = Fee(10 * env.current()->fees().base);
             env(mergeJV(bob, mpt.issuanceID()), fee, Ter(tecOBJECT_NOT_FOUND));
             BEAST_EXPECT(!env.le(keylet::mptoken(mpt.issuanceID(), bob.id())));
+        }
+
+        {
+            // Nonexistent issuance ID → tecOBJECT_NOT_FOUND; no confidential
+            // state mutation on the real issuance / holder token.
+            Env env{*this, withConfidential()};
+            Account const alice{"alice"};
+            Account const bob{"bob"};
+            env.fund(XRP(10000), alice, bob);
+            env.close();
+            MPTTester mpt(env, alice, {.holders = {bob}, .fund = false});
+            mpt.create(
+                {.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+            mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+            mpt.authorize({.account = bob});
+            mpt.pay(alice, bob, 1000);
+
+            auto const sk = parseScalarHex(kScalar1);
+            auto const pk = parsePointHex(kKeyG);
+            auto const r = parseScalarHex(kScalar2);
+            BEAST_EXPECT(sk && pk && r);
+            std::uint64_t const amount = 50;
+            auto const ct = encryptHex(amount, *pk, *r);
+            auto const proof = proofHex(*sk, *pk, bob.id(), mpt.issuanceID(), env.seq(bob));
+            auto const fee = Fee(10 * env.current()->fees().base);
+            env(convertJV(
+                    bob, mpt.issuanceID(), amount, ct, ct, kScalar2, std::string(kKeyG), proof),
+                fee);
+            env.close();
+
+            auto sleBefore = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            auto sleIssBefore = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            BEAST_EXPECT(sleBefore && sleIssBefore);
+            auto const inboxBefore = sleBefore->getFieldVL(sfConfidentialBalanceInbox);
+            auto const spendingBefore = sleBefore->getFieldVL(sfConfidentialBalanceSpending);
+            auto const versionBefore = (*sleBefore)[~sfConfidentialBalanceVersion].value_or(0);
+            auto const mptAmountBefore = (*sleBefore)[sfMPTAmount];
+            auto const coaBefore = (*sleIssBefore)[sfConfidentialOutstandingAmount];
+            auto const oaBefore = (*sleIssBefore)[sfOutstandingAmount];
+
+            auto const fakeIssuance = makeMptID(1, alice.id());
+            BEAST_EXPECT(fakeIssuance != mpt.issuanceID());
+            BEAST_EXPECT(!env.le(keylet::mptIssuance(fakeIssuance)));
+
+            env(mergeJV(bob, fakeIssuance), fee, Ter(tecOBJECT_NOT_FOUND));
+
+            auto sleAfter = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+            auto sleIssAfter = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            BEAST_EXPECT(sleAfter && sleIssAfter);
+            BEAST_EXPECT(sleAfter->getFieldVL(sfConfidentialBalanceInbox) == inboxBefore);
+            BEAST_EXPECT(sleAfter->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
+            BEAST_EXPECT((*sleAfter)[~sfConfidentialBalanceVersion].value_or(0) == versionBefore);
+            BEAST_EXPECT((*sleAfter)[sfMPTAmount] == mptAmountBefore);
+            BEAST_EXPECT((*sleIssAfter)[sfConfidentialOutstandingAmount] == coaBefore);
+            BEAST_EXPECT((*sleIssAfter)[sfOutstandingAmount] == oaBefore);
+            BEAST_EXPECT(!env.le(keylet::mptIssuance(fakeIssuance)));
         }
     }
 
