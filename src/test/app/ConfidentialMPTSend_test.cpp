@@ -59,7 +59,19 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         "0000000000000000000000000000000000000000000000000000000000000001";
     static constexpr char const* kScalar2 =
         "0000000000000000000000000000000000000000000000000000000000000002";
+    static constexpr char const* kScalar3 =
+        "0000000000000000000000000000000000000000000000000000000000000003";
+    static constexpr char const* kScalar4 =
+        "0000000000000000000000000000000000000000000000000000000000000004";
+    static constexpr char const* kScalar5 =
+        "0000000000000000000000000000000000000000000000000000000000000005";
+    static constexpr char const* kScalar6 =
+        "0000000000000000000000000000000000000000000000000000000000000006";
+    static constexpr char const* kScalar7 =
+        "0000000000000000000000000000000000000000000000000000000000000007";
     static constexpr std::size_t kSendZkProofSize = kSendSigmaSize + kAggregatedBulletproofSize;
+    static constexpr std::size_t kConvertBackZkProofSize =
+        kConvertBackSigmaSize + kSingleBulletproofSize;
 
     FeatureBitset
     withConfidential()
@@ -262,7 +274,12 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         std::uint64_t balance,
         std::uint64_t amount,
         Secp256k1Scalar const* amountRandomness = nullptr,
-        std::optional<Secp256k1Point> auditorPk = std::nullopt)
+        std::optional<Secp256k1Point> auditorPk = std::nullopt,
+        Secp256k1Scalar const* balanceRandomness = nullptr,
+        Secp256k1Scalar const* senderSkIn = nullptr,
+        Secp256k1Point const* senderPkIn = nullptr,
+        Secp256k1Point const* destPkIn = nullptr,
+        Secp256k1Point const* issuerPkIn = nullptr)
     {
         auto sleSender = env.le(keylet::mptoken(issuanceID, sender.id()));
         if (!sleSender)
@@ -273,24 +290,31 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
             return std::nullopt;
         auto const version = (*sleSender)[~sfConfidentialBalanceVersion].value_or(0);
 
-        auto const sk = parseScalarHex(kScalar1);
-        auto const pk = parsePointHex(kKeyG);
+        auto const skDefault = parseScalarHex(kScalar1);
+        auto const pkDefault = parsePointHex(kKeyG);
         auto const rDefault = parseScalarHex(kScalar1);
-        auto const rho = parseScalarHex(kScalar2);
-        if (!sk || !pk || !rDefault || !rho)
+        auto const rhoDefault = parseScalarHex(kScalar2);
+        if (!skDefault || !pkDefault || !rDefault || !rhoDefault)
             return std::nullopt;
+        Secp256k1Scalar const& sk = senderSkIn ? *senderSkIn : *skDefault;
+        Secp256k1Point const& senderPk = senderPkIn ? *senderPkIn : *pkDefault;
+        Secp256k1Point const& destPk = destPkIn ? *destPkIn : *pkDefault;
+        Secp256k1Point const& issuerPk = issuerPkIn ? *issuerPkIn : *pkDefault;
         Secp256k1Scalar const& r = amountRandomness ? *amountRandomness : *rDefault;
+        Secp256k1Scalar const& rho = balanceRandomness ? *balanceRandomness : *rhoDefault;
 
-        // rem blind = ρ − r via field arithmetic.
+        // rem blind = ρ − r via field arithmetic. Callers that set amount
+        // randomness equal to the default ρ (e.g. issuer-mirror = rConvert)
+        // must pass a distinct balanceRandomness so remBlind is nonzero.
         auto const remBlindField =
-            fieldSub(Secp256k1Field::fromScalar(*rho), Secp256k1Field::fromScalar(r));
+            fieldSub(Secp256k1Field::fromScalar(rho), Secp256k1Field::fromScalar(r));
         auto const remBlind = remBlindField.toScalar();
         if (!remBlind)
             return std::nullopt;
 
-        auto const senderCt = ElGamalCiphertext::encrypt(amount, *pk, r);
-        auto const destCt = ElGamalCiphertext::encrypt(amount, *pk, r);
-        auto const issuerCt = ElGamalCiphertext::encrypt(amount, *pk, r);
+        auto const senderCt = ElGamalCiphertext::encrypt(amount, senderPk, r);
+        auto const destCt = ElGamalCiphertext::encrypt(amount, destPk, r);
+        auto const issuerCt = ElGamalCiphertext::encrypt(amount, issuerPk, r);
         if (!senderCt || !destCt || !issuerCt)
             return std::nullopt;
 
@@ -303,11 +327,12 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         }
 
         auto const pcM = pedersenCommit(amount, r);
-        auto const pcB = pedersenCommit(balance, *rho);
+        auto const pcB = pedersenCommit(balance, rho);
         if (!pcM || !pcB)
             return std::nullopt;
 
-        std::vector<Secp256k1Point> pks{*pk, *pk, *pk};
+        // Compact sigma recipient order: sender, dest, issuer[, auditor].
+        std::vector<Secp256k1Point> pks{senderPk, destPk, issuerPk};
         std::vector<ElGamalCiphertext> cts{*senderCt, *destCt, *issuerCt};
         if (auditorPk)
         {
@@ -324,7 +349,18 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
             makeSlice(specific));
 
         auto const sigma = proveSendSigma(
-            amount, r, balance, *rho, *sk, pks, *pk, cts, *pcM, *pcB, *spending, makeSlice(ctxID));
+            amount,
+            r,
+            balance,
+            rho,
+            sk,
+            pks,
+            senderPk,
+            cts,
+            *pcM,
+            *pcB,
+            *spending,
+            makeSlice(ctxID));
         if (!sigma)
             return std::nullopt;
 
@@ -350,6 +386,109 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         if (auditorAmountCt)
             w.auditorCt = strHex(auditorAmountCt->serialize());
         return w;
+    }
+
+    /** Test-only small-plaintext check: shared = sk·C1; C2−shared == amount·G.
+        Amount 0 expects point-at-infinity (nullopt from pointSubtract).
+        Fails when the ciphertext is under a different recipient key. */
+    static bool
+    expectDecryptsTo(ElGamalCiphertext const& ct, Secp256k1Scalar const& sk, std::uint64_t amount)
+    {
+        auto const shared = pointMultiply(ct.c1(), sk);
+        if (!shared)
+            return false;
+        auto const diff = pointSubtract(ct.c2(), *shared);
+        if (amount == 0)
+            return !diff;
+        auto const expected = generatorMultiply(Secp256k1Field::fromUint64(amount));
+        return expected && diff && *diff == *expected;
+    }
+
+    static bool
+    expectDecryptsField(Slice blob, Secp256k1Scalar const& sk, std::uint64_t amount)
+    {
+        auto const ct = parseElGamalCiphertext(blob);
+        if (!ct)
+            return false;
+        return expectDecryptsTo(*ct, sk, amount);
+    }
+
+    static std::array<std::uint8_t, 24>
+    convertBackSpecific(AccountID const& account, std::uint32_t version)
+    {
+        std::array<std::uint8_t, 24> out{};
+        std::memcpy(out.data(), account.data(), 20);
+        out[20] = static_cast<std::uint8_t>((version >> 24) & 0xff);
+        out[21] = static_cast<std::uint8_t>((version >> 16) & 0xff);
+        out[22] = static_cast<std::uint8_t>((version >> 8) & 0xff);
+        out[23] = static_cast<std::uint8_t>(version & 0xff);
+        return out;
+    }
+
+    std::optional<std::array<std::uint8_t, kConvertBackZkProofSize>>
+    makeConvertBackZk(
+        std::uint64_t b,
+        std::uint64_t m,
+        Secp256k1Scalar const& rho,
+        Secp256k1Scalar const& sk,
+        Secp256k1Point const& pk,
+        ElGamalCiphertext const& spending,
+        AccountID const& account,
+        MPTID const& issuanceID,
+        std::uint32_t version,
+        std::uint32_t seq)
+    {
+        auto const pcB = pedersenCommit(b, rho);
+        if (!pcB)
+            return std::nullopt;
+        auto const specific = convertBackSpecific(account, version);
+        auto const ctxID = confidentialTxContextID(
+            static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT_BACK),
+            account,
+            issuanceID,
+            seq,
+            makeSlice(specific));
+        auto const sigma = proveConvertBackSigma(b, rho, sk, pk, spending, *pcB, makeSlice(ctxID));
+        auto const mG = generatorMultiply(Secp256k1Field::fromUint64(m));
+        if (!sigma || !mG)
+            return std::nullopt;
+        auto const pcRem = pointSubtract(*pcB, *mG);
+        if (!pcRem)
+            return std::nullopt;
+        auto const bp = proveRange64(b - m, rho, *pcRem);
+        if (!bp)
+            return std::nullopt;
+        std::array<std::uint8_t, kConvertBackZkProofSize> zk{};
+        std::memcpy(zk.data(), sigma->data(), kConvertBackSigmaSize);
+        std::memcpy(zk.data() + kConvertBackSigmaSize, bp->data(), kSingleBulletproofSize);
+        return zk;
+    }
+
+    json::Value
+    convertBackJV(
+        jtx::Account const& account,
+        MPTID const& issuanceID,
+        std::uint64_t amount,
+        std::string const& holderCt,
+        std::string const& issuerCt,
+        std::string const& blinding,
+        std::string const& pc,
+        std::string const& zk,
+        std::optional<std::string> auditorCt = std::nullopt)
+    {
+        json::Value jv;
+        jv[jss::Account] = account.human();
+        jv[jss::TransactionType] = jss::ConfidentialMPTConvertBack;
+        jv[sfMPTokenIssuanceID] = to_string(issuanceID);
+        jv[sfMPTAmount] = std::to_string(amount);
+        jv[sfHolderEncryptedAmount] = holderCt;
+        jv[sfIssuerEncryptedAmount] = issuerCt;
+        jv[sfBlindingFactor] = blinding;
+        jv[sfBalanceCommitment] = pc;
+        jv[sfZKProof] = zk;
+        if (auditorCt)
+            jv[sfAuditorEncryptedAmount] = *auditorCt;
+        return jv;
     }
 
     void
@@ -592,9 +731,10 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
     }
 
     void
-    testTamperedProof()
+    testSigmaTamperedProof()
     {
-        testcase("tampered proof");
+        // Corrupt only the compact sigma prefix so verifySendSigma fails.
+        testcase("sigma-only tamper -> tecBAD_PROOF");
         using namespace jtx;
 
         Env env{*this, withConfidential()};
@@ -610,11 +750,18 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         fundConvertMerge(env, alice, bob, mpt, 100);
         fundConvertMerge(env, alice, charlie, mpt, 0);
 
+        auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT(sleBob && sleCharlie);
+        auto const version = (*sleBob)[sfConfidentialBalanceVersion];
+        auto const spendingBefore = sleBob->getFieldVL(sfConfidentialBalanceSpending);
+        auto const inboxBefore = sleCharlie->getFieldVL(sfConfidentialBalanceInbox);
+
         auto w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 25);
         BEAST_EXPECT(w);
         if (!w)
             return;
-        // Flip one nibble in the sigma portion.
+        // Flip one nibble in the sigma portion (hex offset < 2 * kSendSigmaSize).
         if (w->zkHex.size() > 4)
             w->zkHex[3] = (w->zkHex[3] == '0') ? '1' : '0';
 
@@ -631,6 +778,189 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
                 w->zkHex),
             fee,
             Ter(tecBAD_PROOF));
+
+        sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT((*sleBob)[sfConfidentialBalanceVersion] == version);
+        BEAST_EXPECT(sleBob->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
+        BEAST_EXPECT(sleCharlie->getFieldVL(sfConfidentialBalanceInbox) == inboxBefore);
+    }
+
+    void
+    testBulletproofTamperedProof()
+    {
+        // Valid compact sigma prefix; corrupt only a mid-scalar BP byte so
+        // execution reaches verifyRange64Aggregated and returns tecBAD_PROOF.
+        testcase("send BP-only tamper -> tecBAD_PROOF");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        fundConvertMerge(env, alice, bob, mpt, 100);
+        fundConvertMerge(env, alice, charlie, mpt, 0);
+
+        auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT(sleBob && sleCharlie);
+        auto const version = (*sleBob)[sfConfidentialBalanceVersion];
+        auto const spendingHex = strHex(sleBob->getFieldVL(sfConfidentialBalanceSpending));
+        auto const inboxHex = strHex(sleCharlie->getFieldVL(sfConfidentialBalanceInbox));
+
+        auto w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 25);
+        BEAST_EXPECT(w);
+        if (!w)
+            return;
+
+        // Aggregated BP layout (same prefix as single): A,S,T1,T2 then
+        // tauX,mu,tHat,… Flip mid-byte of tauX inside the BP portion.
+        constexpr std::size_t kBpTauXMid =
+            4 * Secp256k1Point::kSerializedSize + Secp256k1Scalar::kSerializedSize / 2;
+        auto const zkBytesOpt = strUnHex(w->zkHex);
+        BEAST_EXPECT(zkBytesOpt && zkBytesOpt->size() == kSendZkProofSize);
+        if (!zkBytesOpt || zkBytesOpt->size() != kSendZkProofSize)
+            return;
+        std::vector<std::uint8_t> zkBytes(zkBytesOpt->begin(), zkBytesOpt->end());
+        zkBytes[kSendSigmaSize + kBpTauXMid] ^= 0x01;
+        w->zkHex = strHex(makeSlice(zkBytes));
+
+        auto const fee = Fee(10 * env.current()->fees().base);
+        env(sendJV(
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex),
+            fee,
+            Ter(tecBAD_PROOF));
+
+        sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT((*sleBob)[sfConfidentialBalanceVersion] == version);
+        BEAST_EXPECT(strHex(sleBob->getFieldVL(sfConfidentialBalanceSpending)) == spendingHex);
+        BEAST_EXPECT(strHex(sleCharlie->getFieldVL(sfConfidentialBalanceInbox)) == inboxHex);
+    }
+
+    void
+    testDestinationTagNeeded()
+    {
+        testcase("RequireDestTag without DestinationTag -> tecDST_TAG_NEEDED");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        fundConvertMerge(env, alice, bob, mpt, 100);
+        fundConvertMerge(env, alice, charlie, mpt, 0);
+
+        env(fset(charlie, asfRequireDest));
+        env.close();
+
+        auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT(sleBob && sleCharlie);
+        auto const version = (*sleBob)[sfConfidentialBalanceVersion];
+        auto const spendingBefore = sleBob->getFieldVL(sfConfidentialBalanceSpending);
+        auto const inboxBefore = sleCharlie->getFieldVL(sfConfidentialBalanceInbox);
+
+        auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 25);
+        BEAST_EXPECT(w);
+        if (!w)
+            return;
+
+        auto const fee = Fee(10 * env.current()->fees().base);
+        env(sendJV(
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex),
+            fee,
+            Ter(tecDST_TAG_NEEDED));
+
+        sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT((*sleBob)[sfConfidentialBalanceVersion] == version);
+        BEAST_EXPECT(sleBob->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
+        BEAST_EXPECT(sleCharlie->getFieldVL(sfConfidentialBalanceInbox) == inboxBefore);
+    }
+
+    void
+    testDestinationTagSuccess()
+    {
+        testcase("RequireDestTag with DestinationTag succeeds");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance, .issuerEncryptionKey = kKeyG});
+        fundConvertMerge(env, alice, bob, mpt, 100);
+        fundConvertMerge(env, alice, charlie, mpt, 0);
+
+        env(fset(charlie, asfRequireDest));
+        env.close();
+
+        auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT(sleBob && sleCharlie);
+        auto const version = (*sleBob)[sfConfidentialBalanceVersion];
+        auto const spendingBefore = sleBob->getFieldVL(sfConfidentialBalanceSpending);
+        auto const inboxBefore = sleCharlie->getFieldVL(sfConfidentialBalanceInbox);
+
+        auto const w = buildSendWitness(env, bob, charlie, mpt.issuanceID(), 100, 25);
+        BEAST_EXPECT(w);
+        if (!w)
+            return;
+
+        auto const fee = Fee(10 * env.current()->fees().base);
+        env(sendJV(
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex),
+            fee,
+            Dtag(7));
+        env.close();
+
+        sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT((*sleBob)[sfConfidentialBalanceVersion] == version + 1);
+        BEAST_EXPECT(sleBob->getFieldVL(sfConfidentialBalanceSpending) != spendingBefore);
+        BEAST_EXPECT(sleCharlie->getFieldVL(sfConfidentialBalanceInbox) != inboxBefore);
     }
 
     void
@@ -933,10 +1263,10 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         auto const rZero = encZeroRandomness(bob.id(), alice.id(), mpt.issuanceID());
         BEAST_EXPECT(sk && pk && rConvert && rZero);
 
-        // After convert+merge: spending = Enc(bal, 2·rZero + rConvert).
-        auto const spendR = fieldToScalar(fieldAdd(
-            fieldAdd(Secp256k1Field::fromScalar(*rZero), Secp256k1Field::fromScalar(*rZero)),
-            Secp256k1Field::fromScalar(*rConvert)));
+        // After convert+merge (#16 first-write): inbox = Enc(bal, rConvert),
+        // spending was EncZero → merged spending = Enc(bal, rZero + rConvert).
+        auto const spendR = fieldToScalar(
+            fieldAdd(Secp256k1Field::fromScalar(*rZero), Secp256k1Field::fromScalar(*rConvert)));
         BEAST_EXPECT(spendR);
         BEAST_EXPECT(encryptHex(bal, *pk, *spendR) == spendingHex);
 
@@ -968,14 +1298,15 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         BEAST_EXPECT(strHex(sleBob->getFieldVL(sfIssuerEncryptedBalance)) == issuerHex);
         BEAST_EXPECT(sleCharlie->getFieldVL(sfConfidentialBalanceInbox) == inboxBefore);
 
-        // Issuer-mirror equality: amount CT = issuer balance (r = rZero + rConvert).
-        auto const issuerR = fieldToScalar(
-            fieldAdd(Secp256k1Field::fromScalar(*rZero), Secp256k1Field::fromScalar(*rConvert)));
-        BEAST_EXPECT(issuerR);
+        // Issuer-mirror equality: first-write issuer CT = Enc(bal, rConvert).
+        // Use distinct balance blinding so remBlind = ρ − rConvert ≠ 0.
+        auto const issuerR = rConvert;
+        auto const rhoIssuer = parseScalarHex(kScalar1);
+        BEAST_EXPECT(rhoIssuer);
         BEAST_EXPECT(encryptHex(bal, *pk, *issuerR) == issuerHex);
 
-        auto const wIssuer =
-            buildSendWitness(env, bob, charlie, mpt.issuanceID(), bal, bal, &*issuerR);
+        auto const wIssuer = buildSendWitness(
+            env, bob, charlie, mpt.issuanceID(), bal, bal, &*issuerR, std::nullopt, &*rhoIssuer);
         BEAST_EXPECT(wIssuer);
         if (!wIssuer)
             return;
@@ -1277,6 +1608,321 @@ class ConfidentialMPTSend_test : public beast::unit_test::Suite
         BEAST_EXPECT(sleBob->getFieldVL(sfConfidentialBalanceSpending) == spendingBefore);
     }
 
+    void
+    testDistinctKeysLifecycle()
+    {
+        testcase("lifecycle with distinct holder/issuer/auditor keys");
+        using namespace jtx;
+
+        // Distinct secp256k1 key pairs — no shared holder/issuer secrets.
+        auto const senderSk = parseScalarHex(kScalar1);
+        auto const destSk = parseScalarHex(kScalar3);
+        auto const issuerSk = parseScalarHex(kScalar4);
+        auto const auditorSk = parseScalarHex(kScalar2);
+        BEAST_EXPECT(senderSk && destSk && issuerSk && auditorSk);
+        if (!senderSk || !destSk || !issuerSk || !auditorSk)
+            return;
+
+        auto const senderPk = generatorMultiply(*senderSk);
+        auto const destPk = generatorMultiply(*destSk);
+        auto const issuerPk = generatorMultiply(*issuerSk);
+        auto const auditorPk = generatorMultiply(*auditorSk);
+        BEAST_EXPECT(senderPk && destPk && issuerPk && auditorPk);
+        if (!senderPk || !destPk || !issuerPk || !auditorPk)
+            return;
+
+        auto const senderKeyHex = strHex(senderPk->serialize());
+        auto const destKeyHex = strHex(destPk->serialize());
+        auto const issuerKeyHex = strHex(issuerPk->serialize());
+        auto const auditorKeyHex = strHex(auditorPk->serialize());
+        BEAST_EXPECT(senderKeyHex != destKeyHex);
+        BEAST_EXPECT(senderKeyHex != issuerKeyHex);
+        BEAST_EXPECT(senderKeyHex != auditorKeyHex);
+        BEAST_EXPECT(destKeyHex != issuerKeyHex);
+        BEAST_EXPECT(destKeyHex != auditorKeyHex);
+        BEAST_EXPECT(issuerKeyHex != auditorKeyHex);
+
+        // Same plaintext/randomness under distinct keys must not collide.
+        auto const rProbe = parseScalarHex(kScalar5);
+        BEAST_EXPECT(rProbe);
+        auto const probeSender = encryptHex(7, *senderPk, *rProbe);
+        auto const probeDest = encryptHex(7, *destPk, *rProbe);
+        auto const probeIssuer = encryptHex(7, *issuerPk, *rProbe);
+        auto const probeAuditor = encryptHex(7, *auditorPk, *rProbe);
+        BEAST_EXPECT(!probeSender.empty());
+        BEAST_EXPECT(probeSender != probeDest);
+        BEAST_EXPECT(probeSender != probeIssuer);
+        BEAST_EXPECT(probeSender != probeAuditor);
+        BEAST_EXPECT(probeDest != probeIssuer);
+        BEAST_EXPECT(probeDest != probeAuditor);
+        BEAST_EXPECT(probeIssuer != probeAuditor);
+        {
+            auto const ct = ElGamalCiphertext::encrypt(7, *senderPk, *rProbe);
+            BEAST_EXPECT(ct);
+            BEAST_EXPECT(expectDecryptsTo(*ct, *senderSk, 7));
+            BEAST_EXPECT(!expectDecryptsTo(*ct, *destSk, 7));
+            BEAST_EXPECT(!expectDecryptsTo(*ct, *issuerSk, 7));
+            BEAST_EXPECT(!expectDecryptsTo(*ct, *auditorSk, 7));
+        }
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        Account const bob{"bob"};
+        Account const charlie{"charlie"};
+        env.fund(XRP(10000), alice, bob, charlie);
+        env.close();
+
+        std::uint64_t const convertAmt = 100;
+        std::uint64_t const sendAmt = 40;
+        std::uint64_t const publicFund = 1000;
+
+        MPTTester mpt(env, alice, {.holders = {bob, charlie}, .fund = false});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+        mpt.set(
+            {.flags = tfMPTSetCanHoldConfidentialBalance,
+             .issuerEncryptionKey = issuerKeyHex,
+             .auditorEncryptionKey = auditorKeyHex});
+
+        auto const baseFee = env.current()->fees().base;
+        auto const fee = Fee(10 * baseFee);
+
+        auto convertInit = [&](Account const& holder,
+                               Secp256k1Scalar const& sk,
+                               Secp256k1Point const& pk,
+                               std::string const& keyHex,
+                               std::uint64_t amount,
+                               char const* rHex) {
+            mpt.authorize({.account = holder});
+            if (amount > 0)
+                mpt.pay(alice, holder, publicFund);
+            auto const r = parseScalarHex(rHex);
+            BEAST_EXPECT(r);
+            auto const holderCt = encryptHex(amount, pk, *r);
+            auto const issuerCt = encryptHex(amount, *issuerPk, *r);
+            auto const auditorCt = encryptHex(amount, *auditorPk, *r);
+            BEAST_EXPECT(holderCt != issuerCt);
+            BEAST_EXPECT(holderCt != auditorCt);
+            BEAST_EXPECT(issuerCt != auditorCt);
+            auto const ctxID = confidentialTxContextID(
+                static_cast<std::uint16_t>(ttCONFIDENTIAL_MPT_CONVERT),
+                holder.id(),
+                mpt.issuanceID(),
+                env.seq(holder));
+            auto const pok = proveRegisterPoK(sk, pk, makeSlice(ctxID));
+            BEAST_EXPECT(pok);
+            env(convertJV(
+                    holder,
+                    mpt.issuanceID(),
+                    amount,
+                    holderCt,
+                    issuerCt,
+                    rHex,
+                    keyHex,
+                    strHex(makeSlice(*pok)),
+                    auditorCt),
+                fee);
+            env.close();
+        };
+
+        // 1) Issuance already set with issuer + auditor keys.
+        // 2) Convert init for sender and destination under distinct holder keys.
+        convertInit(bob, *senderSk, *senderPk, senderKeyHex, convertAmt, kScalar5);
+        convertInit(charlie, *destSk, *destPk, destKeyHex, 0, kScalar6);
+
+        auto sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sleIss);
+        BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == convertAmt);
+        BEAST_EXPECT((*sleIss)[sfOutstandingAmount] == publicFund);
+        auto const oaAfterIssuance = (*sleIss)[sfOutstandingAmount];
+        auto const coaAfterIssuance = (*sleIss)[sfConfidentialOutstandingAmount];
+
+        auto sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        auto sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT(sleBob && sleCharlie);
+        BEAST_EXPECT(strHex(sleBob->getFieldVL(sfHolderEncryptionKey)) == senderKeyHex);
+        BEAST_EXPECT(strHex(sleCharlie->getFieldVL(sfHolderEncryptionKey)) == destKeyHex);
+
+        // Decrypt convert inboxes under intended keys (pre-merge).
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfConfidentialBalanceInbox)), *senderSk, convertAmt));
+        BEAST_EXPECT(!expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfConfidentialBalanceInbox)), *destSk, convertAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfIssuerEncryptedBalance)), *issuerSk, convertAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfAuditorEncryptedBalance)), *auditorSk, convertAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfConfidentialBalanceInbox)), *destSk, 0));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfIssuerEncryptedBalance)), *issuerSk, 0));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfAuditorEncryptedBalance)), *auditorSk, 0));
+
+        // 3) Merge sender.
+        env(mergeJV(bob, mpt.issuanceID()), fee);
+        env.close();
+        // Destination needs confidential init merge of Enc(0) before receive.
+        env(mergeJV(charlie, mpt.issuanceID()), fee);
+        env.close();
+
+        sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT(sleBob && sleCharlie);
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfConfidentialBalanceSpending)), *senderSk, convertAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfIssuerEncryptedBalance)), *issuerSk, convertAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfAuditorEncryptedBalance)), *auditorSk, convertAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfConfidentialBalanceSpending)), *destSk, 0));
+
+        // 4) Send bob→charlie with four-key compact sigma + aggregated range proof.
+        auto const rSend = parseScalarHex(kScalar7);
+        auto const rhoSend = parseScalarHex(kScalar5);
+        BEAST_EXPECT(rSend && rhoSend);
+        auto const w = buildSendWitness(
+            env,
+            bob,
+            charlie,
+            mpt.issuanceID(),
+            convertAmt,
+            sendAmt,
+            &*rSend,
+            *auditorPk,
+            &*rhoSend,
+            &*senderSk,
+            &*senderPk,
+            &*destPk,
+            &*issuerPk);
+        BEAST_EXPECT(w && w->auditorCt);
+        if (!w || !w->auditorCt)
+            return;
+        BEAST_EXPECT(w->senderCt != w->destCt);
+        BEAST_EXPECT(w->senderCt != w->issuerCt);
+        BEAST_EXPECT(w->senderCt != *w->auditorCt);
+        BEAST_EXPECT(w->destCt != w->issuerCt);
+        BEAST_EXPECT(w->destCt != *w->auditorCt);
+        BEAST_EXPECT(w->issuerCt != *w->auditorCt);
+
+        env(sendJV(
+                bob,
+                charlie,
+                mpt.issuanceID(),
+                w->senderCt,
+                w->destCt,
+                w->issuerCt,
+                w->pcBHex,
+                w->pcMHex,
+                w->zkHex,
+                *w->auditorCt),
+            fee);
+        env.close();
+
+        // 5) Decrypt/verify after send.
+        sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sleBob && sleCharlie && sleIss);
+        std::uint64_t const bobRem = convertAmt - sendAmt;
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfConfidentialBalanceSpending)), *senderSk, bobRem));
+        BEAST_EXPECT(!expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfConfidentialBalanceSpending)), *destSk, bobRem));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfIssuerEncryptedBalance)), *issuerSk, bobRem));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfAuditorEncryptedBalance)), *auditorSk, bobRem));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfConfidentialBalanceInbox)), *destSk, sendAmt));
+        BEAST_EXPECT(!expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfConfidentialBalanceInbox)), *senderSk, sendAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfIssuerEncryptedBalance)), *issuerSk, sendAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfAuditorEncryptedBalance)), *auditorSk, sendAmt));
+        BEAST_EXPECT((*sleIss)[sfOutstandingAmount] == oaAfterIssuance);
+        BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == coaAfterIssuance);
+
+        // 6) Merge destination.
+        env(mergeJV(charlie, mpt.issuanceID()), fee);
+        env.close();
+        sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        BEAST_EXPECT(sleCharlie);
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfConfidentialBalanceSpending)), *destSk, sendAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfIssuerEncryptedBalance)), *issuerSk, sendAmt));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfAuditorEncryptedBalance)), *auditorSk, sendAmt));
+
+        // 7) ConvertBack from destination with distinct issuer/auditor ciphertexts.
+        auto const spending = parseElGamalCiphertext(
+            makeSlice(sleCharlie->getFieldVL(sfConfidentialBalanceSpending)));
+        BEAST_EXPECT(spending);
+        auto const version = (*sleCharlie)[sfConfidentialBalanceVersion];
+        auto const rBack = parseScalarHex(kScalar6);
+        auto const rhoBack = parseScalarHex(kScalar7);
+        BEAST_EXPECT(rBack && rhoBack);
+        auto const zk = makeConvertBackZk(
+            sendAmt,
+            sendAmt,
+            *rhoBack,
+            *destSk,
+            *destPk,
+            *spending,
+            charlie.id(),
+            mpt.issuanceID(),
+            version,
+            env.seq(charlie));
+        BEAST_EXPECT(zk);
+        if (!zk)
+            return;
+        auto const pcB = pedersenCommit(sendAmt, *rhoBack);
+        BEAST_EXPECT(pcB);
+        auto const holderBack = encryptHex(sendAmt, *destPk, *rBack);
+        auto const issuerBack = encryptHex(sendAmt, *issuerPk, *rBack);
+        auto const auditorBack = encryptHex(sendAmt, *auditorPk, *rBack);
+        BEAST_EXPECT(holderBack != issuerBack);
+        BEAST_EXPECT(holderBack != auditorBack);
+        BEAST_EXPECT(issuerBack != auditorBack);
+
+        auto const charliePublicBefore = (*sleCharlie)[sfMPTAmount];
+        env(convertBackJV(
+                charlie,
+                mpt.issuanceID(),
+                sendAmt,
+                holderBack,
+                issuerBack,
+                kScalar6,
+                strHex(pcB->serialize()),
+                strHex(makeSlice(*zk)),
+                auditorBack),
+            fee);
+        env.close();
+
+        // 8) Final decrypt + public/OA/COA accounting.
+        sleCharlie = env.le(keylet::mptoken(mpt.issuanceID(), charlie.id()));
+        sleBob = env.le(keylet::mptoken(mpt.issuanceID(), bob.id()));
+        sleIss = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sleCharlie && sleBob && sleIss);
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfConfidentialBalanceSpending)), *destSk, 0));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfIssuerEncryptedBalance)), *issuerSk, 0));
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfAuditorEncryptedBalance)), *auditorSk, 0));
+        BEAST_EXPECT(!expectDecryptsField(
+            makeSlice(sleCharlie->getFieldVL(sfConfidentialBalanceSpending)), *senderSk, 0));
+        // Bob still holds the unsent confidential remainder.
+        BEAST_EXPECT(expectDecryptsField(
+            makeSlice(sleBob->getFieldVL(sfConfidentialBalanceSpending)), *senderSk, bobRem));
+        BEAST_EXPECT((*sleCharlie)[sfMPTAmount] == charliePublicBefore + sendAmt);
+        BEAST_EXPECT((*sleIss)[sfOutstandingAmount] == oaAfterIssuance);
+        BEAST_EXPECT((*sleIss)[sfConfidentialOutstandingAmount] == convertAmt - sendAmt);
+        BEAST_EXPECT((*sleBob)[sfMPTAmount] == publicFund - convertAmt);
+    }
+
 public:
     void
     run() override
@@ -1287,7 +1933,10 @@ public:
         testBadZkLength();
         testIssuerAsSender();
         testNoCanTransfer();
-        testTamperedProof();
+        testSigmaTamperedProof();
+        testBulletproofTamperedProof();
+        testDestinationTagNeeded();
+        testDestinationTagSuccess();
         testFeeMultiplier();
         testDepositAuth();
         testSendLocked();
@@ -1298,6 +1947,7 @@ public:
         testFullBalanceDifferentRandomness();
         testMissingAuditorMirror();
         testAuditorUnrepresentableSubtraction();
+        testDistinctKeysLifecycle();
     }
 };
 

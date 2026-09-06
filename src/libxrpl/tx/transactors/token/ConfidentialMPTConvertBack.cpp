@@ -8,8 +8,10 @@
 #include <xrpl/crypto/Secp256k1.h>
 #include <xrpl/ledger/View.h>
 #include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
+#include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -144,6 +146,10 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     auto const sleMpt = ctx.view.read(keylet::mptoken(issuanceID, account));
     if (!sleMpt)
         return tecOBJECT_NOT_FOUND;
+
+    // Classic lsfMPTAuthorized and DomainID authorization.
+    if (auto const ter = requireAuth(ctx.view, MPTIssue{issuanceID}, account); !isTesSuccess(ter))
+        return ter;
 
     if (!sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
         !sleMpt->isFieldPresent(sfHolderEncryptionKey) ||

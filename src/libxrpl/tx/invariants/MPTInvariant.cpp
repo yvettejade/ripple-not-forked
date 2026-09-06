@@ -454,7 +454,13 @@ ValidMPTPayment::finalize(
 {
     if (isTesSuccess(result))
     {
-        bool const invariantPasses = !view.rules().enabled(featureMPTokensV2);
+        // Enforce OutstandingAmount conservation when MPTokensV2 is enabled
+        // (existing behavior) or when ConfidentialTransfer is enabled so
+        // OA/public/COA conservation cannot merely log-and-pass with V2 off.
+        // When both amendments are disabled, keep log-and-pass for consensus
+        // with older nodes.
+        bool const confidential = view.rules().enabled(featureConfidentialTransfer);
+        bool const invariantPasses = !(view.rules().enabled(featureMPTokensV2) || confidential);
         if (overflow_)
         {
             JLOG(j.fatal()) << "Invariant failed: OutstandingAmount overflow";
@@ -462,7 +468,6 @@ ValidMPTPayment::finalize(
         }
 
         auto const signedMax = static_cast<std::int64_t>(kMaxMpTokenAmount);
-        bool const confidential = view.rules().enabled(featureConfidentialTransfer);
         for (auto const& [id, data] : data_)
         {
             (void)id;
@@ -644,10 +649,26 @@ ValidConfidentialMPT::visitEntry(
     std::shared_ptr<SLE const> const& before,
     std::shared_ptr<SLE const> const& after)
 {
-    // Only examine the post-transaction object. Deletion of MPTokens that
-    // still carry confidential fields is already blocked by MPTokenAuthorize
-    // / destroy paths; skip deleted entries here.
-    if (!after || isDelete)
+    auto const hasConfidentialState = [](SLE const& sle) {
+        return sle.isFieldPresent(sfHolderEncryptionKey) ||
+            sle.isFieldPresent(sfConfidentialBalanceSpending) ||
+            sle.isFieldPresent(sfConfidentialBalanceInbox) ||
+            sle.isFieldPresent(sfIssuerEncryptedBalance) ||
+            sle.isFieldPresent(sfAuditorEncryptedBalance) ||
+            sle.isFieldPresent(sfConfidentialBalanceVersion);
+    };
+
+    // Deletion blocker: MPTokens that still carry confidential state must not
+    // be removed. Prefer `after` (erased SLE), matching ValidMPTIssuance.
+    if (isDelete)
+    {
+        auto const& deleted = after ? after : before;
+        if (deleted && deleted->getType() == ltMPTOKEN && hasConfidentialState(*deleted))
+            badConfidentialDelete_ = true;
+        return;
+    }
+
+    if (!after)
         return;
 
     if (after->getType() == ltMPTOKEN)
@@ -658,6 +679,11 @@ ValidConfidentialMPT::visitEntry(
         // (spending ∨ inbox) ⇔ issuer encrypted balance
         if ((hasSpending || hasInbox) != hasIssuer)
             badEncryptedFields_ = true;
+
+        // Track issuances referenced by confidential MPTokens; finalize()
+        // validates lsfMPTCanHoldConfidentialBalance against the final view.
+        if (hasConfidentialState(*after))
+            confidentialIssuanceIds_.insert((*after)[sfMPTokenIssuanceID]);
 
         // Spec: "If spending is modified, then version must be changed."
         // First-time initialization (absent → present) sets version to 0 and
@@ -724,6 +750,24 @@ ValidConfidentialMPT::finalize(
         JLOG(j.fatal()) << "Invariant failed: ConfidentialOutstandingAmount "
                            "exceeds OutstandingAmount";
         passes = false;
+    }
+    if (badConfidentialDelete_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: MPToken with confidential state "
+                           "deleted";
+        passes = false;
+    }
+    for (auto const& issuanceId : confidentialIssuanceIds_)
+    {
+        auto const sleIssuance = view.read(keylet::mptIssuance(issuanceId));
+        if (!sleIssuance || !sleIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
+        {
+            JLOG(j.fatal()) << "Invariant failed: confidential MPToken without "
+                               "lsfMPTCanHoldConfidentialBalance issuance";
+            badConfidentialIssuanceFlag_ = true;
+            passes = false;
+            break;
+        }
     }
     return passes;
 }
