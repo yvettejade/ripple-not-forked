@@ -5,8 +5,10 @@
 #include <xrpl/crypto/Secp256k1.h>
 #include <xrpl/ledger/View.h>
 #include <xrpl/ledger/helpers/ConfidentialMPTHelpers.h>
+#include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
@@ -82,8 +84,9 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
         !sleMpt->isFieldPresent(sfHolderEncryptionKey))
         return tecNO_PERMISSION;
 
-    if (sleIssuance->isFlag(lsfMPTRequireAuth) && !sleMpt->isFlag(lsfMPTAuthorized))
-        return tecNO_AUTH;
+    // Classic lsfMPTAuthorized and DomainID authorization.
+    if (auto const ter = requireAuth(ctx.view, MPTIssue{issuanceID}, account); !isTesSuccess(ter))
+        return ter;
 
     if (sleMpt->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
         return tecLOCKED;
