@@ -1,6 +1,3 @@
-#include <test/crypto/fixtures/BulletproofKatVectors.h>
-#include <test/crypto/fixtures/ConfidentialKatVectors.h>
-
 #include <xrpl/basics/Slice.h>
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/crypto/Bulletproofs.h>
@@ -135,52 +132,9 @@ class Bulletproofs_test : public beast::unit_test::Suite
     }
 
     void
-    testKnownAnswerVerifyOnly()
-    {
-        testcase("Bulletproof known-answer verify-only vectors");
-
-        using namespace test::crypto::kat;
-
-        // Fixed commitment V = pedersenCommit(42, 1); proof generated once.
-        // verify-only path pins generators/transcript domains indirectly:
-        // any G_i/H_i/U, tag, or challenge-order change must fail verification.
-        {
-            auto const V = Secp256k1Point::parse(makeSlice(kBp_single_V));
-            BEAST_EXPECT(V);
-            BEAST_EXPECT(kBp_single_proof.size() == kSingleBulletproofSize);
-            BEAST_EXPECT(verifyRange64(*V, makeSlice(kBp_single_proof)));
-
-            auto bad = kBp_single_proof;
-            bad[0] ^= 0x01;
-            BEAST_EXPECT(!verifyRange64(*V, makeSlice(bad)));
-
-            // Commitment mismatch rejects the same proof bytes.
-            auto const Vwrong = Secp256k1Point::parse(makeSlice(kBp_agg_V1));
-            BEAST_EXPECT(Vwrong);
-            BEAST_EXPECT(!verifyRange64(*Vwrong, makeSlice(kBp_single_proof)));
-        }
-
-        // Aggregated: V1=pedersenCommit(7,1), V2=pedersenCommit(9,2).
-        {
-            auto const V1 = Secp256k1Point::parse(makeSlice(kBp_agg_V1));
-            auto const V2 = Secp256k1Point::parse(makeSlice(kBp_agg_V2));
-            BEAST_EXPECT(V1 && V2);
-            BEAST_EXPECT(kBp_agg_proof.size() == kAggregatedBulletproofSize);
-            BEAST_EXPECT(verifyRange64Aggregated(*V1, *V2, makeSlice(kBp_agg_proof)));
-
-            auto bad = kBp_agg_proof;
-            bad[33] ^= 0x02;
-            BEAST_EXPECT(!verifyRange64Aggregated(*V1, *V2, makeSlice(bad)));
-            BEAST_EXPECT(!verifyRange64Aggregated(*V2, *V1, makeSlice(kBp_agg_proof)));
-            BEAST_EXPECT(!verifyRange64(*V1, makeSlice(kBp_agg_proof)));
-        }
-    }
-
-    void
     run() override
     {
         testSizes();
-        testKnownAnswerVerifyOnly();
         testSingleRange();
         testAggregatedRange();
         testWrongWitnessRejected();

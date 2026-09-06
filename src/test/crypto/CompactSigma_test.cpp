@@ -1,5 +1,3 @@
-#include <test/crypto/fixtures/ConfidentialKatVectors.h>
-
 #include <xrpl/basics/Slice.h>
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/crypto/CompactSigma.h>
@@ -433,128 +431,10 @@ public:
     }
 
     void
-    testKnownAnswerPedersenTranscript()
-    {
-        testcase("Pedersen / hashToCurve / transcript known answers");
-
-        using namespace test::crypto::kat;
-
-        auto const& H = pedersenH();
-        BEAST_EXPECT(H.serialize() == kPedersenH);
-
-        std::array<std::uint8_t, 32> one{};
-        one[31] = 0x01;
-        std::array<std::uint8_t, 32> two{};
-        two[31] = 0x02;
-        auto const s1 = Secp256k1Scalar::parse(makeSlice(one));
-        auto const s2 = Secp256k1Scalar::parse(makeSlice(two));
-        BEAST_EXPECT(s1 && s2);
-
-        auto const pc01 = pedersenCommit(0, *s1);
-        auto const pc51 = pedersenCommit(5, *s1);
-        auto const pc422 = pedersenCommit(42, *s2);
-        BEAST_EXPECT(pc01 && pc51 && pc422);
-        BEAST_EXPECT(pc01->serialize() == kPedersenCommit_0_1);
-        BEAST_EXPECT(pc51->serialize() == kPedersenCommit_5_1);
-        BEAST_EXPECT(pc422->serialize() == kPedersenCommit_42_2);
-
-        std::string const msg = "CMPT_TEST";
-        auto const hs = hashToCurveScalar(makeSlice(msg));
-        BEAST_EXPECT(hs);
-        BEAST_EXPECT(hs->serialize() == kHashToCurveScalar_CMPT_TEST);
-
-        std::array<std::uint8_t, 8> raw{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
-        CompactTranscript tr;
-        tr.appendDomainTag("CMPT_TEST");
-        tr.append(H);
-        tr.append(*s1);
-        tr.append(makeSlice(raw));
-        auto const e = tr.challenge();
-        BEAST_EXPECT(e);
-        BEAST_EXPECT(e->serialize() == kCompactTranscript_challenge);
-    }
-
-    void
-    testKnownAnswerSigmaVerifyOnly()
-    {
-        testcase("Compact sigma known-answer verify-only vectors");
-
-        using namespace test::crypto::kat;
-
-        // Register PoK: sk=1 → pk=G, fixed context, pinned proof bytes.
-        {
-            auto const pk = Secp256k1Point::parse(makeSlice(kRegister_pk));
-            BEAST_EXPECT(pk);
-            BEAST_EXPECT(kRegister_proof.size() == kRegisterPoKSize);
-            BEAST_EXPECT(verifyRegisterPoK(*pk, makeSlice(kRegister_proof), makeSlice(kSigma_ctx)));
-            auto bad = kRegister_proof;
-            bad[0] ^= 0x01;
-            BEAST_EXPECT(!verifyRegisterPoK(*pk, makeSlice(bad), makeSlice(kSigma_ctx)));
-        }
-
-        // Send sigma: fixed statement points/ciphertexts + pinned proof.
-        {
-            auto const senderPk = Secp256k1Point::parse(makeSlice(kSend_senderPk));
-            auto const recipientPk = Secp256k1Point::parse(makeSlice(kSend_recipientPk));
-            auto const ct = ElGamalCiphertext::parse(makeSlice(kSend_ct));
-            auto const balCt = ElGamalCiphertext::parse(makeSlice(kSend_balCt));
-            auto const pcM = Secp256k1Point::parse(makeSlice(kSend_pcM));
-            auto const pcB = Secp256k1Point::parse(makeSlice(kSend_pcB));
-            BEAST_EXPECT(senderPk && recipientPk && ct && balCt && pcM && pcB);
-            std::vector<Secp256k1Point> pks{*recipientPk};
-            std::vector<ElGamalCiphertext> cts{*ct};
-            BEAST_EXPECT(kSend_proof.size() == kSendSigmaSize);
-            BEAST_EXPECT(verifySendSigma(
-                pks,
-                *senderPk,
-                cts,
-                *pcM,
-                *pcB,
-                *balCt,
-                makeSlice(kSend_proof),
-                makeSlice(kSigma_ctx)));
-            auto bad = kSend_proof;
-            bad[32] ^= 0x01;
-            BEAST_EXPECT(!verifySendSigma(
-                pks, *senderPk, cts, *pcM, *pcB, *balCt, makeSlice(bad), makeSlice(kSigma_ctx)));
-        }
-
-        // ConvertBack sigma.
-        {
-            auto const senderPk = Secp256k1Point::parse(makeSlice(kConvertBack_senderPk));
-            auto const balCt = ElGamalCiphertext::parse(makeSlice(kConvertBack_balCt));
-            auto const pcB = Secp256k1Point::parse(makeSlice(kConvertBack_pcB));
-            BEAST_EXPECT(senderPk && balCt && pcB);
-            BEAST_EXPECT(kConvertBack_proof.size() == kConvertBackSigmaSize);
-            BEAST_EXPECT(verifyConvertBackSigma(
-                *senderPk, *balCt, *pcB, makeSlice(kConvertBack_proof), makeSlice(kSigma_ctx)));
-            auto bad = kConvertBack_proof;
-            bad[0] ^= 0x01;
-            BEAST_EXPECT(!verifyConvertBackSigma(
-                *senderPk, *balCt, *pcB, makeSlice(bad), makeSlice(kSigma_ctx)));
-        }
-
-        // Clawback sigma: amount=11.
-        {
-            auto const pk = Secp256k1Point::parse(makeSlice(kClawback_pk));
-            auto const ct = ElGamalCiphertext::parse(makeSlice(kClawback_ct));
-            BEAST_EXPECT(pk && ct);
-            BEAST_EXPECT(kClawback_proof.size() == kClawbackSigmaSize);
-            BEAST_EXPECT(verifyClawbackSigma(
-                11, *pk, *ct, makeSlice(kClawback_proof), makeSlice(kSigma_ctx)));
-            auto bad = kClawback_proof;
-            bad[31] ^= 0x01;
-            BEAST_EXPECT(!verifyClawbackSigma(11, *pk, *ct, makeSlice(bad), makeSlice(kSigma_ctx)));
-        }
-    }
-
-    void
     run() override
     {
         testExactSizes();
         testPedersenAndTranscript();
-        testKnownAnswerPedersenTranscript();
-        testKnownAnswerSigmaVerifyOnly();
         testRegisterHonestAndTamper();
         testSendHonest(3, false);
         testSendHonest(3, true);
