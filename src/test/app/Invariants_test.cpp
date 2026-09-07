@@ -4693,6 +4693,31 @@ class Invariants_test : public beast::unit_test::Suite
                 BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
             }
 
+            {
+                // Deletion of issuance with COA > 0 must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto deleted = makeIssuance(a1.id(), 1);
+                (*deleted)[sfConfidentialOutstandingAmount] = 1;
+                ValidConfidentialMPT inv;
+                inv.visitEntry(true, deleted, deleted);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "MPTokenIssuance deleted with ConfidentialOutstandingAmount") !=
+                    std::string::npos);
+            }
+
+            {
+                // Deletion of issuance with COA == 0 is fine.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto deleted = makeIssuance(a1.id(), 1);
+                ValidConfidentialMPT inv;
+                inv.visitEntry(true, deleted, deleted);
+                BEAST_EXPECT(inv.finalize(dummyTx, tesSUCCESS, XRPAmount{}, view, jlog));
+            }
+
             // Fee-claiming tec* paths still enforce dirty confidential state.
             // Representative tec: tecPATH_DRY (any isTecClaim result works).
             {
@@ -4775,6 +4800,21 @@ class Invariants_test : public beast::unit_test::Suite
                 BEAST_EXPECT(!inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
                 BEAST_EXPECT(
                     sink.messages().str().find("MPToken with confidential state deleted") !=
+                    std::string::npos);
+            }
+
+            {
+                // tec*: deleting issuance with COA > 0 must fail.
+                test::StreamSink sink{beast::Severity::Warning};
+                beast::Journal const jlog{sink};
+                auto deleted = makeIssuance(a1.id(), 1);
+                (*deleted)[sfConfidentialOutstandingAmount] = 1;
+                ValidConfidentialMPT inv;
+                inv.visitEntry(true, deleted, deleted);
+                BEAST_EXPECT(!inv.finalize(dummyTx, tecPATH_DRY, XRPAmount{}, view, jlog));
+                BEAST_EXPECT(
+                    sink.messages().str().find(
+                        "MPTokenIssuance deleted with ConfidentialOutstandingAmount") !=
                     std::string::npos);
             }
         }
@@ -4893,6 +4933,38 @@ class Invariants_test : public beast::unit_test::Suite
                         {.env = env,
                          .issuer = gw,
                          .holders = {a2},
+                         .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
+                    id = mpt.issuanceID();
+                    return true;
+                });
+        }
+
+        // End-to-end: delete issuance with COA > 0.
+        {
+            MPTID id{};
+            doInvariantCheck(
+                Env{*this, defaultAmendments() | featureConfidentialTransfer},
+                {{"MPTokenIssuance deleted with ConfidentialOutstandingAmount"}},
+                [&](Account const&, Account const&, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptIssuance(id));
+                    if (!sle)
+                        return false;
+                    // Keep COA ≤ OA so only the deletion rule fires.
+                    sle->setFieldU64(sfOutstandingAmount, 1);
+                    sle->setFieldU64(sfConfidentialOutstandingAmount, 1);
+                    ac.view().update(sle);
+                    ac.view().erase(sle);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+                [&](Account const&, Account const&, Env& env) {
+                    Account const gw{"gw"};
+                    env.fund(XRP(1'000), gw);
+                    MPTTester const mpt(
+                        {.env = env,
+                         .issuer = gw,
                          .flags = tfMPTCanHoldConfidentialBalance | tfMPTCanTransfer});
                     id = mpt.issuanceID();
                     return true;

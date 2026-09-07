@@ -659,12 +659,16 @@ ValidConfidentialMPT::visitEntry(
     };
 
     // Deletion blocker: MPTokens that still carry confidential state must not
-    // be removed. Prefer `after` (erased SLE), matching ValidMPTIssuance.
+    // be removed. An MPTokenIssuance may be deleted only when COA is 0
+    // (XLS-0096 §7.4). Prefer `after` (erased SLE), matching ValidMPTIssuance.
     if (isDelete)
     {
         auto const& deleted = after ? after : before;
         if (deleted && deleted->getType() == ltMPTOKEN && hasConfidentialState(*deleted))
             badConfidentialDelete_ = true;
+        if (deleted && deleted->getType() == ltMPTOKEN_ISSUANCE &&
+            (*deleted)[sfConfidentialOutstandingAmount] > 0)
+            badConfidentialIssuanceDelete_ = true;
         return;
     }
 
@@ -755,6 +759,12 @@ ValidConfidentialMPT::finalize(
     {
         JLOG(j.fatal()) << "Invariant failed: MPToken with confidential state "
                            "deleted";
+        passes = false;
+    }
+    if (badConfidentialIssuanceDelete_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: MPTokenIssuance deleted with "
+                           "ConfidentialOutstandingAmount > 0";
         passes = false;
     }
     for (auto const& issuanceId : confidentialIssuanceIds_)

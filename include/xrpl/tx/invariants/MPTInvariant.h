@@ -126,7 +126,8 @@ private:
  *     every touched MPTokenIssuance (non-negativity is inherent for UINT64).
  *  4. Deletion blocker: an MPToken that carries any confidential state
  *     (sfHolderEncryptionKey, spending, inbox, issuer mirror, auditor mirror,
- *     or balance version) must not be deleted.
+ *     or balance version) must not be deleted. An MPTokenIssuance may be
+ *     deleted only when sfConfidentialOutstandingAmount is 0.
  *  5. Issuance flag consistency: an MPToken that carries any confidential
  *     state must reference an existing MPTokenIssuance with
  *     lsfMPTCanHoldConfidentialBalance. Touched issuance IDs are collected
@@ -151,6 +152,7 @@ class ValidConfidentialMPT
     bool badVersionModification_ = false;
     bool badCoaBounds_ = false;
     bool badConfidentialDelete_ = false;
+    bool badConfidentialIssuanceDelete_ = false;
     bool badConfidentialIssuanceFlag_ = false;
     // Issuance IDs referenced by MPTokens that carry confidential state.
     hash_set<uint192> confidentialIssuanceIds_;
