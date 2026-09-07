@@ -190,6 +190,8 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
             BEAST_EXPECT(sle->isFieldPresent(sfAuditorEncryptionKey));
             BEAST_EXPECT(strHex(sle->getFieldVL(sfIssuerEncryptionKey)) == kKeyG);
             BEAST_EXPECT(strHex(sle->getFieldVL(sfAuditorEncryptionKey)) == kKey2G);
+            // Set must not invent a nonzero COA.
+            BEAST_EXPECT((*sle)[sfConfidentialOutstandingAmount] == 0);
         }
 
         // Auditor without issuer on THIS tx → temMALFORMED.
@@ -538,6 +540,79 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
     }
 
     void
+    testSetKeysWithCOA()
+    {
+        // Spec §12.4.2.4: encryption key upload rejected when COA > 0.
+        // COA is SoeDefault (absent reads as 0); inject via OpenLedger like destroy.
+        testcase("set encryption keys rejected when COA > 0");
+        using namespace jtx;
+
+        Env env{*this, withConfidential()};
+        Account const alice{"alice"};
+        env.fund(XRP(10000), alice);
+        env.close();
+
+        MPTTester mpt(env, alice, {.fund = false, .close = false});
+        mpt.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+        env.close();
+
+        auto injectCOA = [&](std::uint64_t value) {
+            auto const ok = env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+                auto const sle = view.read(keylet::mptIssuance(mpt.issuanceID()));
+                if (!sle)
+                    return false;
+                STObject fields{sfLedgerEntry};
+                for (auto const& field : *sle)
+                {
+                    if (field.isDefault() &&
+                        (field.getFName() == sfTransferFee || field.getFName() == sfAssetScale ||
+                         field.getFName() == sfMutableFlags ||
+                         field.getFName() == sfConfidentialOutstandingAmount))
+                        continue;
+                    xrpl::detail::STVar var{field};
+                    fields.set(std::move(var.get()));
+                }
+                auto replacement = std::make_shared<SLE>(fields, sle->key());
+                if (value == 0)
+                {
+                    if (replacement->isFieldPresent(sfConfidentialOutstandingAmount))
+                        replacement->makeFieldAbsent(sfConfidentialOutstandingAmount);
+                }
+                else
+                {
+                    (*replacement)[sfConfidentialOutstandingAmount] = value;
+                }
+                view.rawReplace(replacement);
+                return true;
+            });
+            BEAST_EXPECT(ok);
+            auto const sle = env.le(keylet::mptIssuance(mpt.issuanceID()));
+            BEAST_EXPECT(sle && (*sle)[sfConfidentialOutstandingAmount] == value);
+        };
+
+        injectCOA(1);
+        mpt.set(
+            {.flags = tfMPTSetCanHoldConfidentialBalance,
+             .issuerEncryptionKey = kKeyG,
+             .err = tecNO_PERMISSION});
+        BEAST_EXPECT(
+            !env.le(keylet::mptIssuance(mpt.issuanceID()))->isFieldPresent(sfIssuerEncryptionKey));
+
+        injectCOA(0);
+        mpt.set({.flags = tfMPTSetCanHoldConfidentialBalance});
+        injectCOA(1);
+        mpt.set({.issuerEncryptionKey = kKeyG, .err = tecNO_PERMISSION});
+        BEAST_EXPECT(
+            !env.le(keylet::mptIssuance(mpt.issuanceID()))->isFieldPresent(sfIssuerEncryptionKey));
+
+        injectCOA(0);
+        mpt.set({.issuerEncryptionKey = kKeyG, .auditorEncryptionKey = kKey2G});
+        auto const sle = env.le(keylet::mptIssuance(mpt.issuanceID()));
+        BEAST_EXPECT(sle->isFieldPresent(sfIssuerEncryptionKey));
+        BEAST_EXPECT(sle->isFieldPresent(sfAuditorEncryptionKey));
+    }
+
+    void
     run() override
     {
         testAmendmentDisabled();
@@ -545,6 +620,7 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         testSetKeysAndFlags();
         testTransferFeeMutex();
         testDestroyWithCOA();
+        testSetKeysWithCOA();
         testDelegateConfidential();
     }
 };
