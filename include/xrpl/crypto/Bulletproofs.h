@@ -23,12 +23,18 @@ inline constexpr std::size_t kAggregatedBulletproofSize = 754;
 
 /** Prove v ∈ [0, 2^64) for Pedersen commitment V = v·G + γ·H.
 
-    Spec gap: Bulletproof generator vectors and Fiat–Shamir domain tags are
-    unnamed. Generators G_i, H_i, U are NUMS via SHA-512-half of
+    Algebra follows Bulletproofs (Bünz et al.) range proof + Protocol 1/2
+    (§3, §4.2): after t̂,τ_x,μ, derive independent challenge w and run IPA
+    with U' = w·U. The paper fixes those relations; it does not prescribe
+    Fiat–Shamir byte encoding, domain separators, generator hash-to-curve,
+    or scalar bind order — those are local choices below (uncertainty).
+
+    Generators G_i, H_i, U are NUMS via SHA-512-half of
     "CMPT_BP_G"|"CMPT_BP_H"|"CMPT_BP_U" plus a big-endian index (U uses
     index 0), even-y compressed parse, rejecting G and pedersenH().
     Transcript domain is "CMPT_BP_RANGE64". Challenges use CompactTranscript
-    (same SHA-512 map as compact sigma).
+    (same SHA-512 map as compact sigma). On-wire order is A,S,T1,T2,
+    tauX,mu,tHat then IPA; transcript binds tHat,tauX,mu before w.
 */
 [[nodiscard]] std::optional<std::array<std::uint8_t, kSingleBulletproofSize>>
 proveRange64(

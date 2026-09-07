@@ -637,7 +637,27 @@ proveRange(
         Hp.push_back(*hi);
     }
 
-    auto ipa = proveIpa(G, Hp, l, r, gens.u, tr);
+    // Protocol 1 wrapper (Bulletproofs §3 Protocol 1, §4.2): bind the three
+    // transmitted scalars (t̂, τ_x, μ) then derive independent challenge w
+    // (uChallenge; not the range challenge x). Set U' = w·U and run Protocol 2
+    // IPA on that scaled base. Wire size unchanged — scalars were already sent.
+    // Uncertainty: paper leaves Fiat–Shamir byte order / domain tags unspecified;
+    // we bind tHat, tauX, mu (distinct from on-wire tauX, mu, tHat order).
+    tr.append(*tHat);
+    tr.append(*tauX);
+    tr.append(*mu);
+    auto wS = tr.challenge();
+    if (!wS)
+        return std::nullopt;
+    tr.append(*wS);
+    auto const w = Secp256k1Field::fromScalar(*wS);  // uChallenge
+    if (w.isZero())
+        return std::nullopt;
+    auto Uprime = pointMultiply(gens.u, w);
+    if (!Uprime)
+        return std::nullopt;
+
+    auto ipa = proveIpa(G, Hp, l, r, *Uprime, tr);
     if (!ipa)
         return std::nullopt;
 
@@ -730,12 +750,31 @@ verifyRange(
     P = addPoints(P, msm(G, vecScale(ones(nTot), fieldNegate(z))));
     P = addPoints(P, msm(Hp, hCoeff));
     P = addPoints(P, pointMultiply(pedersenH(), fieldNegate(mu)));
-    P = addPoints(P, pointMultiply(gens.u, tHat));
+    if (!P)
+        return false;
+
+    // Protocol 1 (§3 / §4.2): same scalar bind order as prover (tHat, tauX, mu),
+    // then w → U' = w·U, P1 = P + t̂·U'. IPA (Protocol 2) uses U'.
+    tr.append(proof.tHat);
+    tr.append(proof.tauX);
+    tr.append(proof.mu);
+    auto wS = tr.challenge();
+    if (!wS)
+        return false;
+    tr.append(*wS);
+    auto const w = Secp256k1Field::fromScalar(*wS);  // uChallenge
+    if (w.isZero())
+        return false;
+    auto Uprime = pointMultiply(gens.u, w);
+    if (!Uprime)
+        return false;
+    // P1 = P + tHat · U'  ≡  P · (U')^{tHat} in the paper's multiplicative form.
+    P = addPoints(P, pointMultiply(*Uprime, tHat));
     if (!P)
         return false;
 
     CompactTranscript ipaTr = tr;
-    return verifyIpa(G, Hp, *P, gens.u, proof.ipa, ipaTr);
+    return verifyIpa(G, Hp, *P, *Uprime, proof.ipa, ipaTr);
 }
 
 template <std::size_t N>
