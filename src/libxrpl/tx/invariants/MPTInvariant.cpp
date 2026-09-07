@@ -454,7 +454,13 @@ ValidMPTPayment::finalize(
 {
     if (isTesSuccess(result))
     {
-        bool const invariantPasses = !view.rules().enabled(featureMPTokensV2);
+        // Enforce OutstandingAmount conservation when MPTokensV2 is enabled
+        // (existing behavior) or when ConfidentialTransfer is enabled so
+        // OA/public/COA conservation cannot merely log-and-pass with V2 off.
+        // When both amendments are disabled, keep log-and-pass for consensus
+        // with older nodes.
+        bool const confidential = view.rules().enabled(featureConfidentialTransfer);
+        bool const invariantPasses = !(view.rules().enabled(featureMPTokensV2) || confidential);
         if (overflow_)
         {
             JLOG(j.fatal()) << "Invariant failed: OutstandingAmount overflow";
@@ -462,7 +468,6 @@ ValidMPTPayment::finalize(
         }
 
         auto const signedMax = static_cast<std::int64_t>(kMaxMpTokenAmount);
-        bool const confidential = view.rules().enabled(featureConfidentialTransfer);
         for (auto const& [id, data] : data_)
         {
             (void)id;
@@ -636,6 +641,135 @@ ValidMPTTransfer::finalize(
     }
 
     return true;
+}
+
+void
+ValidConfidentialMPT::visitEntry(
+    bool isDelete,
+    std::shared_ptr<SLE const> const& before,
+    std::shared_ptr<SLE const> const& after)
+{
+    auto const hasConfidentialState = [](SLE const& sle) {
+        return sle.isFieldPresent(sfHolderEncryptionKey) ||
+            sle.isFieldPresent(sfConfidentialBalanceSpending) ||
+            sle.isFieldPresent(sfConfidentialBalanceInbox) ||
+            sle.isFieldPresent(sfIssuerEncryptedBalance) ||
+            sle.isFieldPresent(sfAuditorEncryptedBalance) ||
+            sle.isFieldPresent(sfConfidentialBalanceVersion);
+    };
+
+    // Deletion blocker: MPTokens that still carry confidential state must not
+    // be removed. Prefer `after` (erased SLE), matching ValidMPTIssuance.
+    if (isDelete)
+    {
+        auto const& deleted = after ? after : before;
+        if (deleted && deleted->getType() == ltMPTOKEN && hasConfidentialState(*deleted))
+            badConfidentialDelete_ = true;
+        return;
+    }
+
+    if (!after)
+        return;
+
+    if (after->getType() == ltMPTOKEN)
+    {
+        bool const hasSpending = after->isFieldPresent(sfConfidentialBalanceSpending);
+        bool const hasInbox = after->isFieldPresent(sfConfidentialBalanceInbox);
+        bool const hasIssuer = after->isFieldPresent(sfIssuerEncryptedBalance);
+        // (spending ∨ inbox) ⇔ issuer encrypted balance
+        if ((hasSpending || hasInbox) != hasIssuer)
+            badEncryptedFields_ = true;
+
+        // Track issuances referenced by confidential MPTokens; finalize()
+        // validates lsfMPTCanHoldConfidentialBalance against the final view.
+        if (hasConfidentialState(*after))
+            confidentialIssuanceIds_.insert((*after)[sfMPTokenIssuanceID]);
+
+        // Spec: "If spending is modified, then version must be changed."
+        // First-time initialization (absent → present) sets version to 0 and
+        // is not treated as a modification that requires a version bump.
+        if (before && before->getType() == ltMPTOKEN &&
+            before->isFieldPresent(sfConfidentialBalanceSpending))
+        {
+            bool const spendingModified = !hasSpending ||
+                (before->getFieldVL(sfConfidentialBalanceSpending) !=
+                 after->getFieldVL(sfConfidentialBalanceSpending));
+            if (spendingModified)
+            {
+                auto const verBefore =
+                    (*before)[~sfConfidentialBalanceVersion].value_or(std::uint32_t{0});
+                auto const verAfter =
+                    (*after)[~sfConfidentialBalanceVersion].value_or(std::uint32_t{0});
+                if (verBefore == verAfter)
+                    badVersionModification_ = true;
+            }
+        }
+    }
+    else if (after->getType() == ltMPTOKEN_ISSUANCE)
+    {
+        // UINT64 cannot be negative; enforce COA ≤ OA.
+        if ((*after)[sfConfidentialOutstandingAmount] > (*after)[sfOutstandingAmount])
+            badCoaBounds_ = true;
+    }
+}
+
+bool
+ValidConfidentialMPT::finalize(
+    STTx const&,
+    TER const result,
+    XRPAmount const,
+    ReadView const& view,
+    beast::Journal const& j)
+{
+    if (!view.rules().enabled(featureConfidentialTransfer))
+        return true;
+
+    // Enforce on tesSUCCESS and fee-claiming tec* paths. Invariant processing
+    // still runs when a fee is claimed, so dirty confidential mutations on a
+    // tec* result must fail (same idea as ValidPermissionedDomain rejecting
+    // dirty state on failed txs). Clean tec paths with no dirty confidential
+    // flags continue to pass. Other failure classes (ter*/tef*) are skipped.
+    if (!(isTesSuccess(result) || isTecClaim(result)))
+        return true;
+
+    bool passes = true;
+    if (badEncryptedFields_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: confidential MPToken encrypted "
+                           "field consistency";
+        passes = false;
+    }
+    if (badVersionModification_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: confidential spending modified "
+                           "without version change";
+        passes = false;
+    }
+    if (badCoaBounds_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: ConfidentialOutstandingAmount "
+                           "exceeds OutstandingAmount";
+        passes = false;
+    }
+    if (badConfidentialDelete_)
+    {
+        JLOG(j.fatal()) << "Invariant failed: MPToken with confidential state "
+                           "deleted";
+        passes = false;
+    }
+    for (auto const& issuanceId : confidentialIssuanceIds_)
+    {
+        auto const sleIssuance = view.read(keylet::mptIssuance(issuanceId));
+        if (!sleIssuance || !sleIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
+        {
+            JLOG(j.fatal()) << "Invariant failed: confidential MPToken without "
+                               "lsfMPTCanHoldConfidentialBalance issuance";
+            badConfidentialIssuanceFlag_ = true;
+            passes = false;
+            break;
+        }
+    }
+    return passes;
 }
 
 }  // namespace xrpl

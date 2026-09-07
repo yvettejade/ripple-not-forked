@@ -110,4 +110,57 @@ private:
         bool requireAuth) const;
 };
 
+/**
+ * XLS-0096 confidential MPToken / MPTokenIssuance ledger invariants.
+ *
+ * Gated on featureConfidentialTransfer. When the amendment is disabled,
+ * finalize always returns true (checks are skipped). When enabled, after a
+ * successful transaction:
+ *
+ *  1. Encrypted field consistency: an MPToken that carries
+ *     sfConfidentialBalanceSpending or sfConfidentialBalanceInbox must also
+ *     carry sfIssuerEncryptedBalance, and vice versa.
+ *  2. Version modification: if spending ciphertext bytes change, then
+ *     sfConfidentialBalanceVersion must also change.
+ *  3. COA bounds: 0 ≤ ConfidentialOutstandingAmount ≤ OutstandingAmount on
+ *     every touched MPTokenIssuance (non-negativity is inherent for UINT64).
+ *  4. Deletion blocker: an MPToken that carries any confidential state
+ *     (sfHolderEncryptionKey, spending, inbox, issuer mirror, auditor mirror,
+ *     or balance version) must not be deleted.
+ *  5. Issuance flag consistency: an MPToken that carries any confidential
+ *     state must reference an existing MPTokenIssuance with
+ *     lsfMPTCanHoldConfidentialBalance. Touched issuance IDs are collected
+ *     during visitEntry and validated against the final ReadView (no global
+ *     ledger scan).
+ *
+ * Checks run on tesSUCCESS and on fee-claiming tec* results (invariants still
+ * process when a fee is claimed). Dirty confidential mutations on a tec* path
+ * fail; clean tec paths with no dirty flags pass. Gated on
+ * featureConfidentialTransfer.
+ *
+ * Auditor-balance presence when an auditor key is configured on the issuance
+ * is enforced by the transactors (tecNO_PERMISSION / preclaim); it is not a
+ * stated ledger-object invariant in XLS-0096 §7.4, so it is not checked here.
+ *
+ * Separately, ValidMPTPayment enforces OA / public MPT / COA conservation when
+ * featureConfidentialTransfer is enabled even if featureMPTokensV2 is not.
+ */
+class ValidConfidentialMPT
+{
+    bool badEncryptedFields_ = false;
+    bool badVersionModification_ = false;
+    bool badCoaBounds_ = false;
+    bool badConfidentialDelete_ = false;
+    bool badConfidentialIssuanceFlag_ = false;
+    // Issuance IDs referenced by MPTokens that carry confidential state.
+    hash_set<uint192> confidentialIssuanceIds_;
+
+public:
+    void
+    visitEntry(bool, std::shared_ptr<SLE const> const&, std::shared_ptr<SLE const> const&);
+
+    bool
+    finalize(STTx const&, TER const, XRPAmount const, ReadView const&, beast::Journal const&);
+};
+
 }  // namespace xrpl
