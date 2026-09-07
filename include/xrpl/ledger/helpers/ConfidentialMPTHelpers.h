@@ -60,6 +60,7 @@ encZero(
 
     Convert register PoK: empty TxSpecific (addendum omits it).
     ConvertBack: Account || CBS_Version (uint32 BE).
+    Send: Destination || CBS_Version(sender) (uint32 BE).
     Clawback: Holder || 0 (uint32 BE).
 */
 [[nodiscard]] std::array<std::uint8_t, 32>
