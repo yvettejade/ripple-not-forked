@@ -7744,6 +7744,148 @@ class MPToken_test : public beast::unit_test::Suite
         BEAST_EXPECT(canMPTTradeAndTransfer(*env.current(), mpt, alice, carol) == tecNO_PERMISSION);
     }
 
+    void
+    testConfidentialIssuanceFlags(FeatureBitset features)
+    {
+        testcase("Confidential issuance flag gating");
+
+        using namespace test::jtx;
+        Account const alice("alice");
+        Account const bob("bob");
+
+        // Create rejects confidential flag when ConfidentialTransfer is off
+        {
+            Env env{*this, features - featureConfidentialTransfer};
+            MPTTester mptAlice(env, alice);
+
+            mptAlice.create(
+                {.ownerCount = 0, .flags = tfMPTCanHoldConfidentialBalance, .err = temDISABLED});
+
+            mptAlice.create(
+                {.transferFee = 100,
+                 .ownerCount = 0,
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance,
+                 .err = temDISABLED});
+        }
+
+        // Create rejects confidential flag with a non-zero TransferFee
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+
+            mptAlice.create(
+                {.transferFee = 100,
+                 .ownerCount = 0,
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance,
+                 .err = temBAD_TRANSFER_FEE});
+
+            mptAlice.create(
+                {.transferFee = 1,
+                 .ownerCount = 0,
+                 .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance,
+                 .err = temBAD_TRANSFER_FEE});
+        }
+
+        // Create succeeds with confidential flag when amendment is enabled
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+
+            mptAlice.create({.ownerCount = 1, .flags = tfMPTCanHoldConfidentialBalance});
+            BEAST_EXPECT(mptAlice.checkFlags(lsfMPTCanHoldConfidentialBalance));
+
+            // Transferable without a fee is fine with confidential balance
+            MPTTester mptBob(env, bob);
+            mptBob.create(
+                {.ownerCount = 1, .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance});
+            BEAST_EXPECT(mptBob.checkFlags(lsfMPTCanTransfer | lsfMPTCanHoldConfidentialBalance));
+        }
+
+        // Set rejects confidential flag when ConfidentialTransfer is off
+        {
+            Env env{*this, features - featureConfidentialTransfer};
+            MPTTester mptAlice(env, alice, {.holders = {bob}});
+            mptAlice.create({.ownerCount = 1});
+
+            mptAlice.set(
+                {.account = alice,
+                 .flags = tfMPTSetCanHoldConfidentialBalance,
+                 .err = temDISABLED});
+        }
+
+        // Set enables confidential balance when amendment is enabled
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice, {.holders = {bob}});
+            mptAlice.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+
+            mptAlice.set({.account = alice, .flags = tfMPTSetCanHoldConfidentialBalance});
+            BEAST_EXPECT(mptAlice.checkFlags(lsfMPTCanTransfer | lsfMPTCanHoldConfidentialBalance));
+
+            // Enabling again is idempotent
+            mptAlice.set({.account = alice, .flags = tfMPTSetCanHoldConfidentialBalance});
+            BEAST_EXPECT(mptAlice.checkFlags(lsfMPTCanTransfer | lsfMPTCanHoldConfidentialBalance));
+        }
+
+        // Set with confidential flag and Holder is malformed
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice, {.holders = {bob}});
+            mptAlice.create({.ownerCount = 1, .flags = tfMPTCanLock});
+            mptAlice.authorize({.account = bob, .holderCount = 1});
+
+            mptAlice.set(
+                {.account = alice,
+                 .holder = bob,
+                 .flags = tfMPTSetCanHoldConfidentialBalance,
+                 .err = temMALFORMED});
+        }
+
+        // Set rejects enabling confidential when issuance already has a fee
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create({.transferFee = 100, .ownerCount = 1, .flags = tfMPTCanTransfer});
+
+            mptAlice.set(
+                {.account = alice,
+                 .flags = tfMPTSetCanHoldConfidentialBalance,
+                 .err = tecNO_PERMISSION});
+        }
+
+        // Remaining cases require DynamicMPT (TransferFee / MutableFlags on Set)
+        if (features[featureDynamicMPT])
+        {
+            // Set rejects confidential flag together with a non-zero TransferFee
+            {
+                Env env{*this, features};
+                MPTTester mptAlice(env, alice);
+                mptAlice.create(
+                    {.ownerCount = 1,
+                     .flags = tfMPTCanTransfer,
+                     .mutableFlags = tmfMPTCanMutateTransferFee});
+
+                mptAlice.set(
+                    {.account = alice,
+                     .flags = tfMPTSetCanHoldConfidentialBalance,
+                     .transferFee = 100,
+                     .err = temBAD_TRANSFER_FEE});
+            }
+
+            // Set rejects adding a TransferFee once confidential balance is enabled
+            {
+                Env env{*this, features};
+                MPTTester mptAlice(env, alice);
+                mptAlice.create(
+                    {.ownerCount = 1,
+                     .flags = tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance,
+                     .mutableFlags = tmfMPTCanMutateTransferFee});
+
+                mptAlice.set({.account = alice, .transferFee = 100, .err = tecNO_PERMISSION});
+            }
+        }
+    }
+
 public:
     void
     run() override
@@ -7853,6 +7995,10 @@ public:
 
         // Test Trade/Transfer
         testTradeAndTransfer();
+
+        // Confidential Transfer issuance flags
+        testConfidentialIssuanceFlags(all);
+        testConfidentialIssuanceFlags(all - featureDynamicMPT);
 
         // Fixes
         testFixDoubleOwnerCount(all);

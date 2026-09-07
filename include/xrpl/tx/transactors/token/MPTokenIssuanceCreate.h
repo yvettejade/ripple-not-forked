@@ -19,6 +19,7 @@ struct MPTCreateArgs
     std::optional<Slice> const& metadata{};
     std::optional<uint256> domainId = std::nullopt;
     std::optional<std::uint32_t> mutableFlags = std::nullopt;
+    std::optional<std::uint32_t> immutableFlags = std::nullopt;
     // Set only by callers that issue an MPT representing a wrapped asset
     // (e.g. VaultCreate's share token). The keylet must point to an
     // existing MPToken or RippleState owned by `account`. Surfaces on

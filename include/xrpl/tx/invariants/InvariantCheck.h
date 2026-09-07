@@ -417,6 +417,7 @@ using InvariantChecks = std::tuple<
     ValidLoan,
     ValidVault,
     ValidMPTPayment,
+    ValidConfidentialMPT,
     ValidAmounts,
     ValidMPTTransfer>;
 
