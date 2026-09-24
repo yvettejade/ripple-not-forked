@@ -60,12 +60,11 @@ class ValidMPTPayment
         std::int64_t mptAmount{0};
         // true if a confidential field of one of its MPTokens changed
         bool confidentialActivity{false};
+        // true if an amount exceeded its limit; the balance check is skipped
+        bool overflow{false};
+        bool confidentialOverflow{false};
     };
 
-    // true if OutstandingAmount > MaximumAmount in after for any MPT
-    bool overflow_{false};
-    // true if ConfidentialOutstandingAmount exceeds the MPT maximum
-    bool confidentialOverflow_{false};
     // mptid:MPTData
     hash_map<uint192, MPTData> data_;
 

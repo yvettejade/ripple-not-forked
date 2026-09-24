@@ -5431,9 +5431,34 @@ class Invariants_test : public beast::unit_test::Suite
             {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
             defaultAmendments() - featureMPTokensV2);
 
+        // An overflow no longer short-circuits the check: with confidential
+        // activity it is enforced even without MPTokensV2.
+        check(
+            {"OutstandingAmount overflow"},
+            [&](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto token = ac.view().peek(keylet::mptoken(id, holder));
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!token || !issuance)
+                    return false;
+                // Above MaximumAmount (100) but still a canonical amount.
+                (*issuance)[sfOutstandingAmount] = 101;
+                token->setFieldVL(sfConfidentialBalanceSpending, ctB);
+                token->setFieldU32(sfConfidentialBalanceVersion, 2);
+                ac.view().update(token);
+                ac.view().update(issuance);
+                return true;
+            },
+            confidential,
+            [&](SLE& issuance, SLE& token) {
+                seedHolder(issuance, token);
+                issuance[sfMaximumAmount] = 100;
+            },
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            defaultAmendments() - featureMPTokensV2);
+
         // With several issuances the result must not depend on which failing
-        // issuance is visited first: an enforced confidential failure wins over
-        // a log-only public one.
+        // issuance is visited first, and a legacy failure (a mismatch or an
+        // overflow) never masks an enforced confidential one.
         {
             Env env{*this, defaultAmendments() - featureMPTokensV2};
             Account const a1{"A1"};
@@ -5441,7 +5466,17 @@ class Invariants_test : public beast::unit_test::Suite
             Account const gw{"gw"};
             env.fund(XRP(1'000), a1, a2, gw);
             env.close();
-            MPTTester const publicMpt({.env = env, .issuer = gw, .holders = {a1}, .pay = 100});
+            std::vector<MPTID> publicIds;
+            for (int i = 0; i < 4; ++i)
+            {
+                MPTTester const mpt(
+                    {.env = env,
+                     .issuer = gw,
+                     .holders = {a1},
+                     .pay = 100,
+                     .maxAmt = std::optional<std::uint64_t>{100}});
+                publicIds.push_back(mpt.issuanceID());
+            }
             MPTTester const confidentialMpt(
                 {.env = env, .issuer = gw, .holders = {a1}, .pay = 100, .flags = confidential});
             env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
@@ -5458,20 +5493,33 @@ class Invariants_test : public beast::unit_test::Suite
                 std::move(env),
                 a1,
                 a2,
-                {"invalid OutstandingAmount balance"},
+                {"invalid OutstandingAmount balance", "OutstandingAmount overflow"},
                 [&](Account const& holder, Account const&, ApplyContext& ac) {
-                    auto publicToken =
-                        ac.view().peek(keylet::mptoken(publicMpt.issuanceID(), holder));
+                    for (std::size_t i = 0; i < publicIds.size(); ++i)
+                    {
+                        if (i == 1)
+                        {
+                            auto issuance = ac.view().peek(keylet::mptIssuance(publicIds[i]));
+                            if (!issuance)
+                                return false;
+                            (*issuance)[sfOutstandingAmount] = 101;
+                            ac.view().update(issuance);
+                            continue;
+                        }
+                        auto token = ac.view().peek(keylet::mptoken(publicIds[i], holder));
+                        if (!token)
+                            return false;
+                        (*token)[sfMPTAmount] = 101;
+                        ac.view().update(token);
+                    }
                     auto token =
                         ac.view().peek(keylet::mptoken(confidentialMpt.issuanceID(), holder));
                     auto issuance =
                         ac.view().peek(keylet::mptIssuance(confidentialMpt.issuanceID()));
-                    if (!publicToken || !token || !issuance)
+                    if (!token || !issuance)
                         return false;
-                    (*publicToken)[sfMPTAmount] = 101;
                     (*token)[sfMPTAmount] = 60;
                     (*issuance)[sfConfidentialOutstandingAmount] = 30;
-                    ac.view().update(publicToken);
                     ac.view().update(token);
                     ac.view().update(issuance);
                     return true;

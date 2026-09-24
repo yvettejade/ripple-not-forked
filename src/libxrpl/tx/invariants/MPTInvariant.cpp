@@ -453,14 +453,14 @@ ValidMPTPayment::visitEntry(
         {
             auto const outstanding = sle[sfOutstandingAmount];
             auto const confidentialOutstanding = sle[sfConfidentialOutstandingAmount];
+            auto& data = data_[makeKey(sle)];
             if (outstanding > kMaxMpTokenAmount || confidentialOutstanding > kMaxMpTokenAmount)
             {
-                overflow_ = true;
+                data.overflow = true;
                 if (confidentialOutstanding > kMaxMpTokenAmount)
-                    confidentialOverflow_ = true;
+                    data.confidentialOverflow = true;
                 return false;
             }
-            auto& data = data_[makeKey(sle)];
             data.outstanding[static_cast<std::size_t>(order)] = outstanding;
             data.confidentialOutstanding[static_cast<std::size_t>(order)] = confidentialOutstanding;
         }
@@ -471,7 +471,7 @@ ValidMPTPayment::visitEntry(
             if (mptAmt > kMaxMpTokenAmount || lockedAmt > kMaxMpTokenAmount ||
                 lockedAmt > (kMaxMpTokenAmount - mptAmt))
             {
-                overflow_ = true;
+                data_[makeKey(sle)].overflow = true;
                 return false;
             }
             auto const res = static_cast<std::int64_t>(mptAmt + lockedAmt);
@@ -488,8 +488,6 @@ ValidMPTPayment::visitEntry(
         return true;
     };
 
-    // Keep visiting after an overflow so a later confidential overflow is
-    // still detected; finalize() stops at the first overflow anyway.
     if (after && after->getType() == ltMPTOKEN &&
         confidentialFieldsDiffer(before.get(), after.get()))
         data_[makeKey(*after)].confidentialActivity = true;
@@ -502,7 +500,7 @@ ValidMPTPayment::visitEntry(
         if (after->getType() == ltMPTOKEN_ISSUANCE &&
             (*after)[sfOutstandingAmount] > maxMPTAmount(*after))
         {
-            overflow_ = true;
+            data_[makeKey(*after)].overflow = true;
         }
         if (!update(*after, Order::After))
             return;
@@ -523,11 +521,6 @@ ValidMPTPayment::finalize(
         // The confidential supply rules are enforced with ConfidentialTransfer
         // itself rather than waiting for MPTokensV2.
         bool const confidentialEnforced = view.rules().enabled(featureConfidentialTransfer);
-        if (overflow_)
-        {
-            JLOG(j.fatal()) << "Invariant failed: OutstandingAmount overflow";
-            return !mptV2Enabled && !(confidentialEnforced && confidentialOverflow_);
-        }
 
         // Check every issuance before deciding: whether a failure is enforced
         // differs per issuance, and data_ has no deterministic order.
@@ -543,6 +536,15 @@ ValidMPTPayment::finalize(
             // public MPTAmounts but stay in OutstandingAmount.
             auto const confidentialDelta =
                 data.confidentialOutstanding[kIAfter] - data.confidentialOutstanding[kIBefore];
+            bool const enforced = confidentialEnforced &&
+                (data.confidentialOverflow || confidentialDelta != 0 || data.confidentialActivity);
+            if (data.overflow)
+            {
+                JLOG(j.fatal()) << "Invariant failed: OutstandingAmount overflow";
+                failed = true;
+                enforcedFailure = enforcedFailure || enforced;
+                continue;
+            }
             bool const deltaOverflows =
                 (confidentialDelta > 0 && data.mptAmount > (signedMax - confidentialDelta)) ||
                 (confidentialDelta < 0 && data.mptAmount < (-signedMax - confidentialDelta));
@@ -556,8 +558,7 @@ ValidMPTPayment::finalize(
                                 << data.outstanding[kIBefore] << " " << data.outstanding[kIAfter]
                                 << " " << data.mptAmount << " " << confidentialDelta;
                 failed = true;
-                if (confidentialEnforced && (confidentialDelta != 0 || data.confidentialActivity))
-                    enforcedFailure = true;
+                enforcedFailure = enforcedFailure || enforced;
             }
         }
         if (failed)
