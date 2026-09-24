@@ -194,6 +194,12 @@ public:
 
                 BEAST_EXPECT(txFlags["MPTokenIssuanceSet"]["tfMPTLock"] == 0x00000001);
                 BEAST_EXPECT(txFlags["MPTokenIssuanceSet"]["tfMPTUnlock"] == 0x00000002);
+                BEAST_EXPECT(
+                    txFlags["MPTokenIssuanceSet"]["tfMPTSetCanHoldConfidentialBalance"] ==
+                    0x00000100);
+                BEAST_EXPECT(
+                    txFlags["MPTokenIssuanceCreate"]["tfMPTCanHoldConfidentialBalance"] ==
+                    0x00000080);
 
                 BEAST_EXPECT(txFlags["AMMDeposit"]["tfLPToken"] == 0x00010000);
                 BEAST_EXPECT(txFlags["AMMDeposit"]["tfLimitLPToken"] == 0x00400000);

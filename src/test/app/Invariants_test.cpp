@@ -20,6 +20,7 @@
 #include <xrpl/beast/utility/Zero.h>
 #include <xrpl/ledger/ApplyView.h>
 #include <xrpl/ledger/OpenView.h>
+#include <xrpl/ledger/Sandbox.h>
 #include <xrpl/ledger/helpers/AccountRootHelpers.h>
 #include <xrpl/ledger/helpers/DirectoryHelpers.h>
 #include <xrpl/ledger/helpers/RippleStateHelpers.h>
@@ -4884,6 +4885,263 @@ class Invariants_test : public beast::unit_test::Suite
         }
     }
 
+    void
+    testConfidentialMPT()
+    {
+        testcase << "ConfidentialMPT";
+        using namespace test::jtx;
+
+        // Contents are irrelevant: these invariants never parse the bytes.
+        Blob const key(33, 0x02);
+        Blob const otherKey(33, 0x03);
+        Blob const ctA(66, 0xAA);
+        Blob const ctB(66, 0xBB);
+
+        using Seed = std::function<void(SLE & issuance, SLE & token)>;
+        using Change = std::function<bool(MPTID const&, AccountID const& holder, ApplyContext&)>;
+
+        // gw issues an MPT and pays 100 to A1; `seed` then edits the open
+        // ledger so the check starts from confidential state that only the
+        // confidential transactors could otherwise produce.
+        auto const check = [&](std::vector<std::string> const& logs,
+                               Change const& change,
+                               std::uint32_t issuanceFlags,
+                               Seed const& seed = {},
+                               std::initializer_list<TER> ters =
+                                   {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+                               FeatureBitset features = defaultAmendments()) {
+            Env env{*this, features};
+            Account const a1{"A1"};
+            Account const a2{"A2"};
+            Account const gw{"gw"};
+            env.fund(XRP(1'000), a1, a2, gw);
+            env.close();
+            MPTTester const mpt(
+                {.env = env, .issuer = gw, .holders = {a1}, .pay = 100, .flags = issuanceFlags});
+            MPTID const id = mpt.issuanceID();
+            if (seed)
+            {
+                env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+                    Sandbox sb(&view, TapNone);
+                    auto issuance = sb.peek(keylet::mptIssuance(id));
+                    auto token = sb.peek(keylet::mptoken(id, a1));
+                    if (!issuance || !token)
+                        return false;
+                    seed(*issuance, *token);
+                    sb.update(issuance);
+                    sb.update(token);
+                    sb.apply(view);
+                    return true;
+                });
+            }
+            doInvariantCheck(
+                std::move(env),
+                a1,
+                a2,
+                logs,
+                [&](Account const& holder, Account const&, ApplyContext& ac) {
+                    return change(id, holder.id(), ac);
+                },
+                XRPAmount{},
+                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                ters);
+        };
+
+        auto const updateIssuance = [](auto&& f) -> Change {
+            return [f](MPTID const& id, AccountID const&, ApplyContext& ac) {
+                auto sle = ac.view().peek(keylet::mptIssuance(id));
+                if (!sle)
+                    return false;
+                f(*sle);
+                ac.view().update(sle);
+                return true;
+            };
+        };
+        auto const updateToken = [](auto&& f) -> Change {
+            return [f](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto sle = ac.view().peek(keylet::mptoken(id, holder));
+                if (!sle)
+                    return false;
+                f(*sle);
+                ac.view().update(sle);
+                return true;
+            };
+        };
+        auto const initialize = [&](SLE& token) {
+            token.setFieldVL(sfHolderEncryptionKey, key);
+            token.setFieldVL(sfConfidentialBalanceSpending, ctA);
+            token.setFieldVL(sfConfidentialBalanceInbox, ctA);
+            token.setFieldVL(sfIssuerEncryptedBalance, ctA);
+            token.setFieldU32(sfConfidentialBalanceVersion, 1);
+        };
+        Seed const seedHolder = [&](SLE&, SLE& token) { initialize(token); };
+        std::uint32_t const confidential = kMptDexFlags | tfMPTCanHoldConfidentialBalance;
+        std::initializer_list<TER> const pass = {tesSUCCESS, tesSUCCESS};
+
+        // Issuance rules.
+        check(
+            {"ConfidentialOutstandingAmount exceeds OutstandingAmount"},
+            updateIssuance([](SLE& sle) { sle[sfConfidentialOutstandingAmount] = 101; }),
+            confidential);
+        check(
+            {"lsfMPTCanHoldConfidentialBalance was cleared"},
+            updateIssuance([](SLE& sle) {
+                sle.setFieldU32(sfFlags, sle.getFlags() & ~lsfMPTCanHoldConfidentialBalance);
+            }),
+            confidential);
+        check(
+            {"MPTokenIssuance ImmutableFlags changed"},
+            updateIssuance(
+                [](SLE& sle) { sle[sfImmutableFlags] = lsifMPTCanHoldConfidentialBalance; }),
+            confidential);
+        check(
+            {"MPTokenIssuance deleted with non-zero ConfidentialOutstandingAmount"},
+            [](MPTID const& id, AccountID const&, ApplyContext& ac) {
+                auto sle = ac.view().peek(keylet::mptIssuance(id));
+                if (!sle)
+                    return false;
+                ac.view().erase(sle);
+                return true;
+            },
+            confidential,
+            [](SLE& issuance, SLE&) { issuance[sfConfidentialOutstandingAmount] = 50; });
+
+        // MPToken rules.
+        check(
+            {"MPToken holds encrypted balances for an issuance without confidential support"},
+            updateToken([&](SLE& sle) { initialize(sle); }),
+            kMptDexFlags);
+        check(
+            {"MPToken holder and issuer encrypted balances are inconsistent"},
+            updateToken([&](SLE& sle) { sle.setFieldVL(sfConfidentialBalanceSpending, ctA); }),
+            confidential);
+        check(
+            {"MPToken holder and issuer encrypted balances are inconsistent"},
+            updateToken([&](SLE& sle) { sle.setFieldVL(sfIssuerEncryptedBalance, ctA); }),
+            confidential);
+        check(
+            {"MPToken HolderEncryptionKey changed"},
+            updateToken([&](SLE& sle) { sle.setFieldVL(sfHolderEncryptionKey, otherKey); }),
+            confidential,
+            seedHolder);
+        check(
+            {"MPToken HolderEncryptionKey changed"},
+            updateToken([](SLE& sle) { sle.makeFieldAbsent(sfHolderEncryptionKey); }),
+            confidential,
+            seedHolder);
+        check(
+            {"MPToken ConfidentialBalanceSpending changed without a version change"},
+            updateToken([&](SLE& sle) { sle.setFieldVL(sfConfidentialBalanceSpending, ctB); }),
+            confidential,
+            seedHolder);
+        check(
+            {"MPToken confidential state removed"},
+            updateToken([](SLE& sle) {
+                sle.makeFieldAbsent(sfHolderEncryptionKey);
+                sle.makeFieldAbsent(sfConfidentialBalanceSpending);
+                sle.makeFieldAbsent(sfConfidentialBalanceInbox);
+                sle.makeFieldAbsent(sfIssuerEncryptedBalance);
+            }),
+            confidential,
+            seedHolder);
+        check(
+            {"MPToken confidential state removed"},
+            [](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto sle = ac.view().peek(keylet::mptoken(id, holder));
+                if (!sle)
+                    return false;
+                ac.view().erase(sle);
+                return true;
+            },
+            confidential,
+            seedHolder);
+
+        // Valid transitions.
+        check({}, updateToken([&](SLE& sle) { initialize(sle); }), confidential, {}, pass);
+        check(
+            {},
+            updateToken([&](SLE& sle) {
+                sle.setFieldVL(sfConfidentialBalanceSpending, ctB);
+                sle.setFieldU32(sfConfidentialBalanceVersion, 2);
+            }),
+            confidential,
+            seedHolder,
+            pass);
+        check(
+            {},
+            updateToken([&](SLE& sle) {
+                sle.setFieldVL(sfConfidentialBalanceInbox, ctB);
+                sle.setFieldVL(sfIssuerEncryptedBalance, ctB);
+            }),
+            confidential,
+            seedHolder,
+            pass);
+
+        // OutstandingAmount accounts for tokens held confidentially.
+        auto const convert = [](std::uint64_t publicDelta, std::uint64_t confidentialDelta) {
+            return [=](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto token = ac.view().peek(keylet::mptoken(id, holder));
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!token || !issuance)
+                    return false;
+                (*token)[sfMPTAmount] = (*token)[sfMPTAmount] - publicDelta;
+                (*issuance)[sfConfidentialOutstandingAmount] =
+                    (*issuance)[sfConfidentialOutstandingAmount] + confidentialDelta;
+                ac.view().update(token);
+                ac.view().update(issuance);
+                return true;
+            };
+        };
+        check({}, convert(40, 40), confidential, {}, pass);
+        // ValidMPTPayment only checks successful transactions.
+        check(
+            {"invalid OutstandingAmount balance"},
+            convert(40, 30),
+            confidential,
+            {},
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED});
+        check(
+            {},
+            updateIssuance([](SLE& sle) {
+                sle[sfOutstandingAmount] = 60;
+                sle[sfConfidentialOutstandingAmount] = 0;
+            }),
+            confidential,
+            [](SLE& issuance, SLE& token) {
+                token[sfMPTAmount] = 60;
+                issuance[sfConfidentialOutstandingAmount] = 40;
+            },
+            pass);
+        check(
+            {"OutstandingAmount overflow"},
+            updateIssuance(
+                [](SLE& sle) { sle[sfConfidentialOutstandingAmount] = kMaxMpTokenAmount + 1; }),
+            confidential);
+        check(
+            {"invalid OutstandingAmount balance"},
+            [](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto token = ac.view().peek(keylet::mptoken(id, holder));
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!token || !issuance)
+                    return false;
+                (*token)[sfMPTAmount] = kMaxMpTokenAmount;
+                (*issuance)[sfConfidentialOutstandingAmount] = kMaxMpTokenAmount;
+                ac.view().update(token);
+                ac.view().update(issuance);
+                return true;
+            },
+            confidential);
+
+        // The confidential checks only apply once the amendment is enabled.
+        check(
+            {},
+            updateToken([&](SLE& sle) { sle.setFieldVL(sfConfidentialBalanceSpending, ctA); }),
+            kMptDexFlags,
+            {},
+            pass,
+            defaultAmendments() - featureConfidentialTransfer);
+    }
+
 public:
     void
     run() override
@@ -4915,6 +5173,7 @@ public:
         testInvariantOverwrite(defaultAmendments() - fixCleanup3_1_3);
         testVaultComputeCoarsestScale();
         testAMM();
+        testConfidentialMPT();
     }
 };
 
