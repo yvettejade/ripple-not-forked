@@ -217,6 +217,19 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         BEAST_EXPECT(!(g == o));
         BEAST_EXPECT(!(g == -g));
 
+        // The constant-time multiplication agrees with the public one.
+        BEAST_EXPECT(mulSecret(two, g) == two * g);
+        BEAST_EXPECT(orderMinusOne && mulSecret(*orderMinusOne, point(kP)) == point(kMinusP));
+        for (int i = 0; i < 4; ++i)
+        {
+            auto const k = Scalar::random();
+            auto const q = mulGenerator(Scalar::random());
+            BEAST_EXPECT(mulSecret(k, q) == k * q);
+            BEAST_EXPECT(mulSecret(k, g) == mulGenerator(k));
+        }
+        BEAST_EXPECT(mulSecret(Scalar{}, g).isInfinity());
+        BEAST_EXPECT(mulSecret(two, o).isInfinity());
+
         // Distributivity and associativity on arbitrary multiples.
         auto const a = Scalar::fromUint64(0x1234567890ABCDEFULL);
         auto const b = Scalar::fromUint64(0x0FEDCBA987654321ULL);
@@ -482,6 +495,17 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
             Scalar::fromDigest(
                 digest("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364146")) ==
             Scalar::fromUint64(5));
+        // Reductions that borrow across bytes.
+        BEAST_EXPECT(
+            Scalar::fromDigest(
+                digest("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364200")) ==
+            Scalar::fromUint64(0xBF));
+        BEAST_EXPECT(
+            strHex(
+                Scalar::fromDigest(
+                    digest("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000000000000000000000000"))
+                    .bytes()) ==
+            "000000000000000000000000000000004551231950B75FC4402DA1732FC9BEBF");
         // 2^256 - 1 - n
         BEAST_EXPECT(
             strHex(Scalar::fromDigest(digest(std::string(64, 'F'))).bytes()) ==
@@ -543,6 +567,22 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
             all.insert(toHex(h[i]));
         }
         BEAST_EXPECT(all.size() == 3 + 2 * kMaxBulletproofBits);
+
+        // Every generator, pinned as SHA-256(G_0 || ... || G_127 || H_0 || ... || H_127).
+        {
+            Blob all;
+            for (auto const* v : {&g, &h})
+            {
+                for (auto const& p : *v)
+                {
+                    auto const b = *p.bytes();
+                    all.insert(all.end(), b.begin(), b.end());
+                }
+            }
+            BEAST_EXPECT(
+                strHex(sha256({makeSlice(all)})) ==
+                "B40DB32027E6F8A4C5855A72DCD6EF3ACCC856AC9538DA1C02CC881FE337D8B0");
+        }
 
         // Deterministic, and the same object on every call.
         BEAST_EXPECT(&pedersenGenerator() == &pedersenGenerator());
