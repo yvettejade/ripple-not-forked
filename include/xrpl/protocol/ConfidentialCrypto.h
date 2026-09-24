@@ -108,9 +108,12 @@ public:
 
     friend bool
     operator==(Point const& a, Point const& b);
+
+    /** k·G */
+    friend Point
+    mulGenerator(Scalar const& k);
 };
 
-/** k·G */
 [[nodiscard]] Point
 mulGenerator(Scalar const& k);
 
