@@ -103,6 +103,7 @@ public:
     friend Point
     operator-(Point const& a, Point const& b);
 
+    /** Variable-time; only use with public scalars. */
     friend Point
     operator*(Scalar const& k, Point const& p);
 
@@ -121,7 +122,12 @@ mulGenerator(Scalar const& k);
 [[nodiscard]] bool
 isValidPoint(Slice s);
 
-/** An EC-ElGamal ciphertext (C1, C2) = (r·G, m·G + r·Pk). */
+/** An EC-ElGamal ciphertext (C1, C2) = (r·G, m·G + r·Pk).
+
+    Homomorphic addition and subtraction of attacker-influenced ciphertexts
+    can yield a component equal to the point at infinity, which has no
+    encoding. Callers must check toBuffer() before storing a result.
+*/
 struct ElGamalCiphertext
 {
     Point c1;
@@ -147,12 +153,18 @@ struct ElGamalCiphertext
     operator==(ElGamalCiphertext const&, ElGamalCiphertext const&) = default;
 };
 
-/** Enc_pk(m; r) = (r·G, m·G + r·pk). */
+/** Enc_pk(m; r) = (r·G, m·G + r·pk).
+
+    @throws std::invalid_argument if pk is the point at infinity.
+*/
 [[nodiscard]] ElGamalCiphertext
 elGamalEncrypt(Scalar const& m, Scalar const& r, Point const& pk);
 
 /** Deterministic plaintext-ciphertext check using a disclosed blinding
     factor: C1 == r·G and C2 == m·G + r·pk.
+
+    Fails for a zero blinding factor and for any ciphertext or key component
+    at infinity, none of which can appear in a valid serialized ciphertext.
 */
 [[nodiscard]] bool
 verifyElGamalEncryption(

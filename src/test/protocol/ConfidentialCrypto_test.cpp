@@ -6,6 +6,7 @@
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/protocol/ConfidentialCrypto.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -30,6 +31,21 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140";
     static constexpr char const* kOrder =
         "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141";
+    static constexpr char const* kOrderMinusFive =
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD036413C";
+    // Field prime p; an x coordinate equal to p is not canonical.
+    static constexpr char const* kFieldPrime =
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F";
+    // BIP-340 test vector secret key and its compressed public key.
+    static constexpr char const* kBip340Secret =
+        "B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF";
+    static constexpr char const* kBip340Public =
+        "02DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659";
+    // P = 987654321·G and -P.
+    static constexpr char const* kP =
+        "035AD2703F5B4F4B9DEA4C28FA30D86D3781D28E09DD51AAE1208DE80BB6155BEE";
+    static constexpr char const* kMinusP =
+        "025AD2703F5B4F4B9DEA4C28FA30D86D3781D28E09DD51AAE1208DE80BB6155BEE";
 
     static Blob
     hex(std::string const& s)
@@ -89,6 +105,10 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
 
         // n and anything above it is rejected rather than reduced.
         BEAST_EXPECT(!Scalar::fromBytes(makeSlice(hex(kOrder))).has_value());
+        BEAST_EXPECT(!Scalar::fromBytes(makeSlice(
+                                            hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE"
+                                                "BAAEDCE6AF48A03BBFD25E8CD0364142")))
+                          .has_value());
         BEAST_EXPECT(!Scalar::fromBytes(makeSlice(hex(std::string(64, 'F')))).has_value());
 
         // Wrong lengths are rejected.
@@ -108,6 +128,9 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         BEAST_EXPECT(point(kG) == g);
         BEAST_EXPECT(isValidPoint(makeSlice(hex(kG))));
         BEAST_EXPECT(isValidPoint(makeSlice(hex(kMinusG))));
+        // Odd-y points round-trip through parse and serialize.
+        BEAST_EXPECT(toHex(point(kMinusG)) == kMinusG);
+        BEAST_EXPECT(toHex(point(kP)) == kP);
 
         // The identity has no compressed encoding.
         BEAST_EXPECT(Point{}.isInfinity());
@@ -133,6 +156,8 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         BEAST_EXPECT(!isValidPoint(makeSlice(hex("02" + std::string(64, '0')))));
         BEAST_EXPECT(!isValidPoint(makeSlice(hex("03" + std::string(63, '0') + "5"))));
         BEAST_EXPECT(!isValidPoint(makeSlice(hex("02" + std::string(64, 'F')))));
+        BEAST_EXPECT(!isValidPoint(makeSlice(hex(std::string("02") + kFieldPrime))));
+        BEAST_EXPECT(!isValidPoint(makeSlice(hex(std::string("03") + kFieldPrime))));
         // Uncompressed encodings are not accepted even when valid.
         BEAST_EXPECT(!isValidPoint(makeSlice(
             hex("0479BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798"
@@ -148,6 +173,7 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         auto const two = Scalar::fromUint64(2);
         auto const three = Scalar::fromUint64(3);
 
+        BEAST_EXPECT(g == mulGenerator(Scalar::fromUint64(1)));
         BEAST_EXPECT(toHex(g + g) == kTwoG);
         BEAST_EXPECT(toHex(two * g) == kTwoG);
         BEAST_EXPECT(toHex(mulGenerator(two)) == kTwoG);
@@ -159,6 +185,14 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         auto const orderMinusOne = Scalar::fromBytes(makeSlice(hex(kOrderMinusOne)));
         BEAST_EXPECT(orderMinusOne && toHex(mulGenerator(*orderMinusOne)) == kMinusG);
         BEAST_EXPECT(orderMinusOne && toHex(*orderMinusOne * g) == kMinusG);
+        BEAST_EXPECT(orderMinusOne && toHex(*orderMinusOne * point(kP)) == kMinusP);
+        BEAST_EXPECT(-(-g) == g);
+        BEAST_EXPECT(-point(kP) == point(kMinusP));
+
+        // A full-width scalar.
+        auto const bip340 = Scalar::fromBytes(makeSlice(hex(kBip340Secret)));
+        BEAST_EXPECT(bip340 && toHex(mulGenerator(*bip340)) == kBip340Public);
+        BEAST_EXPECT(bip340 && toHex(*bip340 * g) == kBip340Public);
 
         // Identity behaviour, including sums that cancel.
         Point const o;
@@ -168,6 +202,8 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         BEAST_EXPECT((-o).isInfinity());
         BEAST_EXPECT((g - g).isInfinity());
         BEAST_EXPECT((g + (-g)).isInfinity());
+        BEAST_EXPECT((g + (-g)) + g == g);
+        BEAST_EXPECT(o - g == -g);
         BEAST_EXPECT((Scalar{} * g).isInfinity());
         BEAST_EXPECT((two * o).isInfinity());
         BEAST_EXPECT(mulGenerator(Scalar{}).isInfinity());
@@ -256,6 +292,36 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         BEAST_EXPECT(!verifyElGamalEncryption(ct, m, r, Point{}));
         BEAST_EXPECT(!verifyElGamalEncryption(ct, m, Scalar{}, pk));
 
+        // In-memory ciphertexts with a component at infinity never verify,
+        // even when they match the computed encryption.
+        BEAST_EXPECT(!verifyElGamalEncryption(
+            ElGamalCiphertext{.c1 = Point{}, .c2 = mulGenerator(m)}, m, Scalar{}, pk));
+        BEAST_EXPECT(!verifyElGamalEncryption(ElGamalCiphertext{}, Scalar{}, Scalar{}, pk));
+        {
+            // m = n - 1 and r = 1 under pk = G cancel in C2.
+            auto const orderMinusOne = Scalar::fromBytes(makeSlice(hex(kOrderMinusOne)));
+            if (BEAST_EXPECT(orderMinusOne))
+            {
+                auto const one = Scalar::fromUint64(1);
+                auto const g = Point::generator();
+                auto const cancelled = elGamalEncrypt(*orderMinusOne, one, g);
+                BEAST_EXPECT(cancelled.c2.isInfinity());
+                BEAST_EXPECT(!verifyElGamalEncryption(cancelled, *orderMinusOne, one, g));
+            }
+        }
+
+        // Encrypting under the identity is a caller error.
+        bool threw = false;
+        try
+        {
+            (void)elGamalEncrypt(m, r, Point{});
+        }
+        catch (std::invalid_argument const&)
+        {
+            threw = true;
+        }
+        BEAST_EXPECT(threw);
+
         // Swapping components must not verify.
         BEAST_EXPECT(
             !verifyElGamalEncryption(ElGamalCiphertext{.c1 = ct.c2, .c2 = ct.c1}, m, r, pk));
@@ -306,6 +372,21 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         BEAST_EXPECT(!(rerandomized == c1));
         BEAST_EXPECT(
             rerandomized.c2 - sk * rerandomized.c1 == mulGenerator(Scalar::fromUint64(m1)));
+
+        // Blinding factors summing to n cancel C1 while C2 still carries
+        // m1 + m2; the result cannot be stored.
+        {
+            auto const minusFive = Scalar::fromBytes(makeSlice(hex(kOrderMinusFive)));
+            if (BEAST_EXPECT(minusFive))
+            {
+                auto const partial =
+                    elGamalEncrypt(Scalar::fromUint64(m1), Scalar::fromUint64(5), pk) +
+                    elGamalEncrypt(Scalar::fromUint64(m2), *minusFive, pk);
+                BEAST_EXPECT(partial.c1.isInfinity());
+                BEAST_EXPECT(partial.c2 == mulGenerator(Scalar::fromUint64(m1 + m2)));
+                BEAST_EXPECT(!partial.toBuffer());
+            }
+        }
 
         // Subtracting a ciphertext from itself yields the identity, which is
         // not a serializable ciphertext.

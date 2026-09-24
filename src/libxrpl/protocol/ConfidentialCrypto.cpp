@@ -2,6 +2,8 @@
 
 #include <xrpl/basics/Buffer.h>
 #include <xrpl/basics/Slice.h>
+#include <xrpl/basics/contract.h>
+#include <xrpl/beast/utility/instrumentation.h>
 #include <xrpl/protocol/detail/secp256k1.h>
 
 #include <secp256k1.h>
@@ -12,8 +14,26 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <stdexcept>
+#include <string>
 
 namespace xrpl::confidential {
+
+namespace {
+
+// libsecp256k1 only fails these operations on inputs that the Point and
+// Scalar invariants exclude. Returning the identity instead would make it
+// vanish from sums, so treat a failure as a broken invariant.
+// LCOV_EXCL_START
+[[noreturn]] void
+secp256k1Failure(char const* operation)
+{
+    UNREACHABLE("xrpl::confidential : unexpected libsecp256k1 failure");
+    Throw<std::logic_error>(std::string("confidential: libsecp256k1 failed: ") + operation);
+}
+// LCOV_EXCL_STOP
+
+}  // namespace
 
 std::optional<Scalar>
 Scalar::fromBytes(Slice s)
@@ -79,7 +99,7 @@ Point::bytes() const
     if (secp256k1_ec_pubkey_serialize(
             secp256k1Context(), out.data(), &len, &pk_, SECP256K1_EC_COMPRESSED) != 1 ||
         len != out.size())
-        return std::nullopt;  // LCOV_EXCL_LINE
+        secp256k1Failure("serialize");  // LCOV_EXCL_LINE
 
     return out;
 }
@@ -106,7 +126,7 @@ operator-(Point const& a)
 {
     Point result = a;
     if (!result.infinity_ && secp256k1_ec_pubkey_negate(secp256k1Context(), &result.pk_) != 1)
-        return Point{};  // LCOV_EXCL_LINE
+        secp256k1Failure("negate");  // LCOV_EXCL_LINE
     return result;
 }
 
@@ -124,7 +144,7 @@ operator*(Scalar const& k, Point const& p)
 
     Point result = p;
     if (secp256k1_ec_pubkey_tweak_mul(secp256k1Context(), &result.pk_, k.bytes().data()) != 1)
-        return Point{};  // LCOV_EXCL_LINE
+        secp256k1Failure("tweak_mul");  // LCOV_EXCL_LINE
     return result;
 }
 
@@ -144,7 +164,7 @@ mulGenerator(Scalar const& k)
 
     Point result;
     if (secp256k1_ec_pubkey_create(secp256k1Context(), &result.pk_, k.bytes().data()) != 1)
-        return Point{};  // LCOV_EXCL_LINE
+        secp256k1Failure("create");  // LCOV_EXCL_LINE
     result.infinity_ = false;
     return result;
 }
@@ -198,6 +218,8 @@ operator-(ElGamalCiphertext const& a, ElGamalCiphertext const& b)
 ElGamalCiphertext
 elGamalEncrypt(Scalar const& m, Scalar const& r, Point const& pk)
 {
+    if (pk.isInfinity())
+        Throw<std::invalid_argument>("confidential: encryption key is the point at infinity");
     return ElGamalCiphertext{.c1 = mulGenerator(r), .c2 = mulGenerator(m) + r * pk};
 }
 
@@ -208,7 +230,7 @@ verifyElGamalEncryption(
     Scalar const& r,
     Point const& pk)
 {
-    if (pk.isInfinity())
+    if (pk.isInfinity() || r.isZero() || ct.c1.isInfinity() || ct.c2.isInfinity())
         return false;
     return ct == elGamalEncrypt(m, r, pk);
 }
