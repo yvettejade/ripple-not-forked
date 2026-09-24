@@ -150,19 +150,17 @@ public:
                     }
                     return json::Value{};
                 };
-                auto const expectField = [&](std::string const& name,
-                                             std::string const& type,
-                                             unsigned nth,
-                                             bool isVL) {
-                    auto const field = findField(name);
-                    if (!BEAST_EXPECTS(field.isObject(), name))
-                        return;
-                    BEAST_EXPECTS(field[jss::type].asString() == type, name);
-                    BEAST_EXPECTS(field[jss::nth].asUInt() == nth, name);
-                    BEAST_EXPECTS(field[jss::isVLEncoded].asBool() == isVL, name);
-                    BEAST_EXPECTS(field[jss::isSerialized].asBool(), name);
-                    BEAST_EXPECTS(field[jss::isSigningField].asBool(), name);
-                };
+                auto const expectField =
+                    [&](std::string const& name, std::string const& type, unsigned nth, bool isVL) {
+                        auto const field = findField(name);
+                        if (!BEAST_EXPECTS(field.isObject(), name))
+                            return;
+                        BEAST_EXPECTS(field[jss::type].asString() == type, name);
+                        BEAST_EXPECTS(field[jss::nth].asUInt() == nth, name);
+                        BEAST_EXPECTS(field[jss::isVLEncoded].asBool() == isVL, name);
+                        BEAST_EXPECTS(field[jss::isSerialized].asBool(), name);
+                        BEAST_EXPECTS(field[jss::isSigningField].asBool(), name);
+                    };
                 expectField("ConfidentialBalanceVersion", "UInt32", 69, false);
                 expectField("ImmutableFlags", "UInt32", 70, false);
                 expectField("ConfidentialOutstandingAmount", "UInt64", 32, false);
