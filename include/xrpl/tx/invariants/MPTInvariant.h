@@ -103,8 +103,8 @@ public:
  *      lsfMPTCanHoldConfidentialBalance and an issuer key, and
  *      AuditorEncryptedBalance exists
  *      exactly when the issuance has an auditor key
- *    - a registered HolderEncryptionKey never changes, nor does the holder or
- *      issuance of an MPToken with confidential state
+ *    - a registered HolderEncryptionKey never changes, and an MPToken with
+ *      confidential state keeps the holder and issuance of its ledger key
  *    - ConfidentialBalanceVersion starts at 0 and advances by exactly one;
  *      changing ConfidentialBalanceSpending changes it
  *    - no confidential field is ever removed, including by deleting it

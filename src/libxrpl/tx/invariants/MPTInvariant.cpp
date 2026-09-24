@@ -702,6 +702,10 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
                        : *versionAfter != 0))
         badVersionStep_ = true;
 
+    if (hasConfidentialState(after) &&
+        after.key() != keylet::mptoken(after[sfMPTokenIssuanceID], after[sfAccount]).key)
+        identityChanged_ = true;
+
     if (hasEncryptedBalance(after) && confidentialFieldsDiffer(before, &after))
     {
         encryptedTokens_.push_back(

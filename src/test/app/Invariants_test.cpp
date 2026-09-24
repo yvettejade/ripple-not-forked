@@ -5305,6 +5305,18 @@ class Invariants_test : public beast::unit_test::Suite
             updateToken([](SLE& sle) { sle[sfAccount] = AccountID{}; }),
             confidential,
             seedHolder);
+        check(
+            {"MPToken with confidential state changed its holder or issuance"},
+            [&](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                // Stored under another holder's key.
+                auto sle = std::make_shared<SLE>(keylet::mptoken(id, AccountID{}));
+                (*sle)[sfAccount] = holder;
+                (*sle)[sfMPTokenIssuanceID] = id;
+                initialize(*sle);
+                ac.view().insert(sle);
+                return true;
+            },
+            confidential);
         // An auditor key cannot be added after the issuer key.
         check(
             {"MPTokenIssuance encryption keys invalid or changed"},
