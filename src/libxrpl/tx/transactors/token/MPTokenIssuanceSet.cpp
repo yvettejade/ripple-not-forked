@@ -6,6 +6,7 @@
 #include <xrpl/core/ServiceRegistry.h>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/ledger/helpers/DelegateHelpers.h>
+#include <xrpl/protocol/ConfidentialCrypto.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -28,9 +29,19 @@
 
 namespace xrpl {
 
+static bool
+isConfidentialChange(STTx const& tx)
+{
+    return tx.isFlag(tfMPTSetCanHoldConfidentialBalance) ||
+        tx.isFieldPresent(sfIssuerEncryptionKey) || tx.isFieldPresent(sfAuditorEncryptionKey);
+}
+
 bool
 MPTokenIssuanceSet::checkExtraFeatures(PreflightContext const& ctx)
 {
+    if (isConfidentialChange(ctx.tx) && !ctx.rules.enabled(featureConfidentialTransfer))
+        return false;
+
     return !ctx.tx.isFieldPresent(sfDomainID) ||
         (ctx.rules.enabled(featurePermissionedDomains) &&
          ctx.rules.enabled(featureSingleAssetVault));
@@ -95,10 +106,33 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
     if (holderID && accountID == holderID)
         return temMALFORMED;
 
+    auto const issuerKey = ctx.tx[~sfIssuerEncryptionKey];
+    auto const auditorKey = ctx.tx[~sfAuditorEncryptionKey];
+    if (isConfidentialChange(ctx.tx))
+    {
+        // Confidential settings live on the issuance, never on a holder.
+        if (holderID)
+            return temMALFORMED;
+
+        if (auditorKey && !issuerKey)
+            return temMALFORMED;
+
+        // XLS-0096 only requires the keys to be 33 bytes; a key that is not a
+        // valid compressed secp256k1 point could never encrypt anything and,
+        // being unchangeable once set, would permanently disable the issuance.
+        if ((issuerKey && !confidential::isValidPoint(*issuerKey)) ||
+            (auditorKey && !confidential::isValidPoint(*auditorKey)))
+            return temMALFORMED;
+
+        if (ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance) && transferFee.value_or(0) != 0)
+            return temBAD_TRANSFER_FEE;
+    }
+
     if (ctx.rules.enabled(featureSingleAssetVault) || ctx.rules.enabled(featureDynamicMPT))
     {
         // Is this transaction actually changing anything ?
-        if (ctx.tx.getFlags() == 0 && !ctx.tx.isFieldPresent(sfDomainID) && !isMutate)
+        if (ctx.tx.getFlags() == 0 && !ctx.tx.isFieldPresent(sfDomainID) && !isMutate &&
+            !issuerKey && !auditorKey)
             return temMALFORMED;
     }
 
@@ -160,6 +194,11 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
     if ((tx.getFlags() & tfMPTokenIssuanceSetMask) != 0u)
         return terNO_DELEGATE_PERMISSION;  // LCOV_EXCL_LINE
 
+    // Granular permissions only cover locking; enabling confidential balances
+    // or registering encryption keys needs the full transaction permission.
+    if (isConfidentialChange(tx))
+        return terNO_DELEGATE_PERMISSION;
+
     std::unordered_set<GranularPermissionType> granularPermissions;
     loadGranularPermission(sle, ttMPTOKEN_ISSUANCE_SET, granularPermissions);
 
@@ -184,7 +223,7 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
     {
         // For readability two separate `if` rather than `||` of two conditions
         if (!ctx.view.rules().enabled(featureSingleAssetVault) &&
-            !ctx.view.rules().enabled(featureDynamicMPT))
+            !ctx.view.rules().enabled(featureDynamicMPT) && !isConfidentialChange(ctx.tx))
         {
             return tecNO_PERMISSION;
         }
@@ -259,6 +298,38 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
 
         if (!isMutableFlag(lsmfMPTCanMutateTransferFee))
             return tecNO_PERMISSION;
+
+        if (fee > 0u && sleMptIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
+            return tecNO_PERMISSION;
+    }
+
+    bool const setConfidential = ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance);
+    if (setConfidential)
+    {
+        if (((*sleMptIssuance)[sfImmutableFlags] & lsifMPTCanHoldConfidentialBalance) != 0u)
+            return tecNO_PERMISSION;
+
+        if ((*sleMptIssuance)[sfTransferFee] != 0u)
+            return tecNO_PERMISSION;
+    }
+
+    auto const hasIssuerKey = ctx.tx.isFieldPresent(sfIssuerEncryptionKey);
+    auto const hasAuditorKey = ctx.tx.isFieldPresent(sfAuditorEncryptionKey);
+    if (hasIssuerKey || hasAuditorKey)
+    {
+        if (hasAuditorKey && sleMptIssuance->isFieldPresent(sfAuditorEncryptionKey))
+            return tecNO_PERMISSION;
+
+        if (hasIssuerKey && sleMptIssuance->isFieldPresent(sfIssuerEncryptionKey))
+            return tecNO_PERMISSION;
+
+        if (!setConfidential && !sleMptIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
+            return tecNO_PERMISSION;
+
+        // XLS-0096 phrases this as sfConfidentialOutstandingAmount being
+        // present; the field is soeDEFAULT, so that means non-zero.
+        if ((*sleMptIssuance)[sfConfidentialOutstandingAmount] != 0)
+            return tecNO_PERMISSION;
     }
 
     return tesSUCCESS;
@@ -296,6 +367,10 @@ MPTokenIssuanceSet::doApply()
         flagsOut &= ~lsfMPTLocked;
     }
 
+    // Enabling confidential balances is one-way; there is no flag to clear it.
+    if (ctx_.tx.isFlag(tfMPTSetCanHoldConfidentialBalance))
+        flagsOut |= lsfMPTCanHoldConfidentialBalance;
+
     if (auto const mutableFlags = ctx_.tx[~sfMutableFlags].value_or(0))
     {
         for (auto const& f : kMptMutabilityFlags)
@@ -320,6 +395,12 @@ MPTokenIssuanceSet::doApply()
 
     if (flagsIn != flagsOut)
         sle->setFieldU32(sfFlags, flagsOut);
+
+    if (auto const issuerKey = ctx_.tx[~sfIssuerEncryptionKey])
+        sle->setFieldVL(sfIssuerEncryptionKey, *issuerKey);
+
+    if (auto const auditorKey = ctx_.tx[~sfAuditorEncryptionKey])
+        sle->setFieldVL(sfAuditorEncryptionKey, *auditorKey);
 
     if (auto const transferFee = ctx_.tx[~sfTransferFee])
     {

@@ -47,6 +47,7 @@ public:
  *    - OutstandingAmount <= MaximumAmount for any MPT
  *    - OutstandingAmount after = OutstandingAmount before +
  *         sum (MPT after - MPT before) - this is total MPT credit/debit
+ *         + (ConfidentialOutstandingAmount after - before)
  */
 class ValidMPTPayment
 {
@@ -54,12 +55,16 @@ class ValidMPTPayment
     struct MPTData
     {
         std::array<std::int64_t, 2> outstanding{};
+        std::array<std::int64_t, 2> confidentialOutstanding{};
         // sum (MPT after - MPT before)
         std::int64_t mptAmount{0};
+        // true if a confidential field of one of its MPTokens changed
+        bool confidentialActivity{false};
+        // true if an amount exceeded its limit; the balance check is skipped
+        bool overflow{false};
+        bool confidentialOverflow{false};
     };
 
-    // true if OutstandingAmount > MaximumAmount in after for any MPT
-    bool overflow_{false};
     // mptid:MPTData
     hash_map<uint192, MPTData> data_;
 
@@ -69,6 +74,80 @@ public:
 
     bool
     finalize(STTx const&, TER const, XRPAmount const, ReadView const&, beast::Journal const&);
+};
+
+/** Verify the XLS-0096 confidential balance rules that hold for every
+ *  transaction.
+ *
+ *  MPTokenIssuance:
+ *    - ConfidentialOutstandingAmount <= OutstandingAmount, and it is only
+ *      non-zero with lsfMPTCanHoldConfidentialBalance and an issuer key
+ *    - lsfMPTCanHoldConfidentialBalance is never cleared, and never changes
+ *      while lsifMPTCanHoldConfidentialBalance is set
+ *    - ImmutableFlags never changes and holds only known flags
+ *    - encryption keys are valid points, need
+ *      lsfMPTCanHoldConfidentialBalance, an auditor key needs an issuer key
+ *      and is only added together with it,
+ *      keys are never added while ConfidentialOutstandingAmount is non-zero,
+ *      and registered keys never change
+ *    - a non-zero TransferFee never coexists with confidential balances
+ *    - it is not deleted while ConfidentialOutstandingAmount is non-zero
+ *
+ *  MPToken:
+ *    - ConfidentialBalanceSpending or ConfidentialBalanceInbox is present
+ *      exactly when IssuerEncryptedBalance is (XLS-0096 §7.4)
+ *    - HolderEncryptionKey, both holder balances, IssuerEncryptedBalance and
+ *      ConfidentialBalanceVersion are initialized together, and the key and
+ *      ciphertexts are valid encodings
+ *    - encrypted balances only change for an existing issuance with
+ *      lsfMPTCanHoldConfidentialBalance and an issuer key, and
+ *      AuditorEncryptedBalance exists
+ *      exactly when the issuance has an auditor key
+ *    - a registered HolderEncryptionKey never changes, and an MPToken with
+ *      confidential state keeps the holder and issuance of its ledger key
+ *    - ConfidentialBalanceVersion starts at 0 and advances by exactly one;
+ *      changing ConfidentialBalanceSpending changes it
+ *    - no confidential field is ever removed, including by deleting it
+ */
+class ValidConfidentialMPToken
+{
+    struct EncryptedToken
+    {
+        uint192 issuanceID;
+        bool hasAuditorBalance;
+    };
+
+    bool coaExceedsOutstanding_ = false;
+    bool coaWithoutConfidentialFlag_ = false;
+    bool confidentialFlagChanged_ = false;
+    bool immutableFlagsInvalid_ = false;
+    bool issuanceKeysInvalid_ = false;
+    bool transferFeeWithConfidential_ = false;
+    bool issuanceDeletedWithCOA_ = false;
+    bool inconsistentEncryptedFields_ = false;
+    bool incompleteConfidentialFields_ = false;
+    bool holderKeyChanged_ = false;
+    bool identityChanged_ = false;
+    bool spendingChangedWithoutVersion_ = false;
+    bool confidentialStateRemoved_ = false;
+    bool malformedConfidentialFields_ = false;
+    bool coaWithoutIssuerKey_ = false;
+    bool badVersionStep_ = false;
+    // MPTokens that hold encrypted balances after the transaction.
+    std::vector<EncryptedToken> encryptedTokens_;
+
+    void
+    visitIssuance(bool isDelete, SLE const* before, SLE const& after);
+
+    void
+    visitMPToken(bool isDelete, SLE const* before, SLE const& after);
+
+public:
+    void
+    visitEntry(bool, std::shared_ptr<SLE const> const&, std::shared_ptr<SLE const> const&);
+
+    [[nodiscard]] bool
+    finalize(STTx const&, TER const, XRPAmount const, ReadView const&, beast::Journal const&) const;
 };
 
 class ValidMPTTransfer

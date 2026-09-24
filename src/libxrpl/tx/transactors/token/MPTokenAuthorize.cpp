@@ -85,6 +85,17 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
             if (ctx.view.rules().enabled(featureSingleAssetVault) && sleMpt->isFlag(lsfMPTLocked))
                 return tecNO_PERMISSION;
 
+            // XLS-0096 §7.4: once confidential fields are initialized the
+            // MPToken can never be deleted, even when every encrypted balance
+            // is zero. The specification does not name a result code.
+            if (sleMpt->isFieldPresent(sfHolderEncryptionKey) ||
+                sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
+                sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
+                sleMpt->isFieldPresent(sfIssuerEncryptedBalance) ||
+                sleMpt->isFieldPresent(sfAuditorEncryptedBalance) ||
+                sleMpt->isFieldPresent(sfConfidentialBalanceVersion))
+                return tecHAS_OBLIGATIONS;
+
             return tesSUCCESS;
         }
 
