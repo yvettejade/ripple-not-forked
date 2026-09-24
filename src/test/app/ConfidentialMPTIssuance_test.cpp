@@ -17,6 +17,7 @@
 #include <xrpl/protocol/jss.h>
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -83,17 +84,31 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
     // Directly edit the open ledger to reach states that need the
     // confidential transactors (e.g. a non-zero ConfidentialOutstandingAmount).
     static void
-    setConfidentialOutstanding(jtx::Env& env, MPTID const& id, std::uint64_t amount)
+    modifyEntry(jtx::Env& env, Keylet const& k, std::function<void(SLE&)> const& f)
     {
         env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
             Sandbox sb(&view, TapNone);
-            auto sle = sb.peek(keylet::mptIssuance(id));
+            auto sle = sb.peek(k);
             if (!sle)
                 return false;
-            (*sle)[sfConfidentialOutstandingAmount] = amount;
+            f(*sle);
             sb.update(sle);
             sb.apply(view);
             return true;
+        });
+    }
+
+    static void
+    setConfidentialOutstanding(
+        jtx::Env& env,
+        MPTID const& id,
+        std::uint64_t amount,
+        std::optional<std::uint64_t> outstanding = std::nullopt)
+    {
+        modifyEntry(env, keylet::mptIssuance(id), [&](SLE& sle) {
+            sle[sfConfidentialOutstandingAmount] = amount;
+            if (outstanding)
+                sle[sfOutstandingAmount] = *outstanding;
         });
     }
 
@@ -315,6 +330,9 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         {
             auto const id = create(env, createJV(alice, 0), alice);
             env(setJV(bob, id, tfMPTSetCanHoldConfidentialBalance), Ter(tecNO_PERMISSION));
+            auto jv = setJV(bob, id, tfMPTSetCanHoldConfidentialBalance);
+            jv[sfIssuerEncryptionKey.jsonName] = issuerKey;
+            env(jv, Ter(tecNO_PERMISSION));
         }
 
         // lsifMPTCanHoldConfidentialBalance freezes the setting.
@@ -417,7 +435,7 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         {
             auto const circulating =
                 create(env, createJV(alice, tfMPTCanHoldConfidentialBalance), alice);
-            setConfidentialOutstanding(env, circulating, 10);
+            setConfidentialOutstanding(env, circulating, 10, 10);
             auto jv = setJV(alice, circulating);
             jv[sfIssuerEncryptionKey.jsonName] = issuerKey;
             env(jv, Ter(tecNO_PERMISSION));
@@ -444,9 +462,17 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
             Ter(tecNO_PERMISSION));
         env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance));
         env.close();
-        auto const sle = issuance(env, id);
+        auto sle = issuance(env, id);
         BEAST_EXPECT(sle && sle->isFlag(lsfMPTCanHoldConfidentialBalance));
         BEAST_EXPECT(sle && !sle->isFlag(lsfMPTLocked));
+
+        // Keys alone, on an issuance that already allows confidential balances.
+        auto jv = setJV(alice, id);
+        jv[sfIssuerEncryptionKey.jsonName] = keyHex(0x7777);
+        env(jv);
+        env.close();
+        sle = issuance(env, id);
+        BEAST_EXPECT(sle && sle->isFieldPresent(sfIssuerEncryptionKey));
     }
 
     void
@@ -549,6 +575,11 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
             alice);
         env(setJV(alice, id, tfMPTLock));
         env(setJV(alice, id, tfMPTUnlock));
+        // Enabling (a no-op here) combines with locking.
+        env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance | tfMPTLock));
+        env.close();
+        BEAST_EXPECT(issuance(env, id)->isFlag(lsfMPTLocked));
+        env(setJV(alice, id, tfMPTUnlock));
         if (features[featureDynamicMPT])
         {
             auto jv = setJV(alice, id);
@@ -562,6 +593,61 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         auto const sle = issuance(env, id);
         BEAST_EXPECT(sle && sle->isFlag(lsfMPTCanHoldConfidentialBalance));
         BEAST_EXPECT(sle && !sle->isFlag(lsfMPTLocked));
+    }
+
+    void
+    testDeletionBlocker(FeatureBitset features)
+    {
+        testcase("MPToken deletion blocker");
+        using namespace jtx;
+
+        Account const alice("alice");
+        Account const bob("bob");
+        Env env{*this, features};
+        env.fund(XRP(1'000), alice, bob);
+        env.close();
+
+        auto const id = create(env, createJV(alice, tfMPTCanHoldConfidentialBalance), alice);
+        MPTTester mpt(env, alice, id, {bob});
+        mpt.authorize({.account = bob});
+
+        json::Value unauthorize;
+        unauthorize[jss::TransactionType] = jss::MPTokenAuthorize;
+        unauthorize[jss::Account] = bob.human();
+        unauthorize[sfMPTokenIssuanceID.jsonName] = to_string(id);
+        unauthorize[jss::Flags] = tfMPTUnauthorize;
+
+        // Initialized confidential fields block deletion even though the
+        // public balance is zero; each field alone is enough. The ledger edits
+        // only exist in the open ledger, so nothing is closed until the end.
+        std::initializer_list<SField const*> const fields{
+            &sfHolderEncryptionKey,
+            &sfConfidentialBalanceSpending,
+            &sfConfidentialBalanceInbox,
+            &sfIssuerEncryptedBalance,
+            &sfAuditorEncryptedBalance};
+        auto const clear = [&](SLE& sle) {
+            for (auto const* f : fields)
+                sle.makeFieldAbsent(*f);
+        };
+        for (SField const* field : fields)
+        {
+            modifyEntry(env, keylet::mptoken(id, bob), [&](SLE& sle) {
+                clear(sle);
+                sle.setFieldVL(
+                    *static_cast<SF_VL const*>(field),
+                    Blob(field == &sfHolderEncryptionKey ? 33 : 66, 0x02));
+            });
+            env(unauthorize, Ter(tecHAS_OBLIGATIONS));
+            BEAST_EXPECT(env.le(keylet::mptoken(id, bob)));
+        }
+
+        // Without confidential state the holder can delete the MPToken.
+        modifyEntry(env, keylet::mptoken(id, bob), clear);
+        env(unauthorize);
+        BEAST_EXPECT(!env.le(keylet::mptoken(id, bob)));
+        env.close();
+        BEAST_EXPECT(!env.le(keylet::mptoken(id, bob)));
     }
 
 public:
@@ -579,6 +665,7 @@ public:
             testSetDelegation(features);
             testDestroy(features);
             testExistingBehaviour(features);
+            testDeletionBlocker(features);
         }
     }
 };

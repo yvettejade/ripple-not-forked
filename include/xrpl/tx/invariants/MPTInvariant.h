@@ -62,6 +62,8 @@ class ValidMPTPayment
 
     // true if OutstandingAmount > MaximumAmount in after for any MPT
     bool overflow_{false};
+    // true if ConfidentialOutstandingAmount exceeds the MPT maximum
+    bool confidentialOverflow_{false};
     // mptid:MPTData
     hash_map<uint192, MPTData> data_;
 
@@ -74,33 +76,59 @@ public:
 };
 
 /** Verify the XLS-0096 confidential balance rules that hold for every
- *  transaction:
- *    - ConfidentialOutstandingAmount <= OutstandingAmount
- *    - lsfMPTCanHoldConfidentialBalance is never cleared and ImmutableFlags
- *      never changes
- *    - an MPTokenIssuance is not deleted while ConfidentialOutstandingAmount
- *      is non-zero
- *    - an MPToken holding encrypted balances belongs to an issuance with
- *      lsfMPTCanHoldConfidentialBalance
- *    - an MPToken has ConfidentialBalanceSpending or ConfidentialBalanceInbox
- *      exactly when it has IssuerEncryptedBalance
+ *  transaction.
+ *
+ *  MPTokenIssuance:
+ *    - ConfidentialOutstandingAmount <= OutstandingAmount, and it is only
+ *      non-zero with lsfMPTCanHoldConfidentialBalance
+ *    - lsfMPTCanHoldConfidentialBalance is never cleared, and never changes
+ *      while lsifMPTCanHoldConfidentialBalance is set
+ *    - ImmutableFlags never changes and holds only known flags
+ *    - encryption keys need lsfMPTCanHoldConfidentialBalance, an auditor key
+ *      needs an issuer key, and registered keys never change
+ *    - a non-zero TransferFee never coexists with confidential balances
+ *    - it is not deleted while ConfidentialOutstandingAmount is non-zero
+ *
+ *  MPToken:
+ *    - ConfidentialBalanceSpending or ConfidentialBalanceInbox is present
+ *      exactly when IssuerEncryptedBalance is (XLS-0096 §7.4)
+ *    - HolderEncryptionKey, both holder balances, IssuerEncryptedBalance and
+ *      ConfidentialBalanceVersion are initialized together
+ *    - encrypted balances only change for an existing issuance with
+ *      lsfMPTCanHoldConfidentialBalance, and AuditorEncryptedBalance exists
+ *      exactly when the issuance has an auditor key
  *    - a registered HolderEncryptionKey never changes
  *    - changing ConfidentialBalanceSpending changes ConfidentialBalanceVersion
- *    - confidential state is never removed from an MPToken, including by
- *      deleting it
+ *    - no confidential field is ever removed, including by deleting it
  */
 class ValidConfidentialMPToken
 {
+    struct EncryptedToken
+    {
+        uint192 issuanceID;
+        bool hasAuditorBalance;
+    };
+
     bool coaExceedsOutstanding_ = false;
-    bool confidentialFlagCleared_ = false;
-    bool immutableFlagsChanged_ = false;
+    bool coaWithoutConfidentialFlag_ = false;
+    bool confidentialFlagChanged_ = false;
+    bool immutableFlagsInvalid_ = false;
+    bool issuanceKeysInvalid_ = false;
+    bool transferFeeWithConfidential_ = false;
     bool issuanceDeletedWithCOA_ = false;
     bool inconsistentEncryptedFields_ = false;
+    bool incompleteConfidentialFields_ = false;
     bool holderKeyChanged_ = false;
     bool spendingChangedWithoutVersion_ = false;
     bool confidentialStateRemoved_ = false;
-    // Issuances of MPTokens that hold encrypted balances after the transaction.
-    std::vector<uint192> encryptedIssuances_;
+    // MPTokens that hold encrypted balances after the transaction.
+    std::vector<EncryptedToken> encryptedTokens_;
+
+    void
+    visitIssuance(bool isDelete, SLE const* before, SLE const& after);
+
+    void
+    visitMPToken(bool isDelete, SLE const* before, SLE const& after);
 
 public:
     void

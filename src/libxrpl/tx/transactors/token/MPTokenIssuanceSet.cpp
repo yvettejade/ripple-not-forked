@@ -326,9 +326,9 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
         if (!setConfidential && !sleMptIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
             return tecNO_PERMISSION;
 
-        // sfConfidentialOutstandingAmount is soeDEFAULT, so it is present
-        // exactly when confidential tokens are in circulation.
-        if (sleMptIssuance->isFieldPresent(sfConfidentialOutstandingAmount))
+        // XLS-0096 phrases this as sfConfidentialOutstandingAmount being
+        // present; the field is soeDEFAULT, so that means non-zero.
+        if ((*sleMptIssuance)[sfConfidentialOutstandingAmount] != 0)
             return tecNO_PERMISSION;
     }
 
