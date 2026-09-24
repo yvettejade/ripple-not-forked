@@ -6,6 +6,7 @@
 #include <xrpl/basics/contract.h>
 #include <xrpl/beast/utility/instrumentation.h>
 #include <xrpl/crypto/csprng.h>
+#include <xrpl/crypto/secure_erase.h>
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/UintTypes.h>
@@ -13,6 +14,7 @@
 #include <xrpl/protocol/digest.h>
 
 #include <secp256k1.h>
+#include <secp256k1_ecdh.h>
 
 #include <algorithm>
 #include <array>
@@ -123,21 +125,33 @@ Scalar::fromDigest(std::array<std::uint8_t, kScalarLength> const& digest)
     return result;
 }
 
+Scalar::~Scalar()
+{
+    secureErase(bytes_.data(), bytes_.size());
+}
+
 Scalar
 Scalar::random()
 {
+    // A uniform 256-bit value is invalid with probability about 2^-128, so
+    // repeated failures mean the generator is broken; fail closed.
     Scalar result;
-    do
+    for (int attempt = 0; attempt < 4; ++attempt)
     {
         cryptoPrng()(result.bytes_.data(), result.bytes_.size());
-    } while (secp256k1_ec_seckey_verify(secp256k1Context(), result.bytes_.data()) != 1);
-    return result;
+        if (secp256k1_ec_seckey_verify(secp256k1Context(), result.bytes_.data()) == 1)
+            return result;
+    }
+    Throw<std::runtime_error>("confidential: CSPRNG produced invalid scalars");  // LCOV_EXCL_LINE
 }
 
 bool
 Scalar::isZero() const
 {
-    return std::ranges::all_of(bytes_, [](std::uint8_t b) { return b == 0; });
+    std::uint8_t acc = 0;
+    for (auto const b : bytes_)
+        acc |= b;
+    return acc == 0;
 }
 
 Scalar
@@ -295,6 +309,38 @@ operator==(Point const& a, Point const& b)
     if (a.infinity_ || b.infinity_)
         return a.infinity_ == b.infinity_;
     return secp256k1_ec_pubkey_cmp(secp256k1Context(), &a.pk_, &b.pk_) == 0;
+}
+
+Point
+mulSecret(Scalar const& k, Point const& p)
+{
+    if (p.infinity_ || k.isZero())
+        return Point{};
+
+    // secp256k1_ecdh multiplies with the constant-time ecmult_const; this hash
+    // callback hands back the affine product instead of hashing it.
+    auto const copyPoint =
+        [](unsigned char* out, unsigned char const* x32, unsigned char const* y32, void*) -> int {
+        out[0] = 0x04;
+        std::memcpy(out + 1, x32, 32);
+        std::memcpy(out + 33, y32, 32);
+        return 1;
+    };
+    std::array<std::uint8_t, 65> uncompressed{};
+    Point result;
+    if (secp256k1_ecdh(
+            secp256k1Context(),
+            uncompressed.data(),
+            &p.pk_,
+            k.bytes().data(),
+            copyPoint,
+            nullptr) != 1 ||
+        secp256k1_ec_pubkey_parse(
+            secp256k1Context(), &result.pk_, uncompressed.data(), uncompressed.size()) != 1)
+        secp256k1Failure("ecdh");  // LCOV_EXCL_LINE
+    secureErase(uncompressed.data(), uncompressed.size());
+    result.infinity_ = false;
+    return result;
 }
 
 Point
