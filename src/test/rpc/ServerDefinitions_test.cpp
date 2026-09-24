@@ -5,7 +5,6 @@
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/SOTemplate.h>
-#include <xrpl/protocol/TER.h>
 #include <xrpl/protocol/TxFlags.h>
 #include <xrpl/protocol/jss.h>
 
@@ -139,8 +138,8 @@ public:
             {
                 auto const& results = result[jss::result][jss::TRANSACTION_RESULTS];
                 BEAST_EXPECT(results["tecBAD_PROOF"].asInt() == 198);
-                BEAST_EXPECT(results["temBAD_CIPHERTEXT"].asInt() == TERtoInt(temBAD_CIPHERTEXT));
-                BEAST_EXPECT(results["terFROZEN"].asInt() == TERtoInt(terFROZEN));
+                BEAST_EXPECT(results["temBAD_CIPHERTEXT"].asInt() == -248);
+                BEAST_EXPECT(results["terFROZEN"].asInt() == -83);
 
                 auto const findField = [&](std::string const& name) -> json::Value {
                     for (auto const& field : result[jss::result][jss::FIELDS])

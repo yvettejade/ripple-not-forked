@@ -423,7 +423,7 @@ LEDGER_ENTRY(ltMPTOKEN, 0x007f, MPToken, mptoken, ({
     {sfConfidentialBalanceInbox, SoeOptional},
     {sfIssuerEncryptedBalance,   SoeOptional},
     {sfAuditorEncryptedBalance,  SoeOptional},
-    {sfConfidentialBalanceVersion, SoeDefault},
+    {sfConfidentialBalanceVersion, SoeOptional},
 }))
 
 /** A ledger object which tracks Oracle
