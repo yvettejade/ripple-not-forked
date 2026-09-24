@@ -487,13 +487,25 @@ ValidMPTPayment::visitEntry(
                 return;
             }
             auto const res = static_cast<std::int64_t>(mptAmt + lockedAmt);
-            // subtract before from after
+            // subtract before from after; many large holdings could overflow
+            // the running sum.
+            auto const signedMax = static_cast<std::int64_t>(kMaxMpTokenAmount);
             if (order == Order::Before)
             {
+                if (data.mptAmount < -signedMax + res)
+                {
+                    data.overflow = true;
+                    return;
+                }
                 data.mptAmount -= res;
             }
             else
             {
+                if (data.mptAmount > signedMax - res)
+                {
+                    data.overflow = true;
+                    return;
+                }
                 data.mptAmount += res;
             }
         }
@@ -544,8 +556,10 @@ ValidMPTPayment::finalize(
             static constexpr auto kIAfter = static_cast<std::size_t>(Order::After);
             // Tokens moved into or out of confidential balances leave the
             // public MPTAmounts but stay in OutstandingAmount.
-            auto const confidentialDelta =
-                data.confidentialOutstanding[kIAfter] - data.confidentialOutstanding[kIBefore];
+            // COA cannot legitimately change before the amendment.
+            auto const confidentialDelta = confidentialEnforced
+                ? data.confidentialOutstanding[kIAfter] - data.confidentialOutstanding[kIBefore]
+                : std::int64_t{0};
             bool const enforced = confidentialEnforced &&
                 (data.confidentialOverflow || confidentialDelta != 0 || data.confidentialActivity);
             if (data.overflow)
@@ -682,7 +696,7 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
                        : *versionAfter != 0))
         badVersionStep_ = true;
 
-    if (hasEncryptedBalance(after))
+    if (hasEncryptedBalance(after) && confidentialFieldsDiffer(before, &after))
     {
         encryptedTokens_.push_back(
             {.issuanceID = after[sfMPTokenIssuanceID],

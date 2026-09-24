@@ -5542,6 +5542,45 @@ class Invariants_test : public beast::unit_test::Suite
                 {tecINVARIANT_FAILED, tecINVARIANT_FAILED});
         }
 
+        // The running sum of holder amounts cannot overflow silently.
+        {
+            Env env{*this, defaultAmendments()};
+            Account const a1{"A1"};
+            Account const a2{"A2"};
+            Account const gw{"gw"};
+            env.fund(XRP(1'000), a1, a2, gw);
+            env.close();
+            MPTTester const mpt({.env = env, .issuer = gw, .holders = {a1, a2}, .pay = 50});
+            doInvariantCheck(
+                std::move(env),
+                a1,
+                a2,
+                {"OutstandingAmount overflow"},
+                [&](Account const& h1, Account const& h2, ApplyContext& ac) {
+                    for (auto const& holder : {h1, h2})
+                    {
+                        auto token = ac.view().peek(keylet::mptoken(mpt.issuanceID(), holder));
+                        if (!token)
+                            return false;
+                        (*token)[sfMPTAmount] = kMaxMpTokenAmount;
+                        ac.view().update(token);
+                    }
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                {tecINVARIANT_FAILED, tecINVARIANT_FAILED});
+        }
+
+        // Without the amendment a COA change cannot offset public amounts.
+        check(
+            {"invalid OutstandingAmount balance"},
+            convert(40, 40),
+            kMptDexFlags,
+            {},
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            defaultAmendments() - featureConfidentialTransfer);
+
         // The confidential checks only apply once the amendment is enabled.
         check(
             {},
