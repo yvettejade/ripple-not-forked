@@ -5456,6 +5456,19 @@ class Invariants_test : public beast::unit_test::Suite
             {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
             defaultAmendments() - featureMPTokensV2);
 
+        // A pre-existing overflow in the committed state does not hide a COA
+        // change made by the same transaction.
+        check(
+            {"OutstandingAmount overflow"},
+            updateIssuance([](SLE& sle) {
+                sle[sfOutstandingAmount] = 100;
+                sle[sfConfidentialOutstandingAmount] = 1;
+            }),
+            confidential,
+            [](SLE& issuance, SLE&) { issuance[sfOutstandingAmount] = kMaxMpTokenAmount + 1; },
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            defaultAmendments() - featureMPTokensV2);
+
         // With several issuances the result must not depend on which failing
         // issuance is visited first, and a legacy failure (a mismatch or an
         // overflow) never masks an enforced confidential one.

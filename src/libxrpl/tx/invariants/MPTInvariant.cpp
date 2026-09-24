@@ -447,53 +447,64 @@ ValidMPTPayment::visitEntry(
         return sle[sfMPTokenIssuanceID];
     };
 
-    auto update = [&](SLE const& sle, Order order) -> bool {
+    // An overflowed amount marks its issuance as failed; the other amounts
+    // are still recorded so the confidential delta stays accurate.
+    auto update = [&](SLE const& sle, Order order) {
         auto const type = sle.getType();
+        auto const index = static_cast<std::size_t>(order);
         if (type == ltMPTOKEN_ISSUANCE)
         {
             auto const outstanding = sle[sfOutstandingAmount];
             auto const confidentialOutstanding = sle[sfConfidentialOutstandingAmount];
             auto& data = data_[makeKey(sle)];
-            if (outstanding > kMaxMpTokenAmount || confidentialOutstanding > kMaxMpTokenAmount)
+            if (outstanding > kMaxMpTokenAmount)
             {
                 data.overflow = true;
-                if (confidentialOutstanding > kMaxMpTokenAmount)
-                    data.confidentialOverflow = true;
-                return false;
             }
-            data.outstanding[static_cast<std::size_t>(order)] = outstanding;
-            data.confidentialOutstanding[static_cast<std::size_t>(order)] = confidentialOutstanding;
+            else
+            {
+                data.outstanding[index] = outstanding;
+            }
+            if (confidentialOutstanding > kMaxMpTokenAmount)
+            {
+                data.overflow = true;
+                data.confidentialOverflow = true;
+            }
+            else
+            {
+                data.confidentialOutstanding[index] = confidentialOutstanding;
+            }
         }
         else if (type == ltMPTOKEN)
         {
             auto const mptAmt = sle[sfMPTAmount];
             auto const lockedAmt = sle[~sfLockedAmount].value_or(0);
+            auto& data = data_[makeKey(sle)];
             if (mptAmt > kMaxMpTokenAmount || lockedAmt > kMaxMpTokenAmount ||
                 lockedAmt > (kMaxMpTokenAmount - mptAmt))
             {
-                data_[makeKey(sle)].overflow = true;
-                return false;
+                data.overflow = true;
+                return;
             }
             auto const res = static_cast<std::int64_t>(mptAmt + lockedAmt);
             // subtract before from after
             if (order == Order::Before)
             {
-                data_[makeKey(sle)].mptAmount -= res;
+                data.mptAmount -= res;
             }
             else
             {
-                data_[makeKey(sle)].mptAmount += res;
+                data.mptAmount += res;
             }
         }
-        return true;
     };
 
     if (after && after->getType() == ltMPTOKEN &&
         confidentialFieldsDiffer(before.get(), after.get()))
         data_[makeKey(*after)].confidentialActivity = true;
 
-    if (before && !update(*before, Order::Before))
-        return;
+    if (before)
+        update(*before, Order::Before);
 
     if (after)
     {
@@ -502,8 +513,7 @@ ValidMPTPayment::visitEntry(
         {
             data_[makeKey(*after)].overflow = true;
         }
-        if (!update(*after, Order::After))
-            return;
+        update(*after, Order::After);
     }
 }
 
