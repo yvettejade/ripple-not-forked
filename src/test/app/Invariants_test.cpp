@@ -5294,6 +5294,35 @@ class Invariants_test : public beast::unit_test::Suite
             confidential,
             seedHolder);
 
+        // The holder and issuance of confidential state are fixed.
+        check(
+            {"MPToken with confidential state changed its holder or issuance"},
+            updateToken([](SLE& sle) { sle[sfMPTokenIssuanceID] = makeMptID(999, AccountID{}); }),
+            confidential,
+            seedHolder);
+        check(
+            {"MPToken with confidential state changed its holder or issuance"},
+            updateToken([](SLE& sle) { sle[sfAccount] = AccountID{}; }),
+            confidential,
+            seedHolder);
+        // An auditor key cannot be added after the issuer key.
+        check(
+            {"MPTokenIssuance encryption keys invalid or changed"},
+            updateIssuance([&](SLE& sle) { sle.setFieldVL(sfAuditorEncryptionKey, key); }),
+            confidential);
+
+        // Only MPTokens whose confidential fields change are re-checked
+        // against their issuance.
+        check(
+            {},
+            updateToken([](SLE& sle) { sle.setFieldU32(sfFlags, sle.getFlags() ^ lsfMPTLocked); }),
+            confidential,
+            [&](SLE& issuance, SLE& token) {
+                seedHolder(issuance, token);
+                noIssuerKey(issuance, token);
+            },
+            pass);
+
         // Valid transitions.
         check({}, updateToken([&](SLE& sle) { initialize(sle); }), confidential, {}, pass);
         check(
@@ -5563,6 +5592,49 @@ class Invariants_test : public beast::unit_test::Suite
                         if (!token)
                             return false;
                         (*token)[sfMPTAmount] = kMaxMpTokenAmount;
+                        ac.view().update(token);
+                    }
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                {tecINVARIANT_FAILED, tecINVARIANT_FAILED});
+        }
+
+        // Same guard on the committed state.
+        {
+            Env env{*this, defaultAmendments()};
+            Account const a1{"A1"};
+            Account const a2{"A2"};
+            Account const gw{"gw"};
+            env.fund(XRP(1'000), a1, a2, gw);
+            env.close();
+            MPTTester const mpt({.env = env, .issuer = gw, .holders = {a1, a2}, .pay = 50});
+            env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+                Sandbox sb(&view, TapNone);
+                for (auto const& holder : {a1, a2})
+                {
+                    auto token = sb.peek(keylet::mptoken(mpt.issuanceID(), holder));
+                    if (!token)
+                        return false;
+                    (*token)[sfMPTAmount] = kMaxMpTokenAmount;
+                    sb.update(token);
+                }
+                sb.apply(view);
+                return true;
+            });
+            doInvariantCheck(
+                std::move(env),
+                a1,
+                a2,
+                {"OutstandingAmount overflow"},
+                [&](Account const& h1, Account const& h2, ApplyContext& ac) {
+                    for (auto const& holder : {h1, h2})
+                    {
+                        auto token = ac.view().peek(keylet::mptoken(mpt.issuanceID(), holder));
+                        if (!token)
+                            return false;
+                        (*token)[sfMPTAmount] = 0;
                         ac.view().update(token);
                     }
                     return true;

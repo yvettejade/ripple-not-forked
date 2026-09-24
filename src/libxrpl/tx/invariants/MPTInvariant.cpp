@@ -643,6 +643,12 @@ ValidConfidentialMPToken::visitIssuance(bool isDelete, SLE const* before, SLE co
         blobChanged(*before, after, sfAuditorEncryptionKey))
         issuanceKeysInvalid_ = true;
 
+    // An auditor key is only registered together with the issuer key, so no
+    // holder can have initialized without an auditor mirror it later needs.
+    if (!before->isFieldPresent(sfAuditorEncryptionKey) && hasAuditorKey &&
+        before->isFieldPresent(sfIssuerEncryptionKey))
+        issuanceKeysInvalid_ = true;
+
     // XLS-0096 §12.4.2: keys cannot be uploaded once tokens are in
     // confidential circulation.
     if ((*before)[sfConfidentialOutstandingAmount] != 0 &&
@@ -714,6 +720,12 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
     if (blobChanged(*before, after, sfHolderEncryptionKey))
         holderKeyChanged_ = true;
 
+    // Ciphertexts are bound to their holder and issuance keys.
+    if (hasConfidentialState(*before) &&
+        ((*before)[sfMPTokenIssuanceID] != after[sfMPTokenIssuanceID] ||
+         (*before)[sfAccount] != after[sfAccount]))
+        identityChanged_ = true;
+
     // Initializing the spending balance is not a modification: XLS-0096 sets
     // it to an encrypted zero together with version 0 on the first Convert.
     if (before->isFieldPresent(sfConfidentialBalanceSpending) &&
@@ -780,6 +792,8 @@ ValidConfidentialMPToken::finalize(
         fail("MPToken confidential fields are incomplete");
     if (holderKeyChanged_)
         fail("MPToken HolderEncryptionKey changed");
+    if (identityChanged_)
+        fail("MPToken with confidential state changed its holder or issuance");
     if (spendingChangedWithoutVersion_)
         fail("MPToken ConfidentialBalanceSpending changed without a version change");
     if (confidentialStateRemoved_)

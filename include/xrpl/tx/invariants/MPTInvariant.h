@@ -86,7 +86,8 @@ public:
  *      while lsifMPTCanHoldConfidentialBalance is set
  *    - ImmutableFlags never changes and holds only known flags
  *    - encryption keys are valid points, need
- *      lsfMPTCanHoldConfidentialBalance, an auditor key needs an issuer key,
+ *      lsfMPTCanHoldConfidentialBalance, an auditor key needs an issuer key
+ *      and is only added together with it,
  *      keys are never added while ConfidentialOutstandingAmount is non-zero,
  *      and registered keys never change
  *    - a non-zero TransferFee never coexists with confidential balances
@@ -102,7 +103,8 @@ public:
  *      lsfMPTCanHoldConfidentialBalance and an issuer key, and
  *      AuditorEncryptedBalance exists
  *      exactly when the issuance has an auditor key
- *    - a registered HolderEncryptionKey never changes
+ *    - a registered HolderEncryptionKey never changes, nor does the holder or
+ *      issuance of an MPToken with confidential state
  *    - ConfidentialBalanceVersion starts at 0 and advances by exactly one;
  *      changing ConfidentialBalanceSpending changes it
  *    - no confidential field is ever removed, including by deleting it
@@ -125,6 +127,7 @@ class ValidConfidentialMPToken
     bool inconsistentEncryptedFields_ = false;
     bool incompleteConfidentialFields_ = false;
     bool holderKeyChanged_ = false;
+    bool identityChanged_ = false;
     bool spendingChangedWithoutVersion_ = false;
     bool confidentialStateRemoved_ = false;
     bool malformedConfidentialFields_ = false;
