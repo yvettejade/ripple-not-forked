@@ -26,6 +26,7 @@
 #include <xrpl/ledger/helpers/RippleStateHelpers.h>
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/Book.h>
+#include <xrpl/protocol/ConfidentialCrypto.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/InnerObjectFormats.h>
@@ -4891,18 +4892,36 @@ class Invariants_test : public beast::unit_test::Suite
         testcase << "ConfidentialMPT";
         using namespace test::jtx;
 
-        // Contents are irrelevant: these invariants never parse the bytes.
-        Blob const key(33, 0x02);
-        Blob const otherKey(33, 0x03);
-        Blob const ctA(66, 0xAA);
-        Blob const ctB(66, 0xBB);
+        auto const point = [](std::uint64_t k) {
+            auto const bytes =
+                confidential::mulGenerator(confidential::Scalar::fromUint64(k)).bytes();
+            return bytes ? Blob(bytes->begin(), bytes->end()) : Blob{};
+        };
+        auto const ciphertext = [](std::uint64_t m, std::uint64_t r) {
+            auto const pk = confidential::mulGenerator(confidential::Scalar::fromUint64(99));
+            auto const buf =
+                confidential::elGamalEncrypt(
+                    confidential::Scalar::fromUint64(m), confidential::Scalar::fromUint64(r), pk)
+                    .toBuffer();
+            return buf ? Blob(buf->data(), buf->data() + buf->size()) : Blob{};
+        };
+        Blob const key = point(11);
+        Blob const otherKey = point(12);
+        Blob const ctA = ciphertext(1, 21);
+        Blob const ctB = ciphertext(2, 22);
+        // x = 0 is not on secp256k1.
+        Blob badKey(33, 0x00);
+        badKey[0] = 0x02;
+        Blob badCiphertext = ctA;
+        badCiphertext[0] = 0x04;
 
         using Seed = std::function<void(SLE & issuance, SLE & token)>;
         using Change = std::function<bool(MPTID const&, AccountID const& holder, ApplyContext&)>;
 
-        // gw issues an MPT and pays 100 to A1; `seed` then edits the open
-        // ledger so the check starts from confidential state that only the
-        // confidential transactors could otherwise produce.
+        // gw issues an MPT and pays 100 to A1; a confidential issuance also
+        // gets an issuer key. `seed` then edits the open ledger so the check
+        // starts from state that only the confidential transactors could
+        // otherwise produce.
         auto const check = [&](std::vector<std::string> const& logs,
                                Change const& change,
                                std::uint32_t issuanceFlags,
@@ -4919,7 +4938,8 @@ class Invariants_test : public beast::unit_test::Suite
             MPTTester const mpt(
                 {.env = env, .issuer = gw, .holders = {a1}, .pay = 100, .flags = issuanceFlags});
             MPTID const id = mpt.issuanceID();
-            if (seed)
+            bool const withIssuerKey = (issuanceFlags & tfMPTCanHoldConfidentialBalance) != 0u;
+            if (seed || withIssuerKey)
             {
                 env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
                     Sandbox sb(&view, TapNone);
@@ -4927,7 +4947,10 @@ class Invariants_test : public beast::unit_test::Suite
                     auto token = sb.peek(keylet::mptoken(id, a1));
                     if (!issuance || !token)
                         return false;
-                    seed(*issuance, *token);
+                    if (withIssuerKey)
+                        issuance->setFieldVL(sfIssuerEncryptionKey, otherKey);
+                    if (seed)
+                        seed(*issuance, *token);
                     sb.update(issuance);
                     sb.update(token);
                     sb.apply(view);
@@ -4972,9 +4995,15 @@ class Invariants_test : public beast::unit_test::Suite
             token.setFieldVL(sfConfidentialBalanceSpending, ctA);
             token.setFieldVL(sfConfidentialBalanceInbox, ctA);
             token.setFieldVL(sfIssuerEncryptedBalance, ctA);
+            token.setFieldU32(sfConfidentialBalanceVersion, 0);
+        };
+        Seed const seedHolder = [&](SLE&, SLE& token) {
+            initialize(token);
             token.setFieldU32(sfConfidentialBalanceVersion, 1);
         };
-        Seed const seedHolder = [&](SLE&, SLE& token) { initialize(token); };
+        Seed const noIssuerKey = [](SLE& issuance, SLE&) {
+            issuance.makeFieldAbsent(sfIssuerEncryptionKey);
+        };
         std::uint32_t const confidential = kMptDexFlags | tfMPTCanHoldConfidentialBalance;
         std::initializer_list<TER> const pass = {tesSUCCESS, tesSUCCESS};
 
@@ -5087,7 +5116,23 @@ class Invariants_test : public beast::unit_test::Suite
         check(
             {"MPTokenIssuance encryption keys invalid or changed"},
             updateIssuance([&](SLE& sle) { sle.setFieldVL(sfAuditorEncryptionKey, key); }),
-            confidential);
+            confidential,
+            noIssuerKey);
+        check(
+            {"MPTokenIssuance encryption keys invalid or changed"},
+            updateIssuance([&](SLE& sle) { sle.setFieldVL(sfAuditorEncryptionKey, key); }),
+            confidential,
+            [](SLE& issuance, SLE&) { issuance[sfConfidentialOutstandingAmount] = 10; });
+        check(
+            {"ConfidentialOutstandingAmount without an issuer encryption key"},
+            updateIssuance([](SLE& sle) { sle[sfConfidentialOutstandingAmount] = 10; }),
+            confidential,
+            noIssuerKey);
+        check(
+            {"confidential key or ciphertext is not a valid encoding"},
+            updateIssuance([&](SLE& sle) { sle.setFieldVL(sfIssuerEncryptionKey, badKey); }),
+            confidential,
+            noIssuerKey);
         Seed const withKeys = [&](SLE& issuance, SLE&) {
             issuance.setFieldVL(sfIssuerEncryptionKey, key);
             issuance.setFieldVL(sfAuditorEncryptionKey, key);
@@ -5192,6 +5237,62 @@ class Invariants_test : public beast::unit_test::Suite
                 return true;
             },
             confidential);
+
+        check(
+            {"MPToken holds encrypted balances without an issuer encryption key"},
+            updateToken([&](SLE& sle) { initialize(sle); }),
+            confidential,
+            noIssuerKey);
+        check(
+            {"confidential key or ciphertext is not a valid encoding"},
+            updateToken([&](SLE& sle) {
+                initialize(sle);
+                sle.setFieldVL(sfHolderEncryptionKey, badKey);
+            }),
+            confidential);
+        for (SField const* field : std::initializer_list<SField const*>{
+                 &sfConfidentialBalanceSpending,
+                 &sfConfidentialBalanceInbox,
+                 &sfIssuerEncryptedBalance})
+        {
+            check(
+                {"confidential key or ciphertext is not a valid encoding"},
+                updateToken([&, field](SLE& sle) {
+                    initialize(sle);
+                    sle.setFieldVL(*static_cast<SF_VL const*>(field), badCiphertext);
+                }),
+                confidential);
+        }
+        check(
+            {"confidential key or ciphertext is not a valid encoding"},
+            updateToken([&](SLE& sle) {
+                initialize(sle);
+                sle.setFieldVL(sfAuditorEncryptedBalance, Blob(ctA.begin(), ctA.end() - 1));
+            }),
+            confidential,
+            withKeys);
+
+        // The version starts at 0 and advances by exactly one.
+        check(
+            {"MPToken ConfidentialBalanceVersion must start at 0 and advance by one"},
+            updateToken([&](SLE& sle) {
+                initialize(sle);
+                sle.setFieldU32(sfConfidentialBalanceVersion, 5);
+            }),
+            confidential);
+        check(
+            {"MPToken ConfidentialBalanceVersion must start at 0 and advance by one"},
+            updateToken([&](SLE& sle) {
+                sle.setFieldVL(sfConfidentialBalanceSpending, ctB);
+                sle.setFieldU32(sfConfidentialBalanceVersion, 3);
+            }),
+            confidential,
+            seedHolder);
+        check(
+            {"MPToken ConfidentialBalanceVersion must start at 0 and advance by one"},
+            updateToken([](SLE& sle) { sle.setFieldU32(sfConfidentialBalanceVersion, 0); }),
+            confidential,
+            seedHolder);
 
         // Valid transitions.
         check({}, updateToken([&](SLE& sle) { initialize(sle); }), confidential, {}, pass);
@@ -5308,6 +5409,19 @@ class Invariants_test : public beast::unit_test::Suite
             {},
             pass,
             defaultAmendments() - featureMPTokensV2);
+        // A public balance change alongside confidential activity is enforced
+        // even when COA does not move (e.g. a ConvertBack that forgets COA).
+        check(
+            {"invalid OutstandingAmount balance"},
+            updateToken([&](SLE& sle) {
+                sle[sfMPTAmount] = 101;
+                sle.setFieldVL(sfConfidentialBalanceSpending, ctB);
+                sle.setFieldU32(sfConfidentialBalanceVersion, 2);
+            }),
+            confidential,
+            seedHolder,
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            defaultAmendments() - featureMPTokensV2);
         check(
             {"OutstandingAmount overflow"},
             updateIssuance(
@@ -5316,6 +5430,56 @@ class Invariants_test : public beast::unit_test::Suite
             {},
             {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
             defaultAmendments() - featureMPTokensV2);
+
+        // With several issuances the result must not depend on which failing
+        // issuance is visited first: an enforced confidential failure wins over
+        // a log-only public one.
+        {
+            Env env{*this, defaultAmendments() - featureMPTokensV2};
+            Account const a1{"A1"};
+            Account const a2{"A2"};
+            Account const gw{"gw"};
+            env.fund(XRP(1'000), a1, a2, gw);
+            env.close();
+            MPTTester const publicMpt({.env = env, .issuer = gw, .holders = {a1}, .pay = 100});
+            MPTTester const confidentialMpt(
+                {.env = env, .issuer = gw, .holders = {a1}, .pay = 100, .flags = confidential});
+            env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+                Sandbox sb(&view, TapNone);
+                auto issuance = sb.peek(keylet::mptIssuance(confidentialMpt.issuanceID()));
+                if (!issuance)
+                    return false;
+                issuance->setFieldVL(sfIssuerEncryptionKey, otherKey);
+                sb.update(issuance);
+                sb.apply(view);
+                return true;
+            });
+            doInvariantCheck(
+                std::move(env),
+                a1,
+                a2,
+                {"invalid OutstandingAmount balance"},
+                [&](Account const& holder, Account const&, ApplyContext& ac) {
+                    auto publicToken =
+                        ac.view().peek(keylet::mptoken(publicMpt.issuanceID(), holder));
+                    auto token =
+                        ac.view().peek(keylet::mptoken(confidentialMpt.issuanceID(), holder));
+                    auto issuance =
+                        ac.view().peek(keylet::mptIssuance(confidentialMpt.issuanceID()));
+                    if (!publicToken || !token || !issuance)
+                        return false;
+                    (*publicToken)[sfMPTAmount] = 101;
+                    (*token)[sfMPTAmount] = 60;
+                    (*issuance)[sfConfidentialOutstandingAmount] = 30;
+                    ac.view().update(publicToken);
+                    ac.view().update(token);
+                    ac.view().update(issuance);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                {tecINVARIANT_FAILED, tecINVARIANT_FAILED});
+        }
 
         // The confidential checks only apply once the amendment is enabled.
         check(

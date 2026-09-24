@@ -1,11 +1,13 @@
 #include <xrpl/tx/invariants/MPTInvariant.h>
 
 #include <xrpl/basics/Log.h>
+#include <xrpl/basics/Slice.h>
 #include <xrpl/beast/utility/Journal.h>
 #include <xrpl/beast/utility/instrumentation.h>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/AccountID.h>
+#include <xrpl/protocol/ConfidentialCrypto.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -370,15 +372,75 @@ ValidMPTIssuance::finalize(
         mptokensDeleted_ == 0;
 }
 
+namespace {
+
+// Every MPToken field that XLS-0096 initializes; none may be removed later.
+constexpr std::array<SField const*, 6> kConfidentialMPTokenFields{
+    &sfHolderEncryptionKey,
+    &sfConfidentialBalanceSpending,
+    &sfConfidentialBalanceInbox,
+    &sfIssuerEncryptedBalance,
+    &sfAuditorEncryptedBalance,
+    &sfConfidentialBalanceVersion};
+
+bool
+hasEncryptedBalance(SLE const& sle)
+{
+    return sle.isFieldPresent(sfConfidentialBalanceSpending) ||
+        sle.isFieldPresent(sfConfidentialBalanceInbox) ||
+        sle.isFieldPresent(sfIssuerEncryptedBalance) ||
+        sle.isFieldPresent(sfAuditorEncryptedBalance);
+}
+
+bool
+hasConfidentialState(SLE const& sle)
+{
+    return std::ranges::any_of(
+        kConfidentialMPTokenFields, [&](SField const* f) { return sle.isFieldPresent(*f); });
+}
+
+bool
+validKeyField(SLE const& sle, SField const& field)
+{
+    return !sle.isFieldPresent(field) ||
+        confidential::isValidPoint(makeSlice(sle.getFieldVL(field)));
+}
+
+bool
+validCiphertextField(SLE const& sle, SField const& field)
+{
+    return !sle.isFieldPresent(field) ||
+        confidential::ElGamalCiphertext::fromBytes(makeSlice(sle.getFieldVL(field))).has_value();
+}
+
+// True if any confidential MPToken field differs between the two states.
+bool
+confidentialFieldsDiffer(SLE const* before, SLE const* after)
+{
+    return std::ranges::any_of(kConfidentialMPTokenFields, [&](SField const* f) {
+        auto const* b = before && before->isFieldPresent(*f) ? before->peekAtPField(*f) : nullptr;
+        auto const* a = after && after->isFieldPresent(*f) ? after->peekAtPField(*f) : nullptr;
+        if (!a || !b)
+            return a != b;
+        return !a->isEquivalent(*b);
+    });
+}
+
+bool
+blobChanged(SLE const& before, SLE const& after, SField const& field)
+{
+    return before.isFieldPresent(field) &&
+        (!after.isFieldPresent(field) || before.getFieldVL(field) != after.getFieldVL(field));
+}
+
+}  // namespace
+
 void
 ValidMPTPayment::visitEntry(
     bool,
     std::shared_ptr<SLE const> const& before,
     std::shared_ptr<SLE const> const& after)
 {
-    if (overflow_)
-        return;
-
     auto makeKey = [](SLE const& sle) {
         if (sle.getType() == ltMPTOKEN_ISSUANCE)
             return makeMptID(sle[sfSequence], sle[sfIssuer]);
@@ -394,7 +456,8 @@ ValidMPTPayment::visitEntry(
             if (outstanding > kMaxMpTokenAmount || confidentialOutstanding > kMaxMpTokenAmount)
             {
                 overflow_ = true;
-                confidentialOverflow_ = confidentialOutstanding > kMaxMpTokenAmount;
+                if (confidentialOutstanding > kMaxMpTokenAmount)
+                    confidentialOverflow_ = true;
                 return false;
             }
             auto& data = data_[makeKey(sle)];
@@ -425,14 +488,21 @@ ValidMPTPayment::visitEntry(
         return true;
     };
 
+    // Keep visiting after an overflow so a later confidential overflow is
+    // still detected; finalize() stops at the first overflow anyway.
+    if (after && after->getType() == ltMPTOKEN &&
+        confidentialFieldsDiffer(before.get(), after.get()))
+        data_[makeKey(*after)].confidentialActivity = true;
+
     if (before && !update(*before, Order::Before))
         return;
 
     if (after)
     {
-        if (after->getType() == ltMPTOKEN_ISSUANCE)
+        if (after->getType() == ltMPTOKEN_ISSUANCE &&
+            (*after)[sfOutstandingAmount] > maxMPTAmount(*after))
         {
-            overflow_ = (*after)[sfOutstandingAmount] > maxMPTAmount(*after);
+            overflow_ = true;
         }
         if (!update(*after, Order::After))
             return;
@@ -449,16 +519,20 @@ ValidMPTPayment::finalize(
 {
     if (isTesSuccess(result))
     {
-        bool const invariantPasses = !view.rules().enabled(featureMPTokensV2);
+        bool const mptV2Enabled = view.rules().enabled(featureMPTokensV2);
         // The confidential supply rules are enforced with ConfidentialTransfer
         // itself rather than waiting for MPTokensV2.
         bool const confidentialEnforced = view.rules().enabled(featureConfidentialTransfer);
         if (overflow_)
         {
             JLOG(j.fatal()) << "Invariant failed: OutstandingAmount overflow";
-            return invariantPasses && !(confidentialEnforced && confidentialOverflow_);
+            return !mptV2Enabled && !(confidentialEnforced && confidentialOverflow_);
         }
 
+        // Check every issuance before deciding: whether a failure is enforced
+        // differs per issuance, and data_ has no deterministic order.
+        bool failed = false;
+        bool enforcedFailure = false;
         auto const signedMax = static_cast<std::int64_t>(kMaxMpTokenAmount);
         for (auto const& [id, data] : data_)
         {
@@ -481,49 +555,17 @@ ValidMPTPayment::finalize(
                 JLOG(j.fatal()) << "Invariant failed: invalid OutstandingAmount balance "
                                 << data.outstanding[kIBefore] << " " << data.outstanding[kIAfter]
                                 << " " << data.mptAmount << " " << confidentialDelta;
-                return invariantPasses && !(confidentialEnforced && confidentialDelta != 0);
+                failed = true;
+                if (confidentialEnforced && (confidentialDelta != 0 || data.confidentialActivity))
+                    enforcedFailure = true;
             }
         }
+        if (failed)
+            return !mptV2Enabled && !enforcedFailure;
     }
 
     return true;
 }
-
-namespace {
-
-// Every MPToken field that XLS-0096 initializes; none may be removed later.
-constexpr std::array<SField const*, 6> kConfidentialMPTokenFields{
-    &sfHolderEncryptionKey,
-    &sfConfidentialBalanceSpending,
-    &sfConfidentialBalanceInbox,
-    &sfIssuerEncryptedBalance,
-    &sfAuditorEncryptedBalance,
-    &sfConfidentialBalanceVersion};
-
-bool
-hasEncryptedBalance(SLE const& sle)
-{
-    return sle.isFieldPresent(sfConfidentialBalanceSpending) ||
-        sle.isFieldPresent(sfConfidentialBalanceInbox) ||
-        sle.isFieldPresent(sfIssuerEncryptedBalance) ||
-        sle.isFieldPresent(sfAuditorEncryptedBalance);
-}
-
-bool
-hasConfidentialState(SLE const& sle)
-{
-    return std::ranges::any_of(
-        kConfidentialMPTokenFields, [&](SField const* f) { return sle.isFieldPresent(*f); });
-}
-
-bool
-blobChanged(SLE const& before, SLE const& after, SField const& field)
-{
-    return before.isFieldPresent(field) &&
-        (!after.isFieldPresent(field) || before.getFieldVL(field) != after.getFieldVL(field));
-}
-
-}  // namespace
 
 void
 ValidConfidentialMPToken::visitIssuance(bool isDelete, SLE const* before, SLE const& after)
@@ -552,6 +594,13 @@ ValidConfidentialMPToken::visitIssuance(bool isDelete, SLE const* before, SLE co
     bool const hasAuditorKey = after.isFieldPresent(sfAuditorEncryptionKey);
     if ((hasIssuerKey || hasAuditorKey) && (!confidential || !hasIssuerKey))
         issuanceKeysInvalid_ = true;
+    if (!validKeyField(after, sfIssuerEncryptionKey) ||
+        !validKeyField(after, sfAuditorEncryptionKey))
+        malformedConfidentialFields_ = true;
+    // Convert verifies IssuerEncryptedAmount against the issuer key, so
+    // confidential tokens cannot circulate without it.
+    if (coa != 0 && !hasIssuerKey)
+        coaWithoutIssuerKey_ = true;
 
     if (!before)
         return;
@@ -567,6 +616,13 @@ ValidConfidentialMPToken::visitIssuance(bool isDelete, SLE const* before, SLE co
 
     if (blobChanged(*before, after, sfIssuerEncryptionKey) ||
         blobChanged(*before, after, sfAuditorEncryptionKey))
+        issuanceKeysInvalid_ = true;
+
+    // XLS-0096 §12.4.2: keys cannot be uploaded once tokens are in
+    // confidential circulation.
+    if ((*before)[sfConfidentialOutstandingAmount] != 0 &&
+        ((!before->isFieldPresent(sfIssuerEncryptionKey) && hasIssuerKey) ||
+         (!before->isFieldPresent(sfAuditorEncryptionKey) && hasAuditorKey)))
         issuanceKeysInvalid_ = true;
 }
 
@@ -596,6 +652,24 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
           after.isFieldPresent(sfIssuerEncryptedBalance) &&
           after.isFieldPresent(sfConfidentialBalanceVersion)))
         incompleteConfidentialFields_ = true;
+
+    if (!validKeyField(after, sfHolderEncryptionKey) ||
+        !validCiphertextField(after, sfConfidentialBalanceSpending) ||
+        !validCiphertextField(after, sfConfidentialBalanceInbox) ||
+        !validCiphertextField(after, sfIssuerEncryptedBalance) ||
+        !validCiphertextField(after, sfAuditorEncryptedBalance))
+        malformedConfidentialFields_ = true;
+
+    // The version starts at 0 and every change advances it by exactly one,
+    // wrapping at 2^32.
+    auto const versionAfter = after[~sfConfidentialBalanceVersion];
+    auto const versionBefore =
+        before ? (*before)[~sfConfidentialBalanceVersion] : std::optional<std::uint32_t>{};
+    if (versionAfter &&
+        (versionBefore ? (*versionAfter != *versionBefore &&
+                          *versionAfter != static_cast<std::uint32_t>(*versionBefore + 1))
+                       : *versionAfter != 0))
+        badVersionStep_ = true;
 
     if (hasEncryptedBalance(after))
     {
@@ -685,6 +759,12 @@ ValidConfidentialMPToken::finalize(
         fail("MPToken ConfidentialBalanceSpending changed without a version change");
     if (confidentialStateRemoved_)
         fail("MPToken confidential state removed");
+    if (malformedConfidentialFields_)
+        fail("confidential key or ciphertext is not a valid encoding");
+    if (coaWithoutIssuerKey_)
+        fail("ConfidentialOutstandingAmount without an issuer encryption key");
+    if (badVersionStep_)
+        fail("MPToken ConfidentialBalanceVersion must start at 0 and advance by one");
 
     for (auto const& token : encryptedTokens_)
     {
@@ -699,6 +779,11 @@ ValidConfidentialMPToken::finalize(
         if (!sleIssuance->isFlag(lsfMPTCanHoldConfidentialBalance))
         {
             fail("MPToken holds encrypted balances for an issuance without confidential support");
+            break;
+        }
+        if (!sleIssuance->isFieldPresent(sfIssuerEncryptionKey))
+        {
+            fail("MPToken holds encrypted balances without an issuer encryption key");
             break;
         }
         if (token.hasAuditorBalance != sleIssuance->isFieldPresent(sfAuditorEncryptionKey))

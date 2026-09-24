@@ -58,6 +58,8 @@ class ValidMPTPayment
         std::array<std::int64_t, 2> confidentialOutstanding{};
         // sum (MPT after - MPT before)
         std::int64_t mptAmount{0};
+        // true if a confidential field of one of its MPTokens changed
+        bool confidentialActivity{false};
     };
 
     // true if OutstandingAmount > MaximumAmount in after for any MPT
@@ -80,12 +82,14 @@ public:
  *
  *  MPTokenIssuance:
  *    - ConfidentialOutstandingAmount <= OutstandingAmount, and it is only
- *      non-zero with lsfMPTCanHoldConfidentialBalance
+ *      non-zero with lsfMPTCanHoldConfidentialBalance and an issuer key
  *    - lsfMPTCanHoldConfidentialBalance is never cleared, and never changes
  *      while lsifMPTCanHoldConfidentialBalance is set
  *    - ImmutableFlags never changes and holds only known flags
- *    - encryption keys need lsfMPTCanHoldConfidentialBalance, an auditor key
- *      needs an issuer key, and registered keys never change
+ *    - encryption keys are valid points, need
+ *      lsfMPTCanHoldConfidentialBalance, an auditor key needs an issuer key,
+ *      keys are never added while ConfidentialOutstandingAmount is non-zero,
+ *      and registered keys never change
  *    - a non-zero TransferFee never coexists with confidential balances
  *    - it is not deleted while ConfidentialOutstandingAmount is non-zero
  *
@@ -93,12 +97,15 @@ public:
  *    - ConfidentialBalanceSpending or ConfidentialBalanceInbox is present
  *      exactly when IssuerEncryptedBalance is (XLS-0096 §7.4)
  *    - HolderEncryptionKey, both holder balances, IssuerEncryptedBalance and
- *      ConfidentialBalanceVersion are initialized together
+ *      ConfidentialBalanceVersion are initialized together, and the key and
+ *      ciphertexts are valid encodings
  *    - encrypted balances only change for an existing issuance with
- *      lsfMPTCanHoldConfidentialBalance, and AuditorEncryptedBalance exists
+ *      lsfMPTCanHoldConfidentialBalance and an issuer key, and
+ *      AuditorEncryptedBalance exists
  *      exactly when the issuance has an auditor key
  *    - a registered HolderEncryptionKey never changes
- *    - changing ConfidentialBalanceSpending changes ConfidentialBalanceVersion
+ *    - ConfidentialBalanceVersion starts at 0 and advances by exactly one;
+ *      changing ConfidentialBalanceSpending changes it
  *    - no confidential field is ever removed, including by deleting it
  */
 class ValidConfidentialMPToken
@@ -121,6 +128,9 @@ class ValidConfidentialMPToken
     bool holderKeyChanged_ = false;
     bool spendingChangedWithoutVersion_ = false;
     bool confidentialStateRemoved_ = false;
+    bool malformedConfidentialFields_ = false;
+    bool coaWithoutIssuerKey_ = false;
+    bool badVersionStep_ = false;
     // MPTokens that hold encrypted balances after the transaction.
     std::vector<EncryptedToken> encryptedTokens_;
 

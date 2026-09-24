@@ -3,6 +3,7 @@
 #include <test/jtx/mpt.h>
 
 #include <xrpl/basics/Blob.h>
+#include <xrpl/basics/StringUtilities.h>
 #include <xrpl/basics/strHex.h>
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/ledger/OpenView.h>
@@ -650,6 +651,66 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         BEAST_EXPECT(!env.le(keylet::mptoken(id, bob)));
     }
 
+    void
+    testPublicOperations(FeatureBitset features)
+    {
+        testcase("Public operations on confidential holders");
+        using namespace jtx;
+
+        // Public payments, locking and unlocking must keep working for a holder
+        // whose MPToken also carries confidential state.
+        Account const alice("alice");
+        Account const bob("bob");
+        Env env{*this, features};
+        env.fund(XRP(1'000), alice, bob);
+        env.close();
+
+        auto const id = create(
+            env,
+            createJV(alice, tfMPTCanLock | tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance),
+            alice);
+        {
+            auto jv = setJV(alice, id);
+            jv[sfIssuerEncryptionKey.jsonName] = keyHex(0x8888);
+            env(jv);
+        }
+        MPTTester mpt(env, alice, id, {bob});
+        mpt.authorize({.account = bob});
+        mpt.pay(alice, bob, 100);
+        env.close();
+
+        auto const pk = confidential::mulGenerator(confidential::Scalar::fromUint64(0x9999));
+        auto const zero = confidential::elGamalEncrypt(
+                              confidential::Scalar{}, confidential::Scalar::fromUint64(7), pk)
+                              .toBuffer();
+        auto const holderKey = strUnHex(keyHex(0x9999));
+        if (!BEAST_EXPECT(zero && holderKey))
+            return;
+        Blob const ct(zero->data(), zero->data() + zero->size());
+        modifyEntry(env, keylet::mptoken(id, bob), [&](SLE& sle) {
+            sle.setFieldVL(sfHolderEncryptionKey, *holderKey);
+            sle.setFieldVL(sfConfidentialBalanceSpending, ct);
+            sle.setFieldVL(sfConfidentialBalanceInbox, ct);
+            sle.setFieldVL(sfIssuerEncryptedBalance, ct);
+            sle.setFieldU32(sfConfidentialBalanceVersion, 0);
+        });
+
+        // The ledger edit only lives in the open ledger; check before closing.
+        env(pay(alice, bob, MPT(mpt)(10)));
+        env(pay(bob, alice, MPT(mpt)(5)));
+        {
+            auto jv = setJV(alice, id, tfMPTLock);
+            jv[sfHolder.jsonName] = bob.human();
+            env(jv);
+            jv[jss::Flags] = tfMPTUnlock;
+            env(jv);
+        }
+        auto const token = env.le(keylet::mptoken(id, bob));
+        BEAST_EXPECT(token && (*token)[sfMPTAmount] == 105);
+        BEAST_EXPECT(token && token->isFieldPresent(sfConfidentialBalanceSpending));
+        BEAST_EXPECT(token && !token->isFlag(lsfMPTLocked));
+    }
+
 public:
     void
     run() override
@@ -666,6 +727,7 @@ public:
             testDestroy(features);
             testExistingBehaviour(features);
             testDeletionBlocker(features);
+            testPublicOperations(features);
         }
     }
 };
