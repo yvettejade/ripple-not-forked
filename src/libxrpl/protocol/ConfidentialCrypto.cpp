@@ -226,9 +226,9 @@ operator-(Scalar const& a, Scalar const& b)
 Scalar
 operator*(Scalar const& a, Scalar const& b)
 {
-    // tweak_mul rejects a zero operand (and tests the tweak for zero with a
-    // branch), so zero operands are replaced by one and the product is
-    // masked to zero afterwards.
+    // tweak_mul returns 0 for a zero operand, and a zero return would take
+    // the failure branch below, so zero operands are replaced by one and the
+    // product is masked to zero afterwards.
     auto const one = Scalar::fromUint64(1);
     auto const aZero = zeroMask(a.bytes_);
     auto const bZero = zeroMask(b.bytes_);
@@ -498,13 +498,23 @@ HedgedNonces::next()
 std::array<std::uint8_t, kScalarLength>
 sha256(std::initializer_list<Slice> parts)
 {
+    // The context holds state derived from the (possibly secret) input, so it
+    // is wiped once the digest is out. The digest is returned as a prvalue,
+    // which initializes the caller's object directly: no named local copy is
+    // left behind unwiped.
+    struct Wipe
+    {
+        sha256_hasher& h;
+        ~Wipe()
+        {
+            secureErase(&h, sizeof(h));
+        }
+    };
     sha256_hasher h;
+    Wipe const wipe{h};
     for (auto const& part : parts)
         h(part.data(), part.size());
-    auto const digest = static_cast<sha256_hasher::result_type>(h);
-    // The context still holds state derived from the (possibly secret) input.
-    secureErase(&h, sizeof(h));
-    return digest;
+    return static_cast<sha256_hasher::result_type>(h);
 }
 
 Point
@@ -605,6 +615,9 @@ namespace {
 
 // v·G + p, computed as (v + 1)·G + p - G: a zero v (an empty balance, a
 // zero amount) would otherwise yield an identity term that addition skips.
+// Degenerate inputs still take the identity path: v = n - 1, and p the
+// identity (a zero blinding or randomness, which proveRange rejects and which
+// makes the output reveal the message anyway).
 Point
 addGeneratorMultiple(Scalar const& v, Point const& p)
 {
