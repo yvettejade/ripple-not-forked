@@ -57,6 +57,15 @@ blindingFactor(STTx const& tx)
     return Scalar::fromBytes(Slice(bf.data(), bf.size()));
 }
 
+std::optional<Scalar>
+sendChallenge(STTx const& tx)
+{
+    auto const proof = tx.getFieldVL(sfZKProof);
+    if (proof.size() < kScalarLength)
+        return std::nullopt;
+    return Scalar::fromBytes(Slice(proof.data(), kScalarLength));
+}
+
 NotTEC
 checkCiphertexts(STTx const& tx, std::initializer_list<SF_VL const*> fields)
 {

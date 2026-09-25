@@ -22,6 +22,7 @@
 #include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/XRPAmount.h>
 #include <xrpl/tx/invariants/InvariantCheckPrivilege.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTHelpers.h>
 
 #include <algorithm>
 #include <array>
@@ -516,15 +517,17 @@ ValidConfidentialMPToken::validConvert(
         (!auditorKey || credited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount, *auditorKey));
 }
 
-// XLS-0096 §10.5 and updated spec eq. (42)-(45): the spending balance and
-// the mirrors are debited by exactly the transaction's ciphertexts, the
-// version advances by one and the key and inbox are untouched.
+// XLS-0096 §10.5 and updated spec eq. (8)-(10), (42)-(45): ConvertBack and
+// the sender of a Send debit the spending balance and the mirrors by exactly
+// the transaction's ciphertexts, advance the version by one and leave the key
+// and inbox untouched.
 bool
-ValidConfidentialMPToken::validConvertBack(
+ValidConfidentialMPToken::validDebit(
     STTx const& tx,
     SLE const* before,
     SLE const& after,
-    SLE const& issuance)
+    SLE const& issuance,
+    SF_VL const& holderAmount)
 {
     if (!before)
         return false;
@@ -538,10 +541,41 @@ ValidConfidentialMPToken::validConvertBack(
         after[~sfConfidentialBalanceVersion] == static_cast<std::uint32_t>(*version + 1) &&
         sameField(*before, after, sfHolderEncryptionKey) &&
         sameField(*before, after, sfConfidentialBalanceInbox) &&
-        debited(sfConfidentialBalanceSpending, sfHolderEncryptedAmount) &&
+        debited(sfConfidentialBalanceSpending, holderAmount) &&
         debited(sfIssuerEncryptedBalance, sfIssuerEncryptedAmount) &&
         (!issuance.isFieldPresent(sfAuditorEncryptionKey) ||
          debited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount));
+}
+
+// Updated spec eq. (11)-(13): a Send credits the receiver's inbox and mirrors
+// with the transaction's ciphertexts re-randomized by Enc(0; e), and leaves
+// its key, spending balance and version untouched.
+bool
+ValidConfidentialMPToken::validReceive(
+    STTx const& tx,
+    SLE const* before,
+    SLE const& after,
+    SLE const& issuance)
+{
+    using namespace confidential;
+    auto const e = confidential_mpt::sendChallenge(tx);
+    auto const key = pointField(after, sfHolderEncryptionKey);
+    auto const issuerKey = pointField(issuance, sfIssuerEncryptionKey);
+    auto const auditorKey = pointField(issuance, sfAuditorEncryptionKey);
+    if (!before || !e || !key || !issuerKey)
+        return false;
+    auto const credited = [&](SF_VL const& balance, SF_VL const& amount, Point const& pk) {
+        auto const start = ciphertextField(*before, balance);
+        auto const credit = ciphertextField(tx, amount);
+        return start && credit &&
+            ciphertextField(after, balance) == *start + *credit + elGamalEncrypt(Scalar{}, *e, pk);
+    };
+    return sameField(*before, after, sfHolderEncryptionKey) &&
+        sameField(*before, after, sfConfidentialBalanceSpending) &&
+        sameField(*before, after, sfConfidentialBalanceVersion) &&
+        credited(sfConfidentialBalanceInbox, sfDestinationEncryptedAmount, *key) &&
+        credited(sfIssuerEncryptedBalance, sfIssuerEncryptedAmount, *issuerKey) &&
+        (!auditorKey || credited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount, *auditorKey));
 }
 
 // XLS-0096 §9.3: the inbox moves into the spending balance, the inbox resets
@@ -951,7 +985,7 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
     if (amountOverflow_)
         return false;
 
-    // XLS-0096 §6.5, §7.5, §9.3 and §10.5.
+    // XLS-0096 §6.5, §7.5, §8.4, §9.3 and §10.5.
     SupplyChange expected;
     std::int64_t accountAmount = 0;
     switch (tx.getTxnType())
@@ -973,6 +1007,7 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
             break;
         }
         case ttCONFIDENTIAL_MPT_MERGE_INBOX:
+        case ttCONFIDENTIAL_MPT_SEND:
             break;
         // LCOV_EXCL_START
         default:
@@ -990,24 +1025,43 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
         (touched ? it->second : SupplyChange{}) != expected)
         return false;
 
-    // Each changes exactly the submitter's MPToken: Convert always credits
-    // the inbox, and MergeInbox and ConvertBack always advance the version.
-    if (tokenChanges_.size() != 1)
-        return false;
-    auto const& change = tokenChanges_.front();
+    // Each changes exactly its parties' MPTokens: Convert always credits the
+    // inbox, and the others always advance the submitter's version.
+    bool const send = tx.getTxnType() == ttCONFIDENTIAL_MPT_SEND;
     auto const issuance = view.read(keylet::mptIssuance(id));
-    if (change.issuanceID != id || change.account != account || change.amount != accountAmount ||
-        !change.after || !issuance)
+    if (tokenChanges_.size() != (send ? 2u : 1u) || !issuance)
+        return false;
+    auto const changeOf = [&](AccountID const& party) -> TokenChange const* {
+        auto const matches = [&](TokenChange const& c) { return c.account == party; };
+        if (std::ranges::count_if(tokenChanges_, matches) != 1)
+            return nullptr;
+        auto const& c = *std::ranges::find_if(tokenChanges_, matches);
+        return c.issuanceID == id && c.after ? &c : nullptr;
+    };
+    auto const* change = changeOf(account);
+    if (!change || change->amount != accountAmount)
         return false;
 
     switch (tx.getTxnType())
     {
         case ttCONFIDENTIAL_MPT_CONVERT:
-            return validConvert(tx, change.before.get(), *change.after, *issuance);
+            return validConvert(tx, change->before.get(), *change->after, *issuance);
         case ttCONFIDENTIAL_MPT_CONVERT_BACK:
-            return validConvertBack(tx, change.before.get(), *change.after, *issuance);
+            return validDebit(
+                tx, change->before.get(), *change->after, *issuance, sfHolderEncryptedAmount);
+        case ttCONFIDENTIAL_MPT_SEND: {
+            auto const* receiver = changeOf(tx[sfDestination]);
+            return receiver && receiver->amount == 0 &&
+                validDebit(
+                       tx,
+                       change->before.get(),
+                       *change->after,
+                       *issuance,
+                       sfSenderEncryptedAmount) &&
+                validReceive(tx, receiver->before.get(), *receiver->after, *issuance);
+        }
         default:
-            return validMerge(tx, change.before.get(), *change.after);
+            return validMerge(tx, change->before.get(), *change->after);
     }
 }
 

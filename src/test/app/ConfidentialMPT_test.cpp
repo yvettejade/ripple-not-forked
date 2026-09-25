@@ -1,12 +1,15 @@
 #include <test/jtx.h>
 #include <test/jtx/batch.h>
+#include <test/jtx/credentials.h>
 #include <test/jtx/delegate.h>
+#include <test/jtx/deposit.h>
 #include <test/jtx/escrow.h>
 #include <test/jtx/mpt.h>
 #include <test/jtx/ticket.h>
 
 #include <xrpl/basics/Blob.h>
 #include <xrpl/basics/Slice.h>
+#include <xrpl/basics/StringUtilities.h>
 #include <xrpl/basics/strHex.h>
 #include <xrpl/beast/unit_test/suite.h>
 #include <xrpl/ledger/ApplyView.h>
@@ -30,6 +33,7 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTConvertBack.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
 
 #include <chrono>
 #include <cstdint>
@@ -61,6 +65,17 @@ struct ConvertArgs
     std::optional<std::uint32_t> ticket = std::nullopt;
     // The sequence the proof is bound to, if not the account's next one.
     std::optional<std::uint32_t> sequence = std::nullopt;
+};
+
+struct SendArgs
+{
+    std::uint64_t amount = 30;
+    // The sender's spending balance the proof claims.
+    std::uint64_t balance = 100;
+    Scalar randomness = Scalar::fromUint64(23);
+    Scalar blinding = Scalar::fromUint64(29);
+    // The version the proof is bound to, if not the sender's current one.
+    std::optional<std::uint32_t> version = std::nullopt;
 };
 
 struct ConvertBackArgs
@@ -156,7 +171,8 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         std::vector<jtx::Account> const& holders,
         std::uint32_t flags = tfMPTCanHoldConfidentialBalance,
         bool withAuditor = false,
-        bool withKeys = true)
+        bool withKeys = true,
+        std::uint32_t publicFlags = jtx::kMptDexFlags)
     {
         using namespace jtx;
         MPTTester const mpt(
@@ -164,7 +180,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
              .issuer = gw,
              .holders = holders,
              .pay = 1'000,
-             .flags = kMptDexFlags | flags,
+             .flags = publicFlags | flags,
              .authHolder = (flags & tfMPTRequireAuth) != 0u});
         Issuance result{.id = mpt.issuanceID()};
         if (withAuditor)
@@ -293,6 +309,85 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         std::array<std::uint64_t, 1> const remainder{args.balance - args.amount};
         std::array<Scalar, 1> const blinding{args.blinding};
         auto const range = proveRange(remainder, blinding, ctx);
+        jv[sfZKProof.jsonName] = strHex(sigma) + strHex(range);
+        jv[jss::Fee] = confidentialFee(env);
+        return jv;
+    }
+
+    // A Send of args.amount from a spending balance of args.balance, proved
+    // against the sender's current spending balance and version.
+    static json::Value
+    sendJV(
+        jtx::Env& env,
+        jtx::Account const& sender,
+        Key const& senderKey,
+        jtx::Account const& destination,
+        Key const& destinationKey,
+        Issuance const& issuance,
+        SendArgs const& args = {})
+    {
+        auto const sle = env.le(keylet::mptoken(issuance.id, sender));
+        auto const spending = sle ? stored(*sle, sfConfidentialBalanceSpending) : std::nullopt;
+        std::uint32_t const version =
+            args.version.value_or(sle ? sle->getFieldU32(sfConfidentialBalanceVersion) : 0);
+
+        auto const m = Scalar::fromUint64(args.amount);
+        auto const b = Scalar::fromUint64(args.balance);
+        auto const& r = args.randomness;
+        std::vector<Point> keys{senderKey.pub, destinationKey.pub, issuance.issuer.pub};
+        if (issuance.auditor)
+            keys.push_back(issuance.auditor->pub);
+        std::vector<ElGamalCiphertext> cts;
+        for (auto const& pk : keys)
+            cts.push_back(elGamalEncrypt(m, r, pk));
+
+        json::Value jv;
+        jv[jss::TransactionType] = jss::ConfidentialMPTSend;
+        jv[jss::Account] = sender.human();
+        jv[jss::Destination] = destination.human();
+        jv[sfMPTokenIssuanceID.jsonName] = to_string(issuance.id);
+        jv[sfSenderEncryptedAmount.jsonName] = hex(cts[0]);
+        jv[sfDestinationEncryptedAmount.jsonName] = hex(cts[1]);
+        jv[sfIssuerEncryptedAmount.jsonName] = hex(cts[2]);
+        if (issuance.auditor)
+            jv[sfAuditorEncryptedAmount.jsonName] = hex(cts[3]);
+
+        auto const amountCommitment = pedersenCommit(m, r);
+        auto const balanceCommitment = pedersenCommit(b, args.blinding);
+        jv[sfAmountCommitment.jsonName] = strHex(*amountCommitment.bytes());
+        jv[sfBalanceCommitment.jsonName] = strHex(*balanceCommitment.bytes());
+
+        SendStatement statement{
+            .recipientKeys = keys,
+            .senderKey = senderKey.pub,
+            .c1 = cts[0].c1,
+            .c2 = {},
+            .amountCommitment = amountCommitment,
+            .balanceCommitment = balanceCommitment,
+            // An uninitialized sender gets a proof over a stand-in balance.
+            .balance = spending.value_or(
+                elGamalEncrypt(Scalar::fromUint64(1), Scalar::fromUint64(1), senderKey.pub))};
+        for (auto const& ct : cts)
+            statement.c2.push_back(ct.c2);
+        auto const ctx = transactionContextID(
+            ttCONFIDENTIAL_MPT_SEND,
+            sender.id(),
+            issuance.id,
+            env.seq(sender),
+            destination.id(),
+            version);
+        auto const sigma = proveSend(
+            statement,
+            {.amount = m,
+             .randomness = r,
+             .balance = b,
+             .balanceBlinding = args.blinding,
+             .secretKey = senderKey.secret},
+            ctx);
+        // Wraps for an overdraft, so the proof opens a different commitment.
+        std::array<std::uint64_t, 2> const values{args.amount, args.balance - args.amount};
+        std::array<Scalar, 2> const blindings{r, args.blinding - r};
+        auto const range = proveRange(values, blindings, ctx);
         jv[sfZKProof.jsonName] = strHex(sigma) + strHex(range);
         jv[jss::Fee] = confidentialFee(env);
         return jv;
@@ -1589,6 +1684,551 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         }
     }
 
+    // alice (key 11) and bob (key 21) each convert and merge 100 and 200.
+    static void
+    fundSendParties(
+        jtx::Env& env,
+        jtx::Account const& alice,
+        jtx::Account const& bob,
+        Issuance const& iss)
+    {
+        env(convertJV(env, alice, Key(11), iss, {.amount = 100}));
+        env(convertJV(env, bob, Key(21), iss, {.amount = 200}));
+        env.close();
+        env(mergeJV(env, alice, iss.id));
+        env(mergeJV(env, bob, iss.id));
+        env.close();
+    }
+
+    void
+    testSendPreflight()
+    {
+        testcase("Send preflight");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Key const ka(11);
+        Key const kb(21);
+
+        {
+            Env env{*this, testableAmendments() - featureConfidentialTransfer};
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            Issuance const iss{.id = makeMptID(1, gw)};
+            env(sendJV(env, alice, ka, bob, kb, iss), Ter(temDISABLED));
+        }
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob);
+        env.close();
+        auto const iss = issue(env, gw, {alice, bob});
+        fundSendParties(env, alice, bob, iss);
+
+        // Section 8.3.1(2)-(3).
+        env(sendJV(env, gw, ka, bob, kb, iss), Ter(temMALFORMED));
+        env(sendJV(env, alice, ka, alice, ka, iss), Ter(temMALFORMED));
+        {
+            auto jv = sendJV(env, alice, ka, bob, kb, iss);
+            jv[jss::Flags] = tfMPTLock;
+            env(jv, Ter(temINVALID_FLAG));
+        }
+
+        // Section 8.3.1(4): 192 + 754 bytes.
+        for (auto const size : {945, 947})
+        {
+            auto jv = sendJV(env, alice, ka, bob, kb, iss);
+            auto const proof = jv[sfZKProof.jsonName].asString();
+            jv[sfZKProof.jsonName] = size == 945 ? proof.substr(0, 1890) : proof + "00";
+            env(jv, Ter(temMALFORMED));
+        }
+
+        // Section 8.3.1(5): both commitments are valid points.
+        for (SF_VL const* field : {&sfBalanceCommitment, &sfAmountCommitment})
+        {
+            for (auto const& bad : {std::string(64, '1'), "02" + std::string(64, '0')})
+            {
+                auto jv = sendJV(env, alice, ka, bob, kb, iss);
+                jv[field->jsonName] = bad;
+                env(jv, Ter(temMALFORMED));
+            }
+        }
+
+        // Section 8.3.1(6)-(7): valid ciphertexts sharing one C1.
+        auto const issAudited = [&] {
+            auto copy = iss;
+            copy.auditor.emplace(102);
+            return copy;
+        }();
+        for (SF_VL const* field :
+             {&sfSenderEncryptedAmount,
+              &sfDestinationEncryptedAmount,
+              &sfIssuerEncryptedAmount,
+              &sfAuditorEncryptedAmount})
+        {
+            auto const good =
+                sendJV(env, alice, ka, bob, kb, issAudited)[field->jsonName].asString();
+            for (auto const& bad : {good.substr(0, 130), "04" + good.substr(2)})
+            {
+                auto jv = sendJV(env, alice, ka, bob, kb, issAudited);
+                jv[field->jsonName] = bad;
+                env(jv, Ter(temBAD_CIPHERTEXT));
+            }
+            if (field == &sfSenderEncryptedAmount)
+                continue;
+            // The same amount under a different C1.
+            auto jv = sendJV(env, alice, ka, bob, kb, issAudited);
+            jv[field->jsonName] = hex(elGamalEncrypt(
+                Scalar::fromUint64(30),
+                Scalar::fromUint64(24),
+                mulGenerator(Scalar::fromUint64(5))));
+            env(jv, Ter(temBAD_CIPHERTEXT));
+        }
+
+        // XLS-70 credential array checks.
+        {
+            auto jv = sendJV(env, alice, ka, bob, kb, iss);
+            jv[sfCredentialIDs.jsonName] = json::ValueType::Array;
+            env(jv, Ter(temMALFORMED));
+        }
+
+        // The underpaying transaction is held for the next ledger, so this
+        // comes last.
+        auto jv = sendJV(env, alice, ka, bob, kb, iss);
+        jv[jss::Fee] = to_string(env.current()->fees().base * 10 - 1);
+        env(jv, Ter(telINSUF_FEE_P));
+    }
+
+    void
+    testSendPreclaim()
+    {
+        testcase("Send preclaim");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Account const carol("carol");
+        Account const dave("dave");
+        Key const ka(11);
+        Key const kb(21);
+        Key const kc(31);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob, carol);
+        env.close();
+        auto const iss = issue(env, gw, {alice, bob, carol});
+        fundSendParties(env, alice, bob, iss);
+
+        {
+            Issuance missing = iss;
+            missing.id = makeMptID(999, gw);
+            env(sendJV(env, alice, ka, bob, kb, missing), Ter(tecOBJECT_NOT_FOUND));
+        }
+        // Section 8.3.2(1): the destination account must exist.
+        env(sendJV(env, alice, ka, dave, kb, iss), Ter(tecNO_TARGET));
+
+        // Section 8.3.2(2)-(3): transferable, and confidential.
+        {
+            auto const locked =
+                issue(env, gw, {alice, bob}, tfMPTCanHoldConfidentialBalance, false, true, 0);
+            env(sendJV(env, alice, ka, bob, kb, locked), Ter(tecNO_AUTH));
+            MPTTester const plain({.env = env, .issuer = gw, .holders = {alice, bob}, .pay = 10});
+            Issuance const other{.id = plain.issuanceID()};
+            env(sendJV(env, alice, ka, bob, kb, other), Ter(tecNO_PERMISSION));
+            auto const noKeys =
+                issue(env, gw, {alice, bob}, tfMPTCanHoldConfidentialBalance, false, false);
+            env(sendJV(env, alice, ka, bob, kb, noKeys), Ter(tecNO_PERMISSION));
+        }
+
+        // Section 8.3.2(4): both parties hold initialized MPTokens.
+        env(sendJV(env, alice, ka, carol, kc, iss), Ter(tecNO_PERMISSION));
+        env(sendJV(env, carol, kc, alice, ka, iss), Ter(tecNO_PERMISSION));
+        env.fund(XRP(10'000), dave);
+        env.close();
+        env(sendJV(env, alice, ka, dave, kb, iss), Ter(tecNO_PERMISSION));
+
+        // The auditor ciphertext follows the issuance's auditor key.
+        {
+            Issuance extra = iss;
+            extra.auditor.emplace(102);
+            env(sendJV(env, alice, ka, bob, kb, extra), Ter(tecNO_PERMISSION));
+        }
+
+        // XLS-70: a credential that doesn't exist.
+        env(sendJV(env, alice, ka, bob, kb, iss),
+            credentials::Ids({to_string(uint256{7})}),
+            Ter(tecBAD_CREDENTIALS));
+
+        // Section 8.3.2(5): the sigma proof binds every ciphertext, both
+        // commitments, the sender's balance and key, the destination and the
+        // sender's version.
+        env(sendJV(env, alice, ka, bob, kb, iss, {.balance = 101}), Ter(tecBAD_PROOF));
+        env(sendJV(env, alice, Key(12), bob, kb, iss), Ter(tecBAD_PROOF));
+        env(sendJV(env, alice, ka, bob, Key(22), iss), Ter(tecBAD_PROOF));
+        {
+            auto jv = sendJV(env, alice, ka, bob, kb, iss);
+            jv[sfDestinationEncryptedAmount.jsonName] =
+                hex(elGamalEncrypt(Scalar::fromUint64(31), Scalar::fromUint64(23), kb.pub));
+            env(jv, Ter(tecBAD_PROOF));
+        }
+        {
+            auto jv = sendJV(env, alice, ka, bob, kb, iss);
+            jv[sfAmountCommitment.jsonName] =
+                strHex(*pedersenCommit(Scalar::fromUint64(31), Scalar::fromUint64(23)).bytes());
+            env(jv, Ter(tecBAD_PROOF));
+        }
+        {
+            auto const sle = env.le(keylet::mptoken(iss.id, alice));
+            if (!BEAST_EXPECT(sle))
+                return;
+            auto const version = sle->getFieldU32(sfConfidentialBalanceVersion);
+            env(sendJV(env, alice, ka, bob, kb, iss, {.version = version + 1}), Ter(tecBAD_PROOF));
+        }
+        {
+            // A proof for another destination.
+            auto jv = sendJV(env, alice, ka, bob, kb, iss);
+            auto const other = sendJV(env, alice, ka, carol, kb, iss);
+            jv[sfZKProof.jsonName] = other[sfZKProof.jsonName];
+            env(jv, Ter(tecBAD_PROOF));
+        }
+        {
+            // A valid sigma proof spliced onto another transaction's range proof.
+            auto jv = sendJV(env, alice, ka, bob, kb, iss);
+            auto const other =
+                sendJV(env, alice, ka, bob, kb, iss, {.blinding = Scalar::fromUint64(30)});
+            jv[sfZKProof.jsonName] = jv[sfZKProof.jsonName].asString().substr(0, 384) +
+                other[sfZKProof.jsonName].asString().substr(384);
+            env(jv, Ter(tecBAD_PROOF));
+        }
+        // The remainder must be in range: b = 100 and m = 150.
+        env(sendJV(env, alice, ka, bob, kb, iss, {.amount = 150}), Ter(tecBAD_PROOF));
+
+        env(sendJV(env, alice, ka, bob, kb, iss));
+    }
+
+    void
+    testSendAuthAndFreeze()
+    {
+        testcase("Send authorization and freeze");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Key const ka(11);
+        Key const kb(21);
+
+        auto const setup = [&](Env& env) {
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            auto const iss = issue(
+                env,
+                gw,
+                {alice, bob},
+                tfMPTCanHoldConfidentialBalance | tfMPTRequireAuth | tfMPTCanLock);
+            fundSendParties(env, alice, bob, iss);
+            return iss;
+        };
+
+        // terFROZEN is a retry code: the transaction is held and retried in
+        // the next ledger, so each lock gets its own ledger history.
+        for (int lock = 0; lock < 3; ++lock)
+        {
+            Env env{*this};
+            auto const iss = setup(env);
+            if (lock == 0)
+                env(issuanceSetJV(gw, iss.id, tfMPTLock, alice));
+            else if (lock == 1)
+                env(issuanceSetJV(gw, iss.id, tfMPTLock, bob));
+            else
+                env(issuanceSetJV(gw, iss.id, tfMPTLock));
+            env.close();
+            env(sendJV(env, alice, ka, bob, kb, iss), Ter(terFROZEN));
+        }
+
+        // Both parties must be authorized.
+        for (auto const& party : {alice, bob})
+        {
+            Env env{*this};
+            auto const iss = setup(env);
+            json::Value jv;
+            jv[jss::TransactionType] = jss::MPTokenAuthorize;
+            jv[jss::Account] = gw.human();
+            jv[sfMPTokenIssuanceID.jsonName] = to_string(iss.id);
+            jv[sfHolder.jsonName] = party.human();
+            jv[jss::Flags] = tfMPTUnauthorize;
+            env(jv);
+            env.close();
+            env(sendJV(env, alice, ka, bob, kb, iss), Ter(tecNO_AUTH));
+            env.close();
+            jv[jss::Flags] = 0;
+            env(jv);
+            env.close();
+            env(sendJV(env, alice, ka, bob, kb, iss));
+        }
+    }
+
+    // Section 8.3.2.1: deposit authorization and credentials.
+    void
+    testSendDepositAuth()
+    {
+        testcase("Send deposit authorization");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Account const carol("carol");
+        Key const ka(11);
+        Key const kb(21);
+        std::string const credType = "KYC";
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob, carol);
+        env.close();
+        auto const iss = issue(env, gw, {alice, bob});
+        fundSendParties(env, alice, bob, iss);
+
+        env(fset(bob, asfDepositAuth));
+        env.close();
+        env(sendJV(env, alice, ka, bob, kb, iss), Ter(tecNO_PERMISSION));
+        env.close();
+        env(deposit::auth(bob, alice));
+        env.close();
+        env(sendJV(env, alice, ka, bob, kb, iss));
+        env.close();
+        env(deposit::unauth(bob, alice));
+        env(deposit::authCredentials(bob, {{carol, credType}}));
+        env.close();
+        env(sendJV(env, alice, ka, bob, kb, iss, {.balance = 70}), Ter(tecNO_PERMISSION));
+        env.close();
+
+        // An accepted credential of the authorized type.
+        env(credentials::create(alice, carol, credType));
+        env.close();
+        env(credentials::accept(alice, carol, credType));
+        env.close();
+        auto const credIdx =
+            credentials::ledgerEntry(env, alice, carol, credType)[jss::result][jss::index]
+                .asString();
+        env(sendJV(env, alice, ka, bob, kb, iss, {.balance = 70}), credentials::Ids({credIdx}));
+        env.close();
+        auto sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceSpending), ka, 40));
+
+        // Expired credentials are deleted and the Send fails.
+        env(credentials::deleteCred(alice, alice, carol, credType));
+        {
+            auto jv = credentials::create(alice, carol, credType);
+            jv[sfExpiration.jsonName] =
+                env.current()->header().parentCloseTime.time_since_epoch().count() + 20;
+            env(jv);
+        }
+        env.close();
+        env(credentials::accept(alice, carol, credType));
+        env.close();
+        auto const expiredIdx =
+            credentials::ledgerEntry(env, alice, carol, credType)[jss::result][jss::index]
+                .asString();
+        for (int i = 0; i < 5; ++i)
+            env.close();
+        env(sendJV(env, alice, ka, bob, kb, iss, {.balance = 40}),
+            credentials::Ids({expiredIdx}),
+            Ter(tecEXPIRED));
+        env.close();
+        BEAST_EXPECT(!env.le(credentials::keylet(alice, carol, credType)));
+        sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceSpending), ka, 40));
+    }
+
+    void
+    testSendApply()
+    {
+        testcase("Send apply");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Key const ka(11);
+        Key const kb(21);
+
+        for (bool const withAuditor : {false, true})
+        {
+            Env env{*this};
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            auto const iss =
+                issue(env, gw, {alice, bob}, tfMPTCanHoldConfidentialBalance, withAuditor);
+            fundSendParties(env, alice, bob, iss);
+
+            auto const senderBefore = env.le(keylet::mptoken(iss.id, alice));
+            auto const receiverBefore = env.le(keylet::mptoken(iss.id, bob));
+            auto const jv = sendJV(env, alice, ka, bob, kb, iss, {.amount = 30});
+            env(jv);
+            env.close();
+            auto const senderAfter = env.le(keylet::mptoken(iss.id, alice));
+            auto const receiverAfter = env.le(keylet::mptoken(iss.id, bob));
+            if (!BEAST_EXPECT(senderBefore && receiverBefore && senderAfter && receiverAfter))
+                return;
+
+            // Updated spec eq. (8)-(13).
+            auto const m = Scalar::fromUint64(30);
+            auto const r = Scalar::fromUint64(23);
+            auto const e = Scalar::fromBytes(
+                makeSlice(strUnHex(jv[sfZKProof.jsonName].asString().substr(0, 64)).value()));
+            if (!BEAST_EXPECT(e))
+                return;
+            auto const rerandomize = [&](Point const& pk) {
+                return elGamalEncrypt(Scalar{}, *e, pk);
+            };
+            BEAST_EXPECT(
+                stored(*senderAfter, sfConfidentialBalanceSpending) ==
+                *stored(*senderBefore, sfConfidentialBalanceSpending) -
+                    elGamalEncrypt(m, r, ka.pub));
+            BEAST_EXPECT(
+                (*senderAfter)[sfConfidentialBalanceVersion] ==
+                (*senderBefore)[sfConfidentialBalanceVersion] + 1);
+            BEAST_EXPECT(
+                stored(*receiverAfter, sfConfidentialBalanceInbox) ==
+                *stored(*receiverBefore, sfConfidentialBalanceInbox) +
+                    elGamalEncrypt(m, r, kb.pub) + rerandomize(kb.pub));
+            BEAST_EXPECT(
+                stored(*receiverAfter, sfIssuerEncryptedBalance) ==
+                *stored(*receiverBefore, sfIssuerEncryptedBalance) +
+                    elGamalEncrypt(m, r, iss.issuer.pub) + rerandomize(iss.issuer.pub));
+            BEAST_EXPECT(
+                (*receiverAfter)[sfConfidentialBalanceVersion] ==
+                (*receiverBefore)[sfConfidentialBalanceVersion]);
+            BEAST_EXPECT(
+                receiverAfter->getFieldVL(sfConfidentialBalanceSpending) ==
+                receiverBefore->getFieldVL(sfConfidentialBalanceSpending));
+            BEAST_EXPECT(decrypts(stored(*senderAfter, sfConfidentialBalanceSpending), ka, 70));
+            BEAST_EXPECT(decrypts(stored(*senderAfter, sfIssuerEncryptedBalance), iss.issuer, 70));
+            BEAST_EXPECT(decrypts(stored(*receiverAfter, sfConfidentialBalanceInbox), kb, 30));
+            BEAST_EXPECT(
+                decrypts(stored(*receiverAfter, sfIssuerEncryptedBalance), iss.issuer, 230));
+            if (withAuditor)
+            {
+                BEAST_EXPECT(
+                    decrypts(stored(*senderAfter, sfAuditorEncryptedBalance), *iss.auditor, 70));
+                BEAST_EXPECT(
+                    decrypts(stored(*receiverAfter, sfAuditorEncryptedBalance), *iss.auditor, 230));
+            }
+            BEAST_EXPECT((*senderAfter)[sfMPTAmount] == 900);
+            BEAST_EXPECT((*receiverAfter)[sfMPTAmount] == 800);
+            auto const issuance = env.le(keylet::mptIssuance(iss.id));
+            BEAST_EXPECT(issuance && (*issuance)[sfConfidentialOutstandingAmount] == 300);
+            BEAST_EXPECT(issuance && (*issuance)[sfOutstandingAmount] == 2'000);
+
+            // The receiver merges and sends back; alice spends everything.
+            env(mergeJV(env, bob, iss.id));
+            env.close();
+            env(sendJV(env, bob, kb, alice, ka, iss, {.amount = 230, .balance = 230}));
+            env(sendJV(env, alice, ka, bob, kb, iss, {.amount = 70, .balance = 70}));
+            env.close();
+            env(mergeJV(env, alice, iss.id));
+            env(mergeJV(env, bob, iss.id));
+            env.close();
+            auto const a = env.le(keylet::mptoken(iss.id, alice));
+            auto const b = env.le(keylet::mptoken(iss.id, bob));
+            BEAST_EXPECT(a && decrypts(stored(*a, sfConfidentialBalanceSpending), ka, 230));
+            BEAST_EXPECT(b && decrypts(stored(*b, sfConfidentialBalanceSpending), kb, 70));
+            BEAST_EXPECT(a && decrypts(stored(*a, sfIssuerEncryptedBalance), iss.issuer, 230));
+            BEAST_EXPECT(b && decrypts(stored(*b, sfIssuerEncryptedBalance), iss.issuer, 70));
+
+            // A zero amount is allowed; it only re-randomizes.
+            env(sendJV(env, alice, ka, bob, kb, iss, {.amount = 0, .balance = 230}));
+            env.close();
+            BEAST_EXPECT(decrypts(
+                stored(*env.le(keylet::mptoken(iss.id, bob)), sfConfidentialBalanceInbox), kb, 0));
+        }
+    }
+
+    // The sender knows its own randomness and can cancel its debits; those
+    // Sends fail. After Convert(100, r1) and a merge, the spending balance has
+    // randomness 2·r0 + r1 and the mirrors r0 + r1; r = R + 70 / sk cancels
+    // the C2 of a Send of 30 for whoever knows sk.
+    void
+    testSendIdentity()
+    {
+        testcase("Send identity results");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Key const ka(11);
+        Key const kb(21);
+        auto const r1 = Scalar::fromUint64(7);
+
+        for (int target = 0; target < 5; ++target)
+        {
+            Env env{*this};
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            auto const iss = issue(env, gw, {alice, bob}, tfMPTCanHoldConfidentialBalance, true);
+            env(convertJV(env, alice, ka, iss, {.amount = 100, .randomness = r1}));
+            env(convertJV(env, bob, kb, iss, {.amount = 200}));
+            env.close();
+            env(mergeJV(env, alice, iss.id));
+            env.close();
+
+            auto const r0 = encryptedZeroRandomness(alice.id(), iss.id);
+            auto const spendingR = r0 + r0 + r1;
+            auto const mirrorR = r0 + r1;
+            auto const cancelC2 = [&](Scalar const& randomness, Key const& k) {
+                return randomness + Scalar::fromUint64(70) * k.secret.inverse();
+            };
+            std::array<Scalar, 5> const blinding{
+                spendingR,
+                mirrorR,
+                cancelC2(spendingR, ka),
+                cancelC2(mirrorR, iss.issuer),
+                cancelC2(mirrorR, *iss.auditor)};
+            env(sendJV(env, alice, ka, bob, kb, iss, {.randomness = blinding[target]}),
+                Ter(tecBAD_PROOF));
+            env.close();
+            env(sendJV(env, alice, ka, bob, kb, iss));
+            env.close();
+            auto const sle = env.le(keylet::mptoken(iss.id, alice));
+            BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceSpending), ka, 70));
+        }
+    }
+
+    void
+    testSendDelegation()
+    {
+        testcase("Send delegation");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Account const carol("carol");
+        Key const ka(11);
+        Key const kb(21);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob, carol);
+        env.close();
+        auto const iss = issue(env, gw, {alice, bob});
+        fundSendParties(env, alice, bob, iss);
+        env(delegate::set(alice, carol, {"ConfidentialMPTSend"}));
+        env.close();
+
+        // The proof needs alice's secret key; carol only submits and pays.
+        auto const carolXrp = env.balance(carol).value().xrp();
+        env(sendJV(env, alice, ka, bob, kb, iss), delegate::As(carol));
+        env.close();
+        BEAST_EXPECT(
+            env.balance(carol).value().xrp() == carolXrp - env.current()->fees().base * 10);
+        auto const sle = env.le(keylet::mptoken(iss.id, bob));
+        BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceInbox), kb, 30));
+    }
+
     // Transaction-specific invariants are disabled in Transactor; the protocol
     // invariant ValidConfidentialMPToken covers these transactions.
     void
@@ -1614,6 +2254,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         check.operator()<ConfidentialMPTConvert>(ttCONFIDENTIAL_MPT_CONVERT);
         check.operator()<ConfidentialMPTMergeInbox>(ttCONFIDENTIAL_MPT_MERGE_INBOX);
         check.operator()<ConfidentialMPTConvertBack>(ttCONFIDENTIAL_MPT_CONVERT_BACK);
+        check.operator()<ConfidentialMPTSend>(ttCONFIDENTIAL_MPT_SEND);
     }
 
 public:
@@ -1637,6 +2278,13 @@ public:
         testConvertBackAuthAndFreeze();
         testConvertBackApply();
         testConvertBackIdentity();
+        testSendPreflight();
+        testSendPreclaim();
+        testSendAuthAndFreeze();
+        testSendDepositAuth();
+        testSendApply();
+        testSendIdentity();
+        testSendDelegation();
         testTransactionInvariants();
     }
 };
