@@ -364,81 +364,94 @@ class Bulletproof_test : public beast::unit_test::Suite
         BEAST_EXPECT(!verify({pedersenCommit(s(7), s(98))}, proof));
     }
 
+    // Every malformed variant of a valid proof over commitments v fails: a
+    // flipped bit in each byte, each wrong length, zero and non-canonical
+    // scalars at every scalar position, and invalid or substituted points at
+    // every point position.
+    void
+    expectMalformedRejected(Blob const& proof, std::vector<Point> const& v)
+    {
+        auto const label = [&](char const* what, std::size_t pos) {
+            return "m=" + std::to_string(v.size()) + " " + what + " at " + std::to_string(pos);
+        };
+        if (!BEAST_EXPECT(verify(v, makeSlice(proof))))
+            return;
+
+        for (std::size_t i = 0; i < proof.size(); ++i)
+        {
+            Blob bad = proof;
+            bad[i] ^= 0x01;
+            BEAST_EXPECTS(!verify(v, makeSlice(bad)), label("flip", i));
+        }
+
+        BEAST_EXPECT(!verify(v, Slice{}));
+        BEAST_EXPECT(!verify(v, Slice(proof.data(), proof.size() - 1)));
+        Blob longer = proof;
+        longer.push_back(0);
+        BEAST_EXPECT(!verify(v, makeSlice(longer)));
+
+        // Points: A, S, T1, T2, then L_j, R_j for each of the k rounds.
+        std::size_t const k = (proof.size() - 5 * kScalarLength) / kEcPointLength / 2 - 2;
+        std::size_t const lrAt = 4 * kEcPointLength + 3 * kScalarLength;
+        std::vector<std::size_t> pointsAt;
+        for (std::size_t i = 0; i < 4; ++i)
+            pointsAt.push_back(i * kEcPointLength);
+        for (std::size_t j = 0; j < 2 * k; ++j)
+            pointsAt.push_back(lrAt + j * kEcPointLength);
+        BEAST_EXPECT(pointsAt.back() + kEcPointLength + 2 * kScalarLength == proof.size());
+
+        auto const generator = *Point::generator().bytes();
+        auto const fieldPrime =
+            hex("02FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+        for (auto const pos : pointsAt)
+        {
+            Blob bad = proof;
+            bad[pos] = 0x04;
+            BEAST_EXPECTS(!verify(v, makeSlice(bad)), label("uncompressed prefix", pos));
+            bad[pos] = 0x00;
+            BEAST_EXPECTS(!verify(v, makeSlice(bad)), label("zero prefix", pos));
+            std::copy(fieldPrime.begin(), fieldPrime.end(), bad.begin() + pos);
+            BEAST_EXPECTS(!verify(v, makeSlice(bad)), label("x = p", pos));
+            std::copy(generator.begin(), generator.end(), bad.begin() + pos);
+            BEAST_EXPECTS(!verify(v, makeSlice(bad)), label("G substituted", pos));
+        }
+
+        // Scalars: tau_x, mu, t_hat, then a and b.
+        std::size_t const scalarsAt = 4 * kEcPointLength;
+        std::size_t const tailAt = proof.size() - 2 * kScalarLength;
+        auto const order = hex(kOrder);
+        for (std::size_t const pos :
+             {scalarsAt,
+              scalarsAt + kScalarLength,
+              scalarsAt + 2 * kScalarLength,
+              tailAt,
+              tailAt + kScalarLength})
+        {
+            Blob bad = proof;
+            std::fill(bad.begin() + pos, bad.begin() + pos + kScalarLength, 0);
+            BEAST_EXPECTS(!verify(v, makeSlice(bad)), label("zero scalar", pos));
+            std::copy(order.begin(), order.end(), bad.begin() + pos);
+            BEAST_EXPECTS(!verify(v, makeSlice(bad)), label("scalar n", pos));
+            std::fill(bad.begin() + pos, bad.begin() + pos + kScalarLength, 0xFF);
+            BEAST_EXPECTS(!verify(v, makeSlice(bad)), label("scalar 2^256 - 1", pos));
+        }
+    }
+
     void
     testTampering()
     {
         testcase("Tampering");
 
-        auto const single = hex(kSingle);
-        std::vector<Point> const v1{pedersenCommit(s(1000), s(0x1234))};
-        for (std::size_t i = 0; i < single.size(); ++i)
-        {
-            Blob bad = single;
-            bad[i] ^= 0x01;
-            BEAST_EXPECTS(!verify(v1, makeSlice(bad)), std::to_string(i));
-        }
+        expectMalformedRejected(hex(kSingle), {pedersenCommit(s(1000), s(0x1234))});
+        expectMalformedRejected(
+            hex(kAggregated),
+            {pedersenCommit(s(250), s(0x1234)), pedersenCommit(s(kMax), s(0x5678))});
 
-        auto const aggregated = hex(kAggregated);
-        std::vector<Point> const v2{
-            pedersenCommit(s(250), s(0x1234)), pedersenCommit(s(kMax), s(0x5678))};
-        for (std::size_t i = 0; i < aggregated.size(); i += 5)
-        {
-            Blob bad = aggregated;
-            bad[i] ^= 0x80;
-            BEAST_EXPECTS(!verify(v2, makeSlice(bad)), std::to_string(i));
-        }
-
-        // Lengths.
-        BEAST_EXPECT(!verify(v1, Slice(single.data(), single.size() - 1)));
-        Blob longer = single;
-        longer.push_back(0);
-        BEAST_EXPECT(!verify(v1, makeSlice(longer)));
-        BEAST_EXPECT(!verify(v2, makeSlice(single)));
-        BEAST_EXPECT(!verify(v1, makeSlice(aggregated)));
-
-        // Non-canonical scalars at tau_x, mu, t_hat, a and b.
-        auto const order = hex(kOrder);
-        std::size_t const scalarsAt = 4 * kEcPointLength;
-        std::size_t const tailAt = single.size() - 2 * kScalarLength;
-        for (std::size_t const pos :
-             {scalarsAt,
-              scalarsAt + kScalarLength,
-              scalarsAt + 2 * kScalarLength,
-              tailAt,
-              tailAt + kScalarLength})
-        {
-            Blob bad = single;
-            std::copy(order.begin(), order.end(), bad.begin() + pos);
-            BEAST_EXPECTS(!verify(v1, makeSlice(bad)), std::to_string(pos));
-        }
-
-        // Zero scalars are rejected at every scalar position.
-        for (std::size_t const pos :
-             {scalarsAt,
-              scalarsAt + kScalarLength,
-              scalarsAt + 2 * kScalarLength,
-              tailAt,
-              tailAt + kScalarLength})
-        {
-            Blob bad = single;
-            std::fill(bad.begin() + pos, bad.begin() + pos + kScalarLength, 0);
-            BEAST_EXPECTS(!verify(v1, makeSlice(bad)), std::to_string(pos));
-        }
-
-        // Invalid point encodings at A, S, T1, T2 and the first L and R.
-        std::size_t const lrAt = scalarsAt + 3 * kScalarLength;
-        for (std::size_t const pos :
-             {std::size_t{0},
-              kEcPointLength,
-              2 * kEcPointLength,
-              3 * kEcPointLength,
-              lrAt,
-              lrAt + kEcPointLength})
-        {
-            Blob bad = single;
-            bad[pos] = 0x04;
-            BEAST_EXPECTS(!verify(v1, makeSlice(bad)), std::to_string(pos));
-        }
+        // Each proof length only fits its own commitment count.
+        BEAST_EXPECT(!verify({pedersenCommit(s(1000), s(0x1234))}, makeSlice(hex(kAggregated))));
+        BEAST_EXPECT(!verify(
+            {pedersenCommit(s(250), s(0x1234)), pedersenCommit(s(kMax), s(0x5678))},
+            makeSlice(hex(kSingle))));
     }
 
     void
