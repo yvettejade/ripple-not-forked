@@ -678,6 +678,30 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             auto const sle = env.le(keylet::mptoken(iss.id, bob));
             BEAST_EXPECT(sle && sle->isFieldPresent(sfHolderEncryptionKey));
         }
+
+        // A consistent supply converts right up to kMaxMpTokenAmount, while a
+        // COA the credit would push past it, which only a corrupted ledger
+        // holds, fails instead of wrapping. The open-ledger edits are lost at
+        // the next close, so this runs in its own Env.
+        {
+            Env env2{*this};
+            env2.fund(XRP(10'000), gw, alice);
+            env2.close();
+            auto const iss2 = issue(env2, gw, {alice});
+            modifyEntry(env2, keylet::mptIssuance(iss2.id), [](SLE& sle) {
+                sle[sfConfidentialOutstandingAmount] = kMaxMpTokenAmount - 1'000;
+                sle[sfOutstandingAmount] = kMaxMpTokenAmount;
+            });
+            env2(convertJV(env2, alice, key, iss2));
+            auto const sle = env2.le(keylet::mptIssuance(iss2.id));
+            BEAST_EXPECT(
+                sle && (*sle)[sfConfidentialOutstandingAmount] == kMaxMpTokenAmount - 900);
+
+            modifyEntry(env2, keylet::mptIssuance(iss2.id), [](SLE& sle) {
+                sle[sfConfidentialOutstandingAmount] = kMaxMpTokenAmount - 99;
+            });
+            env2(convertJV(env2, alice, key, iss2, {.registerKey = false}), Ter(tecINTERNAL));
+        }
     }
 
     void
@@ -1533,6 +1557,20 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         }
 
         env(convertBackJV(env, alice, key, iss));
+
+        // A public balance the credit would push past kMaxMpTokenAmount,
+        // which only a corrupted ledger holds, fails instead of wrapping.
+        {
+            Env env2{*this};
+            env2.fund(XRP(10'000), gw, alice, bob);
+            env2.close();
+            auto const iss2 = issue(env2, gw, {alice, bob});
+            fundConfidential(env2, alice, bob, key, iss2);
+            modifyEntry(env2, keylet::mptoken(iss2.id, alice), [](SLE& sle) {
+                sle[sfMPTAmount] = kMaxMpTokenAmount - 39;
+            });
+            env2(convertBackJV(env2, alice, key, iss2), Ter(tecINTERNAL));
+        }
     }
 
     void

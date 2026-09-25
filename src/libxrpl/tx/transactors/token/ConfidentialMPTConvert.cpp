@@ -105,6 +105,11 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (amount > (*mptoken)[sfMPTAmount])
         return tecINSUFFICIENT_FUNDS;
 
+    // COA <= OA <= kMaxMpTokenAmount while supply is consistent, so only a
+    // corrupted ledger reaches this; the credit must not wrap regardless.
+    if ((*issuance)[sfConfidentialOutstandingAmount] > kMaxMpTokenAmount - amount)
+        return tecINTERNAL;
+
     bool const registering = tx.isFieldPresent(sfHolderEncryptionKey);
     if (registering && mptoken->isFieldPresent(sfHolderEncryptionKey))
         return tecDUPLICATE;
