@@ -735,8 +735,6 @@ TRANSACTION(ttMPTOKEN_ISSUANCE_SET, 56, MPTokenIssuanceSet,
     {sfMPTokenMetadata, SoeOptional},
     {sfTransferFee, SoeOptional},
     {sfMutableFlags, SoeOptional},
-    {sfIssuerEncryptionKey, SoeOptional},
-    {sfAuditorEncryptionKey, SoeOptional},
 }))
 
 /** This transaction type authorizes a MPToken instance */
@@ -1077,98 +1075,6 @@ TRANSACTION(ttLOAN_PAY, 84, LoanPay,
     MayAuthorizeMpt | MustModifyVault, ({
     {sfLoanID, SoeRequired},
     {sfAmount, SoeRequired, SoeMptSupported},
-}))
-
-/** This transaction type converts a holder's public MPT balance into its
-    confidential inbox (XLS-0096). */
-#if TRANSACTION_INCLUDE
-#   include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
-#endif
-TRANSACTION(ttCONFIDENTIAL_MPT_CONVERT, 85, ConfidentialMPTConvert,
-    Delegation::Delegable,
-    featureConfidentialTransfer,
-    MayModifyConfidentialMpt,
-    ({
-    {sfMPTokenIssuanceID, SoeRequired},
-    {sfMPTAmount, SoeRequired},
-    {sfHolderEncryptionKey, SoeOptional},
-    {sfHolderEncryptedAmount, SoeRequired},
-    {sfIssuerEncryptedAmount, SoeRequired},
-    {sfAuditorEncryptedAmount, SoeOptional},
-    {sfBlindingFactor, SoeRequired},
-    {sfZKProof, SoeOptional},
-}))
-
-/** This transaction type merges a holder's confidential inbox into its
-    spending balance (XLS-0096). */
-#if TRANSACTION_INCLUDE
-#   include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
-#endif
-TRANSACTION(ttCONFIDENTIAL_MPT_MERGE_INBOX, 86, ConfidentialMPTMergeInbox,
-    Delegation::Delegable,
-    featureConfidentialTransfer,
-    MayModifyConfidentialMpt,
-    ({
-    {sfMPTokenIssuanceID, SoeRequired},
-}))
-
-/** This transaction type converts part of a holder's confidential spending
-    balance back into its public balance (XLS-0096). */
-#if TRANSACTION_INCLUDE
-#   include <xrpl/tx/transactors/token/ConfidentialMPTConvertBack.h>
-#endif
-TRANSACTION(ttCONFIDENTIAL_MPT_CONVERT_BACK, 87, ConfidentialMPTConvertBack,
-    Delegation::Delegable,
-    featureConfidentialTransfer,
-    MayModifyConfidentialMpt,
-    ({
-    {sfMPTokenIssuanceID, SoeRequired},
-    {sfMPTAmount, SoeRequired},
-    {sfHolderEncryptedAmount, SoeRequired},
-    {sfIssuerEncryptedAmount, SoeRequired},
-    {sfAuditorEncryptedAmount, SoeOptional},
-    {sfBlindingFactor, SoeRequired},
-    {sfBalanceCommitment, SoeRequired},
-    {sfZKProof, SoeRequired},
-}))
-
-/** This transaction type sends a hidden amount of an MPT from the sender's
-    confidential spending balance to the destination's inbox (XLS-0096). */
-#if TRANSACTION_INCLUDE
-#   include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
-#endif
-TRANSACTION(ttCONFIDENTIAL_MPT_SEND, 88, ConfidentialMPTSend,
-    Delegation::Delegable,
-    featureConfidentialTransfer,
-    MayModifyConfidentialMpt,
-    ({
-    {sfDestination, SoeRequired},
-    {sfMPTokenIssuanceID, SoeRequired},
-    {sfSenderEncryptedAmount, SoeRequired},
-    {sfDestinationEncryptedAmount, SoeRequired},
-    {sfIssuerEncryptedAmount, SoeRequired},
-    {sfAuditorEncryptedAmount, SoeOptional},
-    {sfZKProof, SoeRequired},
-    {sfBalanceCommitment, SoeRequired},
-    {sfAmountCommitment, SoeRequired},
-    {sfCredentialIDs, SoeOptional},
-    {sfDestinationTag, SoeOptional},
-}))
-
-/** This transaction type lets the issuer burn a holder's whole confidential
-    balance, proving the amount its mirror encrypts (XLS-0096). */
-#if TRANSACTION_INCLUDE
-#   include <xrpl/tx/transactors/token/ConfidentialMPTClawback.h>
-#endif
-TRANSACTION(ttCONFIDENTIAL_MPT_CLAWBACK, 89, ConfidentialMPTClawback,
-    Delegation::Delegable,
-    featureConfidentialTransfer,
-    MayModifyConfidentialMpt,
-    ({
-    {sfHolder, SoeRequired},
-    {sfMPTokenIssuanceID, SoeRequired},
-    {sfMPTAmount, SoeRequired},
-    {sfZKProof, SoeRequired},
 }))
 
 /** This system-generated transaction type is used to update the status of the various amendments.

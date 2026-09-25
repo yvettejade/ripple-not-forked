@@ -47,8 +47,6 @@ enum Privilege {
     MustModifyVault = 0x0800,     // The transaction must modify, delete or create, a vault
     MayModifyVault = 0x1000,      // The transaction MAY modify, delete or create, a vault
     MayCreateMpt = 0x2000,        // The transaction MAY create an MPT object, except for issuer.
-    MayModifyConfidentialMpt = 0x4000,  // The transaction MAY change confidential MPT state
-                                        // (XLS-0096).
 };
 
 constexpr Privilege

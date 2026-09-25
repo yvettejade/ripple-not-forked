@@ -127,59 +127,6 @@ public:
                 BEAST_EXPECT(leFlags["Loan"]["lsfLoanImpaired"] == 0x00020000);
                 BEAST_EXPECT(leFlags["Vault"]["lsfVaultPrivate"] == 0x00010000);
                 BEAST_EXPECT(leFlags["MPToken"]["lsfMPTAuthorized"] == 0x00000002);
-                BEAST_EXPECT(
-                    leFlags["MPTokenIssuance"]["lsfMPTCanHoldConfidentialBalance"] == 0x00000080);
-                BEAST_EXPECT(
-                    leFlags["MPTokenIssuanceMutable"]
-                           ["lsmfMPTCanMutateCanHoldConfidentialBalance"] == 0x00000080);
-                BEAST_EXPECT(!leFlags.isMember("MPTokenIssuanceImmutable"));
-            }
-
-            // XLS-0096 Confidential MPT protocol definitions
-            {
-                auto const& results = result[jss::result][jss::TRANSACTION_RESULTS];
-                BEAST_EXPECT(results["tecBAD_PROOF"].asInt() == 198);
-                BEAST_EXPECT(results["temBAD_CIPHERTEXT"].asInt() == -248);
-                BEAST_EXPECT(results["terFROZEN"].asInt() == -83);
-
-                auto const findField = [&](std::string const& name) -> json::Value {
-                    for (auto const& field : result[jss::result][jss::FIELDS])
-                    {
-                        if (field[0u].asString() == name)
-                            return field[1];
-                    }
-                    return json::Value{};
-                };
-                auto const expectField =
-                    [&](std::string const& name, std::string const& type, unsigned nth, bool isVL) {
-                        auto const field = findField(name);
-                        if (!BEAST_EXPECTS(field.isObject(), name))
-                            return;
-                        BEAST_EXPECTS(field[jss::type].asString() == type, name);
-                        BEAST_EXPECTS(field[jss::nth].asUInt() == nth, name);
-                        BEAST_EXPECTS(field[jss::isVLEncoded].asBool() == isVL, name);
-                        BEAST_EXPECTS(field[jss::isSerialized].asBool(), name);
-                        BEAST_EXPECTS(field[jss::isSigningField].asBool(), name);
-                    };
-                expectField("ConfidentialBalanceVersion", "UInt32", 69, false);
-                BEAST_EXPECT(findField("ImmutableFlags").isNull());
-                expectField("ConfidentialOutstandingAmount", "UInt64", 32, false);
-                expectField("BlindingFactor", "Hash256", 40, false);
-                expectField("IssuerEncryptionKey", "Blob", 32, true);
-                expectField("AuditorEncryptionKey", "Blob", 33, true);
-                expectField("HolderEncryptionKey", "Blob", 34, true);
-                expectField("ConfidentialBalanceSpending", "Blob", 35, true);
-                expectField("ConfidentialBalanceInbox", "Blob", 36, true);
-                expectField("IssuerEncryptedBalance", "Blob", 37, true);
-                expectField("AuditorEncryptedBalance", "Blob", 38, true);
-                expectField("HolderEncryptedAmount", "Blob", 39, true);
-                expectField("IssuerEncryptedAmount", "Blob", 40, true);
-                expectField("AuditorEncryptedAmount", "Blob", 41, true);
-                expectField("SenderEncryptedAmount", "Blob", 42, true);
-                expectField("DestinationEncryptedAmount", "Blob", 43, true);
-                expectField("ZKProof", "Blob", 44, true);
-                expectField("BalanceCommitment", "Blob", 45, true);
-                expectField("AmountCommitment", "Blob", 46, true);
             }
 
             // validate the correctness of few chosen transaction flags
@@ -195,11 +142,6 @@ public:
 
                 BEAST_EXPECT(txFlags["MPTokenIssuanceSet"]["tfMPTLock"] == 0x00000001);
                 BEAST_EXPECT(txFlags["MPTokenIssuanceSet"]["tfMPTUnlock"] == 0x00000002);
-                BEAST_EXPECT(
-                    !txFlags["MPTokenIssuanceSet"].isMember("tfMPTSetCanHoldConfidentialBalance"));
-                BEAST_EXPECT(
-                    txFlags["MPTokenIssuanceCreate"]["tfMPTCanHoldConfidentialBalance"] ==
-                    0x00000080);
 
                 BEAST_EXPECT(txFlags["AMMDeposit"]["tfLPToken"] == 0x00010000);
                 BEAST_EXPECT(txFlags["AMMDeposit"]["tfLimitLPToken"] == 0x00400000);

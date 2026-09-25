@@ -38,9 +38,6 @@ MPTokenIssuanceDestroy::preclaim(PreclaimContext const& ctx)
     if ((*sleMPT)[~sfLockedAmount].value_or(0) != 0)
         return tecHAS_OBLIGATIONS;  // LCOV_EXCL_LINE
 
-    if ((*sleMPT)[sfConfidentialOutstandingAmount] != 0)
-        return tecHAS_OBLIGATIONS;
-
     return tesSUCCESS;
 }
 

@@ -1,11 +1,7 @@
 #pragma once
 
-#include <xrpl/basics/UnorderedContainers.h>
-#include <xrpl/basics/base_uint.h>
 #include <xrpl/beast/utility/Journal.h>
 #include <xrpl/ledger/ReadView.h>
-#include <xrpl/protocol/AccountID.h>
-#include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/protocol/TER.h>
@@ -51,7 +47,6 @@ public:
  *    - OutstandingAmount <= MaximumAmount for any MPT
  *    - OutstandingAmount after = OutstandingAmount before +
  *         sum (MPT after - MPT before) - this is total MPT credit/debit
- *         + (ConfidentialOutstandingAmount after - before)
  */
 class ValidMPTPayment
 {
@@ -59,16 +54,12 @@ class ValidMPTPayment
     struct MPTData
     {
         std::array<std::int64_t, 2> outstanding{};
-        std::array<std::int64_t, 2> confidentialOutstanding{};
         // sum (MPT after - MPT before)
         std::int64_t mptAmount{0};
-        // true if a confidential field of one of its MPTokens changed
-        bool confidentialActivity{false};
-        // true if an amount exceeded its limit; the balance check is skipped
-        bool overflow{false};
-        bool confidentialOverflow{false};
     };
 
+    // true if OutstandingAmount > MaximumAmount in after for any MPT
+    bool overflow_{false};
     // mptid:MPTData
     hash_map<uint192, MPTData> data_;
 
@@ -78,148 +69,6 @@ public:
 
     bool
     finalize(STTx const&, TER const, XRPAmount const, ReadView const&, beast::Journal const&);
-};
-
-/** Verify the XLS-0096 confidential balance rules that hold for every
- *  transaction.
- *
- *  MPTokenIssuance:
- *    - ConfidentialOutstandingAmount <= OutstandingAmount, and it is only
- *      non-zero with lsfMPTCanHoldConfidentialBalance and an issuer key
- *    - lsfMPTCanHoldConfidentialBalance is never cleared, and is only set
- *      after creation with lsmfMPTCanMutateCanHoldConfidentialBalance
- *    - encryption keys are valid points, need
- *      lsfMPTCanHoldConfidentialBalance, an auditor key needs an issuer key
- *      and is only added together with it,
- *      keys are never added while ConfidentialOutstandingAmount is non-zero,
- *      and registered keys never change
- *    - a non-zero TransferFee never coexists with confidential balances
- *    - it is not deleted while ConfidentialOutstandingAmount is non-zero
- *
- *  MPToken:
- *    - ConfidentialBalanceSpending or ConfidentialBalanceInbox is present
- *      exactly when IssuerEncryptedBalance is (XLS-0096 §7.4)
- *    - HolderEncryptionKey, both holder balances and IssuerEncryptedBalance
- *      are initialized together, and the key and ciphertexts are valid
- *      encodings; ConfidentialBalanceVersion is a default field, never
- *      present with value 0
- *    - encrypted balances only change for an existing issuance with
- *      lsfMPTCanHoldConfidentialBalance and an issuer key, and
- *      AuditorEncryptedBalance exists
- *      exactly when the issuance has an auditor key
- *    - a registered HolderEncryptionKey never changes, and an MPToken with
- *      confidential state keeps the holder and issuance of its ledger key
- *    - ConfidentialBalanceVersion starts at 0 and advances by exactly one;
- *      changing ConfidentialBalanceSpending changes it
- *    - no confidential field other than the version (absent at 0) is ever
- *      removed, including by deleting the MPToken while its issuance
- *      exists
- *
- *  Transactions:
- *    - only successful transactions with MayModifyConfidentialMpt change
- *      ConfidentialOutstandingAmount or a confidential MPToken field
- *    - a successful confidential transaction changes OutstandingAmount,
- *      ConfidentialOutstandingAmount and MPTAmount exactly as its type
- *      prescribes (XLS-0096 §6.5), and changes only its parties' MPTokens,
- *      each field following the type's state transition
- */
-class ValidConfidentialMPToken
-{
-    struct EncryptedToken
-    {
-        uint192 issuanceID;
-        bool hasAuditorBalance;
-    };
-
-    struct SupplyChange
-    {
-        std::int64_t outstanding = 0;
-        std::int64_t confidentialOutstanding = 0;
-
-        bool
-        operator==(SupplyChange const&) const = default;
-    };
-
-    struct TokenChange
-    {
-        uint192 issuanceID;
-        AccountID account;
-        std::int64_t amount;
-        std::shared_ptr<SLE const> before;
-        // nullptr if the MPToken was deleted.
-        std::shared_ptr<SLE const> after;
-    };
-
-    bool coaExceedsOutstanding_ = false;
-    bool coaWithoutConfidentialFlag_ = false;
-    bool confidentialFlagChanged_ = false;
-    bool issuanceKeysInvalid_ = false;
-    bool transferFeeWithConfidential_ = false;
-    bool issuanceDeletedWithCOA_ = false;
-    bool inconsistentEncryptedFields_ = false;
-    bool incompleteConfidentialFields_ = false;
-    bool holderKeyChanged_ = false;
-    bool identityChanged_ = false;
-    bool spendingChangedWithoutVersion_ = false;
-    bool confidentialStateRemoved_ = false;
-    bool malformedConfidentialFields_ = false;
-    bool coaWithoutIssuerKey_ = false;
-    bool badVersionStep_ = false;
-    bool explicitDefaultVersion_ = false;
-    // Issuances of deleted MPTokens that had confidential state.
-    std::vector<uint192> confidentialTokensDeleted_;
-    // MPTokens that hold encrypted balances after the transaction.
-    std::vector<EncryptedToken> encryptedTokens_;
-
-    // ConfidentialOutstandingAmount or a confidential MPToken field changed.
-    bool confidentialChanged_ = false;
-    // An amount exceeded kMaxMpTokenAmount, so the changes below are unknown.
-    bool amountOverflow_ = false;
-    // Non-zero OutstandingAmount or ConfidentialOutstandingAmount changes.
-    hash_map<uint192, SupplyChange> supplyChanges_;
-    // MPTokens whose MPTAmount or confidential fields changed.
-    std::vector<TokenChange> tokenChanges_;
-
-    void
-    visitIssuance(bool isDelete, SLE const* before, SLE const& after);
-
-    void
-    visitMPToken(bool isDelete, SLE const* before, SLE const& after);
-
-    void
-    recordChanges(
-        std::shared_ptr<SLE const> const& before,
-        std::shared_ptr<SLE const> const& after);
-
-    [[nodiscard]] bool
-    validConfidentialChanges(STTx const& tx, ReadView const& view) const;
-
-    [[nodiscard]] static bool
-    validConvert(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
-
-    [[nodiscard]] static bool
-    validDebit(
-        STTx const& tx,
-        SLE const* before,
-        SLE const& after,
-        SLE const& issuance,
-        SF_VL const& holderAmount);
-
-    [[nodiscard]] static bool
-    validReceive(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
-
-    [[nodiscard]] static bool
-    validClawback(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
-
-    [[nodiscard]] static bool
-    validMerge(STTx const& tx, SLE const* before, SLE const& after);
-
-public:
-    void
-    visitEntry(bool, std::shared_ptr<SLE const> const&, std::shared_ptr<SLE const> const&);
-
-    [[nodiscard]] bool
-    finalize(STTx const&, TER const, XRPAmount const, ReadView const&, beast::Journal const&) const;
 };
 
 class ValidMPTTransfer
