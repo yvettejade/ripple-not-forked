@@ -410,6 +410,8 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         // The holder needs the public balance.
         env(convertJV(env, alice, key, iss, {.amount = 901, .registerKey = false}),
             Ter(tecINSUFFICIENT_FUNDS));
+        // Section 7.3.2 lists the funds check before the duplicate key.
+        env(convertJV(env, alice, key, iss, {.amount = 901}), Ter(tecINSUFFICIENT_FUNDS));
 
         // The disclosed blinding factor must reproduce every ciphertext.
         for (SF_VL const* field : {&sfHolderEncryptedAmount, &sfIssuerEncryptedAmount})
