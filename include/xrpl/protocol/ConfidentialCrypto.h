@@ -23,14 +23,17 @@
     Validators only verify public data (ciphertexts, keys, commitments and
     disclosed blinding factors), for which the variable-time operations are
     appropriate. Code that handles secret scalars (provers, decryption) must
-    use mulGenerator and mulSecret, which are constant-time in the scalar,
-    zero included. Scalar arithmetic never branches on a value, and Scalar
-    and Point storage is wiped on destruction.
+    use mulGenerator and mulSecret, whose multiplication is constant-time in
+    the scalar, zero included. mulSecret then re-parses the product with
+    libsecp256k1's variable-time point validation, whose work depends only on
+    the point being valid (it always is). Scalar arithmetic never branches on
+    a value, and Scalar and Point storage is wiped on destruction.
 
     Point addition is variable-time and short-circuits the identity, so a
     prover must not add a product whose scalar may be a secret zero (a bit,
     an empty balance) without masking it first; pedersenCommit and
-    elGamalEncrypt do this for their message.
+    elGamalEncrypt do this for their message, and the Bulletproof prover
+    rejects zero blinding factors.
 
     Every hash is SHA-256, and hash outputs become scalars by reduction mod n.
 */

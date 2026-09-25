@@ -206,14 +206,22 @@ struct Proof
 // Honest provers hit an invalid transcript with probability about 2^-250.
 constexpr int kMaxProverAttempts = 8;
 
-// Σ k_i·P_i for secret k_i in constant time: every term is multiplied as
-// (k_i + m_i)·P_i - m_i·P_i with a fresh mask m_i, so zero and one
-// coefficients (the bits of a_L) cost the same as any other.
+// offset + Σ k_i·P_i for secret k_i in constant time: every term is
+// multiplied as (k_i + m_i)·P_i - m_i·P_i with a fresh mask m_i, so zero and
+// one coefficients (the bits of a_L) cost the same as any other. The offset
+// must be secret-blinded and comes first, so that no partial sum (and not the
+// total, even when every k_i is zero) is the identity, which point addition
+// would short-circuit.
 Point
-maskedSum(std::span<Scalar const> scalars, std::span<Point const> points, HedgedNonces& masks)
+maskedSum(
+    Point const& offset,
+    std::span<Scalar const> scalars,
+    std::span<Point const> points,
+    HedgedNonces& masks)
 {
     Points terms;
-    terms.reserve(2 * scalars.size());
+    terms.reserve(1 + 2 * scalars.size());
+    terms.push_back(offset);
     for (std::size_t i = 0; i < scalars.size(); ++i)
     {
         auto const m = masks.next();
@@ -295,7 +303,7 @@ tryProve(
     Points gh(n);
     for (std::size_t i = 0; i < n; ++i)
         gh[i] = gs[i] + hs[i];
-    auto const bigA = mulSecret(alpha, h) - sumPoints(hs) + maskedSum(aL, gh, nonces);
+    auto const bigA = maskedSum(mulSecret(alpha, h) - sumPoints(hs), aL, gh, nonces);
     auto const bigS = mulSecret(rho, h) + secretSum(sL, gs) + secretSum(sR, hs);
     transcript.append(bigA);
     transcript.append(bigS);
@@ -457,6 +465,10 @@ proveRange(
         Throw<std::invalid_argument>("confidential: unsupported range proof size");
     if (!std::ranges::all_of(values, below2To64))
         Throw<std::invalid_argument>("confidential: range proof value is 2^64 or more");
+    // A commitment without blinding is v·G, which reveals a 64-bit v to a
+    // baby-step giant-step search.
+    if (std::ranges::any_of(blindings, [](Scalar const& b) { return b.isZero(); }))
+        Throw<std::invalid_argument>("confidential: range proof blinding factor is zero");
 
     Points commitments;
     for (std::size_t j = 0; j < m; ++j)

@@ -473,6 +473,26 @@ class Bulletproof_test : public beast::unit_test::Suite
         std::vector<Scalar> const zeroBlind{Scalar{}};
         BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(zero, zeroBlind, ctx); }));
 
+        // An unblinded commitment is not hiding, so no blinding may be zero.
+        {
+            std::vector<Scalar> const one{s(7)};
+            BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(one, zeroBlind, ctx); }));
+            std::vector<Scalar> const pair{s(7), s(8)};
+            std::vector<Scalar> const firstZero{Scalar{}, s(5)};
+            std::vector<Scalar> const secondZero{s(5), Scalar{}};
+            BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(pair, firstZero, ctx); }));
+            BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(pair, secondZero, ctx); }));
+        }
+
+        // The value 0 in every position still proves: its masked bits start
+        // from a blinded offset.
+        {
+            std::vector<Scalar> const zeros{Scalar{}, Scalar{}};
+            std::vector<Scalar> const blindings{s(5), s(6)};
+            auto const proof = proveRange(zeros, blindings, ctx);
+            BEAST_EXPECT(verify({pedersenCommit(Scalar{}, s(5)), pedersenCommit(Scalar{}, s(6))}, proof));
+        }
+
         // Values of 2^64 and above have no proof, in either position.
         auto const twoTo64 = s(kMax) + s(1);
         auto const top = -s(1);
