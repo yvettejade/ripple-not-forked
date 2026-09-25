@@ -4952,6 +4952,14 @@ class Invariants_test : public beast::unit_test::Suite
                 ctx->type, [&](STObject& tx) {
                     tx.setAccountID(sfAccount, account);
                     tx.setFieldH192(sfMPTokenIssuanceID, id);
+                    if (ctx->type == ttCONFIDENTIAL_MPT_CLAWBACK)
+                    {
+                        // The issuer claws back from `account`.
+                        tx.setAccountID(sfAccount, MPTIssue{id}.getIssuer());
+                        tx.setAccountID(sfHolder, account);
+                        tx.setFieldU64(sfMPTAmount, ctx->amount);
+                        return;
+                    }
                     if ((ctx->type != ttCONFIDENTIAL_MPT_CONVERT &&
                          ctx->type != ttCONFIDENTIAL_MPT_CONVERT_BACK) ||
                         !issuance)
@@ -4983,6 +4991,9 @@ class Invariants_test : public beast::unit_test::Suite
         };
         auto const convertBackTx = [](std::uint64_t amount) {
             return ConfidentialTx{.type = ttCONFIDENTIAL_MPT_CONVERT_BACK, .amount = amount};
+        };
+        auto const clawbackTx = [](std::uint64_t amount) {
+            return ConfidentialTx{.type = ttCONFIDENTIAL_MPT_CLAWBACK, .amount = amount};
         };
 
         // gw issues an MPT and pays 100 to A1; a confidential issuance also
@@ -5507,6 +5518,38 @@ class Invariants_test : public beast::unit_test::Suite
                 (*token)[sfMPTAmount] = (*token)[sfMPTAmount] + amount;
                 (*issuance)[sfConfidentialOutstandingAmount] =
                     (*issuance)[sfConfidentialOutstandingAmount] - amount;
+                if (tweak)
+                    tweak(*token, *issuance);
+                ac.view().update(token);
+                ac.view().update(issuance);
+                return true;
+            };
+        };
+        auto const applyClawback = [&](std::uint64_t amount, Tweak tweak = {}) {
+            return [=](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto token = ac.view().peek(keylet::mptoken(id, holder));
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!token || !issuance)
+                    return false;
+                auto const zero = [&](Blob const& pk) {
+                    return bufOf(confidential::encryptedZero(holder, id, pointOf(pk)));
+                };
+                token->setFieldVL(sfConfidentialBalanceSpending, zero(key));
+                token->setFieldVL(sfConfidentialBalanceInbox, zero(key));
+                token->setFieldVL(
+                    sfIssuerEncryptedBalance, zero(issuance->getFieldVL(sfIssuerEncryptionKey)));
+                if (issuance->isFieldPresent(sfAuditorEncryptionKey))
+                {
+                    token->setFieldVL(
+                        sfAuditorEncryptedBalance,
+                        zero(issuance->getFieldVL(sfAuditorEncryptionKey)));
+                }
+                token->setFieldU32(
+                    sfConfidentialBalanceVersion,
+                    token->getFieldU32(sfConfidentialBalanceVersion) + 1);
+                (*issuance)[sfConfidentialOutstandingAmount] =
+                    (*issuance)[sfConfidentialOutstandingAmount] - amount;
+                (*issuance)[sfOutstandingAmount] = (*issuance)[sfOutstandingAmount] - amount;
                 if (tweak)
                     tweak(*token, *issuance);
                 ac.view().update(token);
@@ -6081,6 +6124,103 @@ class Invariants_test : public beast::unit_test::Suite
                 },
                 fails);
         }
+
+        // Clawback: every balance of the holder becomes EncZero, version + 1,
+        // and OA and COA both fall by MPTAmount.
+        check({}, applyClawback(40), confidential, seedConverted, pass, features, clawbackTx(40));
+        {
+            Seed const auditedConverted = [&](SLE& issuance, SLE& token) {
+                seedConverted(issuance, token);
+                withKeys(issuance, token);
+                token.setFieldVL(sfAuditorEncryptedBalance, ctA);
+            };
+            check(
+                {},
+                applyClawback(40),
+                confidential,
+                auditedConverted,
+                pass,
+                features,
+                clawbackTx(40));
+            broken(
+                applyClawback(
+                    40, [&](SLE& t, SLE&) { t.setFieldVL(sfAuditorEncryptedBalance, ctA); }),
+                clawbackTx(40),
+                auditedConverted);
+        }
+        for (SField const* field : std::initializer_list<SField const*>{
+                 &sfConfidentialBalanceSpending,
+                 &sfConfidentialBalanceInbox,
+                 &sfIssuerEncryptedBalance})
+        {
+            broken(
+                applyClawback(
+                    40,
+                    [&, field](SLE& t, SLE&) {
+                        t.setFieldVL(*static_cast<SF_VL const*>(field), ctA);
+                    }),
+                clawbackTx(40),
+                seedConverted);
+        }
+        broken(
+            applyClawback(40, [](SLE& t, SLE&) { t.setFieldU32(sfConfidentialBalanceVersion, 1); }),
+            clawbackTx(40),
+            seedConverted);
+        broken(
+            applyClawback(40, [&](SLE& t, SLE&) { t.setFieldVL(sfHolderEncryptionKey, otherKey); }),
+            clawbackTx(40),
+            seedConverted);
+        broken(applyClawback(40), clawbackTx(30), seedConverted);
+        broken(
+            applyClawback(40, [](SLE&, SLE& issuance) { issuance[sfOutstandingAmount] = 100; }),
+            clawbackTx(40),
+            seedConverted);
+        broken(
+            applyClawback(
+                40,
+                [](SLE& t, SLE& issuance) {
+                    t[sfMPTAmount] = 20;
+                    issuance[sfOutstandingAmount] = 20;
+                }),
+            clawbackTx(40),
+            seedConverted);
+        broken(applyClawback(40), clawbackTx(kMaxMpTokenAmount + 1), seedConverted);
+        // Zeroing an MPToken other than the Holder's.
+        broken(
+            [&](MPTID const& id, AccountID const&, ApplyContext& ac) {
+                AccountID const other{3};
+                auto sle = std::make_shared<SLE>(keylet::mptoken(id, other));
+                (*sle)[sfAccount] = other;
+                (*sle)[sfMPTokenIssuanceID] = id;
+                initialize(*sle);
+                ac.view().insert(sle);
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!issuance)
+                    return false;
+                (*issuance)[sfConfidentialOutstandingAmount] = 0;
+                (*issuance)[sfOutstandingAmount] = 60;
+                ac.view().update(issuance);
+                return true;
+            },
+            clawbackTx(40),
+            seedConverted);
+        broken(
+            [&](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto sle = std::make_shared<SLE>(keylet::mptoken(id, AccountID{}));
+                (*sle)[sfAccount] = holder;
+                (*sle)[sfMPTokenIssuanceID] = id;
+                initialize(*sle);
+                ac.view().insert(sle);
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!issuance)
+                    return false;
+                (*issuance)[sfConfidentialOutstandingAmount] = 0;
+                (*issuance)[sfOutstandingAmount] = 60;
+                ac.view().update(issuance);
+                return true;
+            },
+            clawbackTx(40),
+            seedConverted);
 
         // The supply rule: COA and the public balance move by exactly MPTAmount
         // and OutstandingAmount does not move.

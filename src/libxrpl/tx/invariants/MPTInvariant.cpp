@@ -597,6 +597,36 @@ ValidConfidentialMPToken::validReceive(
         (!auditorKey || credited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount, *auditorKey));
 }
 
+// XLS-0096 §11.4 and updated spec eq. (63)-(66): every balance of the holder
+// becomes the canonical encrypted zero under its key, the version advances
+// by one and the key is untouched.
+bool
+ValidConfidentialMPToken::validClawback(
+    STTx const& tx,
+    SLE const* before,
+    SLE const& after,
+    SLE const& issuance)
+{
+    using namespace confidential;
+    auto const holder = tx[sfHolder];
+    auto const id = tx[sfMPTokenIssuanceID];
+    auto const key = pointField(after, sfHolderEncryptionKey);
+    auto const issuerKey = pointField(issuance, sfIssuerEncryptionKey);
+    auto const auditorKey = pointField(issuance, sfAuditorEncryptionKey);
+    if (!before || !key || !issuerKey)
+        return false;
+    auto const zeroed = [&](SF_VL const& field, Point const& pk) {
+        return ciphertextField(after, field) == encryptedZero(holder, id, pk);
+    };
+    auto const version = (*before)[~sfConfidentialBalanceVersion];
+    return version &&
+        after[~sfConfidentialBalanceVersion] == static_cast<std::uint32_t>(*version + 1) &&
+        sameField(*before, after, sfHolderEncryptionKey) &&
+        zeroed(sfConfidentialBalanceSpending, *key) && zeroed(sfConfidentialBalanceInbox, *key) &&
+        zeroed(sfIssuerEncryptedBalance, *issuerKey) &&
+        (!auditorKey || zeroed(sfAuditorEncryptedBalance, *auditorKey));
+}
+
 // XLS-0096 §9.3: the inbox moves into the spending balance, the inbox resets
 // to the canonical encrypted zero, the version advances by one and the key
 // and mirrors are untouched.
@@ -1004,7 +1034,7 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
     if (amountOverflow_)
         return false;
 
-    // XLS-0096 §6.5, §7.5, §8.4, §9.3 and §10.5.
+    // XLS-0096 §6.5, §7.5, §8.4, §9.3, §10.5 and §11.4.
     SupplyChange expected;
     std::int64_t accountAmount = 0;
     switch (tx.getTxnType())
@@ -1025,6 +1055,14 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
             expected.confidentialOutstanding = -accountAmount;
             break;
         }
+        case ttCONFIDENTIAL_MPT_CLAWBACK: {
+            auto const amount = tx[sfMPTAmount];
+            if (amount > kMaxMpTokenAmount)
+                return false;
+            expected.outstanding = -static_cast<std::int64_t>(amount);
+            expected.confidentialOutstanding = expected.outstanding;
+            break;
+        }
         case ttCONFIDENTIAL_MPT_MERGE_INBOX:
         case ttCONFIDENTIAL_MPT_SEND:
             break;
@@ -1036,7 +1074,9 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
     }
 
     auto const id = tx[sfMPTokenIssuanceID];
-    auto const account = tx[sfAccount];
+    // The issuer submits a clawback; the holder's MPToken is the one changed.
+    auto const account =
+        tx.getTxnType() == ttCONFIDENTIAL_MPT_CLAWBACK ? tx[sfHolder] : tx[sfAccount];
 
     auto const it = supplyChanges_.find(id);
     bool const touched = it != supplyChanges_.end();
@@ -1045,7 +1085,7 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
         return false;
 
     // Each changes exactly its parties' MPTokens: Convert always credits the
-    // inbox, and the others always advance the submitter's version.
+    // inbox, and the others always advance the version.
     bool const send = tx.getTxnType() == ttCONFIDENTIAL_MPT_SEND;
     auto const issuance = view.read(keylet::mptIssuance(id));
     if (tokenChanges_.size() != (send ? 2u : 1u) || !issuance)
@@ -1068,6 +1108,8 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
         case ttCONFIDENTIAL_MPT_CONVERT_BACK:
             return validDebit(
                 tx, change->before.get(), *change->after, *issuance, sfHolderEncryptedAmount);
+        case ttCONFIDENTIAL_MPT_CLAWBACK:
+            return validClawback(tx, change->before.get(), *change->after, *issuance);
         case ttCONFIDENTIAL_MPT_SEND: {
             auto const* receiver = changeOf(tx[sfDestination]);
             return receiver && receiver->amount == 0 &&
