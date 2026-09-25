@@ -4954,6 +4954,8 @@ class Invariants_test : public beast::unit_test::Suite
                     tx.setFieldH192(sfMPTokenIssuanceID, id);
                     if (ctx->type == ttCONFIDENTIAL_MPT_CLAWBACK)
                     {
+                        // The issuer claws back from `account`.
+                        tx.setAccountID(sfAccount, MPTIssue{id}.getIssuer());
                         tx.setAccountID(sfHolder, account);
                         tx.setFieldU64(sfMPTAmount, ctx->amount);
                         return;
@@ -6183,6 +6185,25 @@ class Invariants_test : public beast::unit_test::Suite
             clawbackTx(40),
             seedConverted);
         broken(applyClawback(40), clawbackTx(kMaxMpTokenAmount + 1), seedConverted);
+        // Zeroing an MPToken other than the Holder's.
+        broken(
+            [&](MPTID const& id, AccountID const&, ApplyContext& ac) {
+                AccountID const other{3};
+                auto sle = std::make_shared<SLE>(keylet::mptoken(id, other));
+                (*sle)[sfAccount] = other;
+                (*sle)[sfMPTokenIssuanceID] = id;
+                initialize(*sle);
+                ac.view().insert(sle);
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!issuance)
+                    return false;
+                (*issuance)[sfConfidentialOutstandingAmount] = 0;
+                (*issuance)[sfOutstandingAmount] = 60;
+                ac.view().update(issuance);
+                return true;
+            },
+            clawbackTx(40),
+            seedConverted);
         broken(
             [&](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
                 auto sle = std::make_shared<SLE>(keylet::mptoken(id, AccountID{}));

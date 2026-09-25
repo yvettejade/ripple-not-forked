@@ -365,7 +365,17 @@ proveClawback(
         encodable(issuerKey) && encodable(mirror.c1) && encodable(mirror.c2) && encodable(mG),
         "statement point is the identity");
 
-    HedgedNonces nonces("CMPT_CLAWBACK_SIGMA", {issuerSecretKey, amount}, contextID);
+    // The issuer key is the witness for every holder and the context omits
+    // the mirror, so the nonce seed also binds the mirror: re-proving after it
+    // changes must not reuse a nonce even if the RNG repeats.
+    auto const c1 = *mirror.c1.bytes();
+    auto const c2 = *mirror.c2.bytes();
+    auto const statement = sha256(
+        {Slice(c1.data(), c1.size()),
+         Slice(c2.data(), c2.size()),
+         Slice(contextID.data(), contextID.size())});
+    HedgedNonces nonces(
+        "CMPT_CLAWBACK_SIGMA", {issuerSecretKey, amount}, uint256::fromVoid(statement.data()));
     for (int attempt = 0; attempt < kMaxProverAttempts; ++attempt)
     {
         auto const a = nonces.next();

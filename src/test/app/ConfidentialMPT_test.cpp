@@ -84,6 +84,15 @@ struct SendArgs
     std::optional<Blob> rangeProof = std::nullopt;
 };
 
+struct ClawbackArgs
+{
+    // The issuer key the proof uses, if not the issuance's.
+    std::optional<std::uint64_t> signingKey = std::nullopt;
+    std::optional<std::uint32_t> ticket = std::nullopt;
+    // The sequence the proof is bound to, if not the issuer's next one.
+    std::optional<std::uint32_t> sequence = std::nullopt;
+};
+
 struct ConvertBackArgs
 {
     std::uint64_t amount = 40;
@@ -2553,19 +2562,26 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         jtx::Account const& holder,
         Issuance const& iss,
         std::uint64_t amount,
-        std::optional<Key> const& signingKey = std::nullopt)
+        ClawbackArgs const& args = {})
     {
         auto const sle = env.le(keylet::mptoken(iss.id, holder));
         auto const mirror = sle ? stored(*sle, sfIssuerEncryptedBalance) : std::nullopt;
-        auto const& key = signingKey ? *signingKey : iss.issuer;
+        auto const key = args.signingKey ? Key(*args.signingKey) : iss.issuer;
         json::Value jv;
         jv[jss::TransactionType] = jss::ConfidentialMPTClawback;
         jv[jss::Account] = issuer.human();
         jv[sfHolder.jsonName] = holder.human();
         jv[sfMPTokenIssuanceID.jsonName] = to_string(iss.id);
         jv[sfMPTAmount.jsonName] = std::to_string(amount);
+        std::uint32_t sequence = args.sequence.value_or(env.seq(issuer));
+        if (args.ticket)
+        {
+            jv[jss::Sequence] = 0;
+            jv[sfTicketSequence.jsonName] = *args.ticket;
+            sequence = *args.ticket;
+        }
         auto const ctx = transactionContextID(
-            ttCONFIDENTIAL_MPT_CLAWBACK, issuer.id(), iss.id, env.seq(issuer), holder.id(), 0);
+            ttCONFIDENTIAL_MPT_CLAWBACK, issuer.id(), iss.id, sequence, holder.id(), 0);
         // An uninitialized holder gets a proof over a stand-in mirror.
         jv[sfZKProof.jsonName] = strHex(proveClawback(
             key.pub,
@@ -2676,12 +2692,18 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         // Section 11.3.2(7): the proof opens the mirror to exactly MPTAmount,
         // with the issuer key, for this holder.
         env(clawbackJV(env, gw, alice, iss, 99), Ter(tecBAD_PROOF));
-        env(clawbackJV(env, gw, alice, iss, 100, Key(103)), Ter(tecBAD_PROOF));
+        env(clawbackJV(env, gw, alice, iss, 100, {.signingKey = 103}), Ter(tecBAD_PROOF));
         {
             // Bound to the issuer's sequence.
             auto const early = clawbackJV(env, gw, alice, iss, 100);
             env(noop(gw));
             env(early, Ter(tecBAD_PROOF));
+        }
+        {
+            // A proof for another holder does not transfer.
+            auto jv = clawbackJV(env, gw, bob, iss, 200);
+            jv[sfZKProof.jsonName] = clawbackJV(env, gw, alice, iss, 100)[sfZKProof.jsonName];
+            env(jv, Ter(tecBAD_PROOF));
         }
         env(clawbackJV(env, gw, alice, iss, 100));
     }
@@ -2816,6 +2838,107 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         BEAST_EXPECT(issuance && (*issuance)[sfConfidentialOutstandingAmount] == 60);
     }
 
+    // Tickets, a global lock, Batch, multisigned fees, delegation without
+    // permission, and locks stopping a holder's balance from changing under a
+    // prepared clawback.
+    void
+    testClawbackBinding()
+    {
+        testcase("Clawback binding");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Account const carol("carol");
+        Account const dan("dan");
+        Key const ka(11);
+        Key const kb(21);
+
+        auto const setup = [&](Env& env) {
+            env.fund(XRP(10'000), gw, alice, bob, carol, dan);
+            env.close();
+            auto const iss = issue(env, gw, {alice, bob}, kClawable | tfMPTCanLock);
+            fundSendParties(env, alice, bob, iss);
+            return iss;
+        };
+
+        {
+            Env env{*this};
+            auto const iss = setup(env);
+
+            // A ticketed clawback binds its proof to the ticket.
+            std::uint32_t const ticket = env.seq(gw) + 1;
+            env(ticket::create(gw, 2));
+            env.close();
+            {
+                auto jv = clawbackJV(env, gw, alice, iss, 100, {.ticket = ticket});
+                jv[sfZKProof.jsonName] = clawbackJV(env, gw, alice, iss, 100)[sfZKProof.jsonName];
+                env(jv, Ter(tecBAD_PROOF));
+            }
+            env(clawbackJV(env, gw, alice, iss, 100, {.ticket = ticket + 1}));
+            env.close();
+
+            // Under a global lock, as an inner Batch transaction paying its
+            // ten base fees.
+            env(issuanceSetJV(gw, iss.id, tfMPTLock));
+            env.close();
+            auto const base = env.current()->fees().base;
+            auto const seq = env.seq(gw);
+            env(batch::outer(gw, seq, base * 2 + base * 10 + base, tfAllOrNothing),
+                batch::Inner(clawbackJV(env, gw, bob, iss, 200, {.sequence = seq + 1}), seq + 1),
+                batch::Inner(issuanceSetJV(gw, iss.id, tfMPTUnlock), seq + 2));
+            env.close();
+            auto issuance = env.le(keylet::mptIssuance(iss.id));
+            BEAST_EXPECT(issuance && (*issuance)[sfConfidentialOutstandingAmount] == 0);
+            BEAST_EXPECT(issuance && (*issuance)[sfOutstandingAmount] == 1'700);
+            BEAST_EXPECT(issuance && !issuance->isFlag(lsfMPTLocked));
+
+            // Each multisigner adds one base fee.
+            env(convertJV(env, bob, kb, iss, {.amount = 10, .registerKey = false}));
+            env(signers(gw, 2, {{carol, 1}, {dan, 1}}));
+            env.close();
+            auto jv = clawbackJV(env, gw, bob, iss, 10);
+            jv[jss::Fee] = to_string(base * 12);
+            env(jv, Msig(carol, dan));
+            env.close();
+            issuance = env.le(keylet::mptIssuance(iss.id));
+            BEAST_EXPECT(issuance && (*issuance)[sfOutstandingAmount] == 1'690);
+            // The underpaying transaction is held for the next ledger, so
+            // this ends the history.
+            env(convertJV(env, bob, kb, iss, {.amount = 10, .registerKey = false}));
+            env.close();
+            jv = clawbackJV(env, gw, bob, iss, 10);
+            jv[jss::Fee] = to_string(base * 12 - 1);
+            env(jv, Msig(carol, dan), Ter(telINSUF_FEE_P));
+        }
+
+        // A delegate needs the permission.
+        {
+            Env env{*this};
+            auto const iss = setup(env);
+            env(clawbackJV(env, gw, alice, iss, 100),
+                delegate::As(carol),
+                Ter(terNO_DELEGATE_PERMISSION));
+        }
+
+        // Once the holder is locked, neither it nor anyone else can change
+        // its mirror, so a prepared clawback stays valid.
+        {
+            Env env{*this};
+            auto const iss = setup(env);
+            env(issuanceSetJV(gw, iss.id, tfMPTLock, bob));
+            env.close();
+            auto const prepared = clawbackJV(env, gw, bob, iss, 200);
+            env(sendJV(env, alice, ka, bob, kb, iss), Ter(terFROZEN));
+            env(sendJV(env, bob, kb, alice, ka, iss, {.balance = 200}), Ter(terFROZEN));
+            env(convertJV(env, bob, kb, iss, {.amount = 5, .registerKey = false}), Ter(tecLOCKED));
+            env(prepared);
+            auto const sle = env.le(keylet::mptoken(iss.id, bob));
+            BEAST_EXPECT(sle && decrypts(stored(*sle, sfIssuerEncryptedBalance), iss.issuer, 0));
+        }
+    }
+
     // Transaction-specific invariants are disabled in Transactor; the protocol
     // invariant ValidConfidentialMPToken covers these transactions.
     void
@@ -2879,6 +3002,7 @@ public:
         testClawbackPreclaim();
         testClawbackApply();
         testClawbackPrepared();
+        testClawbackBinding();
         testTransactionInvariants();
     }
 };
