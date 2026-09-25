@@ -128,6 +128,7 @@ enum TEMcodes : TERUnderlyingType {
     temBAD_TRANSFER_FEE,
     temINVALID_INNER_BATCH,
     temBAD_MPT,
+    temBAD_CIPHERTEXT,
 };
 
 //------------------------------------------------------------------------------
@@ -220,6 +221,7 @@ enum TERcodes : TERUnderlyingType {
                                 // create a pseudo-account
     terNO_DELEGATE_PERMISSION,  // Delegate does not have permission
     terLOCKED,                  // MPT is locked
+    terFROZEN,                  // Confidential MPT balance is frozen
 };
 
 //------------------------------------------------------------------------------
@@ -358,6 +360,7 @@ enum TECcodes : TERUnderlyingType {
     tecLIMIT_EXCEEDED = 195,
     tecPSEUDO_ACCOUNT = 196,
     tecPRECISION_LOSS = 197,
+    tecBAD_PROOF = 198,
 };
 
 //------------------------------------------------------------------------------

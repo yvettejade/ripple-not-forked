@@ -13,6 +13,7 @@
 #include <xrpl/protocol/TxFlags.h>
 #include <xrpl/protocol/XRPAmount.h>
 #include <xrpl/tx/Transactor.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTHelpers.h>
 
 #include <cstdint>
 #include <memory>
@@ -84,6 +85,19 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
             }
             if (ctx.view.rules().enabled(featureSingleAssetVault) && sleMpt->isFlag(lsfMPTLocked))
                 return tecNO_PERMISSION;
+
+            // XLS-0096 §7.4: once confidential fields are initialized the
+            // MPToken cannot be deleted, even when every encrypted balance is
+            // zero. The specification does not name a result code.
+            //
+            // Deviation: §7.4 has no exception, but once the issuance is
+            // destroyed (which needs ConfidentialOutstandingAmount 0, so every
+            // encrypted balance is zero) no transaction can act on the state
+            // or recreate the MPToken, and blocking deletion would lock the
+            // holder's reserve forever.
+            if (confidential_mpt::hasConfidentialState(*sleMpt) &&
+                ctx.view.exists(keylet::mptIssuance(ctx.tx[sfMPTokenIssuanceID])))
+                return tecHAS_OBLIGATIONS;
 
             return tesSUCCESS;
         }
