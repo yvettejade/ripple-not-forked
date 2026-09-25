@@ -70,4 +70,12 @@ checkAuditorPolicy(STTx const& tx, IssuanceKeys const& keys);
 [[nodiscard]] TER
 store(SLE& sle, SF_VL const& field, confidential::ElGamalCiphertext const& ct);
 
+/** Homomorphically add ct to the stored balance, as store() does. */
+[[nodiscard]] TER
+credit(SLE& sle, SF_VL const& field, confidential::ElGamalCiphertext const& ct);
+
+/** Homomorphically subtract ct from the stored balance, as store() does. */
+[[nodiscard]] TER
+debit(SLE& sle, SF_VL const& field, confidential::ElGamalCiphertext const& ct);
+
 }  // namespace xrpl::confidential_mpt

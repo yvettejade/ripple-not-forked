@@ -192,11 +192,8 @@ ConfidentialMPTConvert::doApply()
     // A holder who knows a balance's randomness (EncZero's is public) or the
     // key it is encrypted under can pick a blinding factor that cancels C1
     // or C2; such results cannot be stored.
-    auto const credit = [&](SF_VL const& balance, SF_VL const& amountField) -> TER {
-        auto const current = cm::ciphertext(*mptoken, balance);
-        if (!current)
-            return tecINTERNAL;  // LCOV_EXCL_LINE
-        return cm::store(*mptoken, balance, *current + *cm::ciphertext(tx, amountField));
+    auto const credit = [&](SF_VL const& balance, SF_VL const& amountField) {
+        return cm::credit(*mptoken, balance, *cm::ciphertext(tx, amountField));
     };
     if (auto const ter = credit(sfConfidentialBalanceInbox, sfHolderEncryptedAmount);
         !isTesSuccess(ter))
