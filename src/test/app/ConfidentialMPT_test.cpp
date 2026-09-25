@@ -72,6 +72,9 @@ struct ConvertBackArgs
     Scalar blinding = Scalar::fromUint64(17);
     // The version the proof is bound to, if not the holder's current one.
     std::optional<std::uint32_t> version = std::nullopt;
+    std::optional<std::uint32_t> ticket = std::nullopt;
+    // The sequence the proof is bound to, if not the account's next one.
+    std::optional<std::uint32_t> sequence = std::nullopt;
 };
 
 }  // namespace
@@ -273,11 +276,18 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
 
         auto const commitment = pedersenCommit(Scalar::fromUint64(args.balance), args.blinding);
         jv[sfBalanceCommitment.jsonName] = strHex(*commitment.bytes());
+        std::uint32_t sequence = args.sequence.value_or(env.seq(holder));
+        if (args.ticket)
+        {
+            jv[jss::Sequence] = 0;
+            jv[sfTicketSequence.jsonName] = *args.ticket;
+            sequence = *args.ticket;
+        }
         auto const ctx = transactionContextID(
             ttCONFIDENTIAL_MPT_CONVERT_BACK,
             holder.id(),
             issuance.id,
-            env.seq(holder),
+            sequence,
             holder.id(),
             version);
         // An uninitialized holder gets a proof over a stand-in balance.
@@ -1539,6 +1549,142 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         }
     }
 
+    // Auditor policy both ways, freeze before proofs, ticket and Batch
+    // binding, and an identity remainder commitment.
+    void
+    testConvertBackBinding()
+    {
+        testcase("ConvertBack binding");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Key const key(11);
+
+        {
+            Env env{*this};
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            auto const iss =
+                issue(env, gw, {alice, bob}, tfMPTCanHoldConfidentialBalance | tfMPTCanLock, true);
+            fundConfidential(env, alice, bob, key, iss);
+
+            Issuance unaudited = iss;
+            unaudited.auditor.reset();
+            env(convertBackJV(env, alice, key, unaudited), Ter(tecNO_PERMISSION));
+            {
+                auto jv = convertBackJV(env, alice, key, iss);
+                jv[sfAuditorEncryptedAmount.jsonName] = hex(elGamalEncrypt(
+                    Scalar::fromUint64(41), Scalar::fromUint64(13), iss.auditor->pub));
+                env(jv, Ter(tecBAD_PROOF));
+            }
+
+            // PC_b = m·G with rho = 0 makes PC_rem the identity, which no
+            // range proof opens.
+            {
+                auto jv = convertBackJV(env, alice, key, iss, {.amount = 100});
+                auto const sle = env.le(keylet::mptoken(iss.id, alice));
+                if (!BEAST_EXPECT(sle))
+                    return;
+                auto const commitment = mulGenerator(Scalar::fromUint64(100));
+                auto const ctx = transactionContextID(
+                    ttCONFIDENTIAL_MPT_CONVERT_BACK,
+                    alice.id(),
+                    iss.id,
+                    env.seq(alice),
+                    alice.id(),
+                    sle->getFieldU32(sfConfidentialBalanceVersion));
+                auto const sigma = proveBalance(
+                    {.key = key.pub,
+                     .balance = *stored(*sle, sfConfidentialBalanceSpending),
+                     .balanceCommitment = commitment},
+                    Scalar::fromUint64(100),
+                    Scalar{},
+                    key.secret,
+                    ctx);
+                jv[sfBalanceCommitment.jsonName] = strHex(*commitment.bytes());
+                jv[sfZKProof.jsonName] =
+                    strHex(sigma) + jv[sfZKProof.jsonName].asString().substr(256);
+                env(jv, Ter(tecBAD_PROOF));
+            }
+
+            // A ticketed ConvertBack binds its proofs to the ticket.
+            std::uint32_t const ticket = env.seq(alice) + 1;
+            env(ticket::create(alice, 2));
+            env.close();
+            {
+                auto jv = convertBackJV(env, alice, key, iss, {.ticket = ticket});
+                jv[sfZKProof.jsonName] = convertBackJV(env, alice, key, iss)[sfZKProof.jsonName];
+                env(jv, Ter(tecBAD_PROOF));
+            }
+            env(convertBackJV(env, alice, key, iss, {.ticket = ticket + 1}));
+            env.close();
+            auto const sle = env.le(keylet::mptoken(iss.id, alice));
+            BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceSpending), key, 60));
+
+            // Locks come before any proof or amount check; the held
+            // transaction ends this ledger history.
+            env(issuanceSetJV(gw, iss.id, tfMPTLock, alice));
+            env.close();
+            auto const xrp = env.balance(alice).value().xrp();
+            auto const seq = env.seq(alice);
+            env(convertBackJV(env, alice, key, iss, {.balance = 61}), Ter(terFROZEN));
+            env(convertBackJV(env, alice, key, iss, {.amount = 301, .balance = 400}),
+                Ter(terFROZEN));
+            BEAST_EXPECT(env.balance(alice).value().xrp() == xrp);
+            BEAST_EXPECT(env.seq(alice) == seq);
+        }
+
+        // Inner Batch ConvertBacks bind to their own sequence and roll back
+        // with the batch.
+        {
+            Env env{*this};
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            auto const iss = issue(env, gw, {alice, bob});
+            fundConfidential(env, alice, bob, key, iss);
+            auto const base = env.current()->fees().base;
+            auto const batchFee = base * 2 + base * 10 * 2;
+
+            auto seq = env.seq(alice);
+            env(batch::outer(alice, seq, batchFee, tfAllOrNothing),
+                batch::Inner(convertBackJV(env, alice, key, iss, {.sequence = seq + 1}), seq + 1),
+                batch::Inner(mergeJV(env, alice, iss.id), seq + 2));
+            env.close();
+            auto sle = env.le(keylet::mptoken(iss.id, alice));
+            if (!BEAST_EXPECT(sle))
+                return;
+            BEAST_EXPECT((*sle)[sfMPTAmount] == 940);
+            BEAST_EXPECT((*sle)[sfConfidentialBalanceVersion] == 3);
+            BEAST_EXPECT(decrypts(stored(*sle, sfConfidentialBalanceSpending), key, 60));
+
+            // A cancelled spending C1 in doApply rolls the whole batch back.
+            auto const r0 = encryptedZeroRandomness(alice.id(), iss.id);
+            auto const spendingR = r0 + r0 + Scalar::fromUint64(7) + r0 - Scalar::fromUint64(13);
+            auto const before = sle->getFieldVL(sfConfidentialBalanceSpending);
+            seq = env.seq(alice);
+            env(batch::outer(alice, seq, batchFee, tfAllOrNothing),
+                batch::Inner(
+                    convertBackJV(
+                        env,
+                        alice,
+                        key,
+                        iss,
+                        {.amount = 10,
+                         .balance = 60,
+                         .randomness = spendingR,
+                         .sequence = seq + 1}),
+                    seq + 1),
+                batch::Inner(mergeJV(env, alice, iss.id), seq + 2));
+            env.close();
+            sle = env.le(keylet::mptoken(iss.id, alice));
+            BEAST_EXPECT(sle && sle->getFieldVL(sfConfidentialBalanceSpending) == before);
+            BEAST_EXPECT(sle && (*sle)[sfConfidentialBalanceVersion] == 3);
+            BEAST_EXPECT(env.seq(alice) == seq + 1);
+        }
+    }
+
     // After Convert(100, r1) and a merge, the spending balance has randomness
     // 2·r0 + r1 and the mirrors r0 + r1, all known to the holder. A blinding
     // factor equal to that randomness cancels C1; r = R + 60 / sk cancels the
@@ -1637,6 +1783,7 @@ public:
         testConvertBackAuthAndFreeze();
         testConvertBackApply();
         testConvertBackIdentity();
+        testConvertBackBinding();
         testTransactionInvariants();
     }
 };

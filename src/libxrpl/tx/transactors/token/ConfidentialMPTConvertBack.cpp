@@ -92,8 +92,8 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
         return ter;
 
     MPTIssue const mptIssue{id};
-    if (!isTesSuccess(requireAuth(ctx.view, mptIssue, account)))
-        return tecNO_AUTH;
+    if (auto const ter = requireAuth(ctx.view, mptIssue, account); !isTesSuccess(ter))
+        return ter;
 
     // Before any proof, so a frozen holder's retries cost nothing.
     if (isFrozen(ctx.view, account, mptIssue))
