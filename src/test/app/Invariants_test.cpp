@@ -5804,6 +5804,24 @@ class Invariants_test : public beast::unit_test::Suite
             convertBackTx(40),
             seedConverted);
         broken(applyConvertBack(40), convertBackTx(kMaxMpTokenAmount + 1), seedConverted);
+        // A ConvertBack from an MPToken that never initialized.
+        broken(
+            [](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto token = ac.view().peek(keylet::mptoken(id, holder));
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!token || !issuance)
+                    return false;
+                (*token)[sfMPTAmount] = 100;
+                (*issuance)[sfConfidentialOutstandingAmount] = 0;
+                ac.view().update(token);
+                ac.view().update(issuance);
+                return true;
+            },
+            convertBackTx(40),
+            [](SLE& issuance, SLE& token) {
+                token[sfMPTAmount] = 60;
+                issuance[sfConfidentialOutstandingAmount] = 40;
+            });
         // A ConvertBack that creates the holder's token instead of updating it.
         broken(
             [&](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
