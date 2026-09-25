@@ -350,7 +350,10 @@ inline constexpr FlagValue tmfMPTCanMutateCanTransfer = lsmfMPTCanMutateCanTrans
 inline constexpr FlagValue tmfMPTCanMutateCanClawback = lsmfMPTCanMutateCanClawback;
 inline constexpr FlagValue tmfMPTCanMutateMetadata = lsmfMPTCanMutateMetadata;
 inline constexpr FlagValue tmfMPTCanMutateTransferFee = lsmfMPTCanMutateTransferFee;
-// XLS-0096; requires ConfidentialTransfer.
+// XLS-0096; requires ConfidentialTransfer. Deviation: XLS-0096 section 6.3.1
+// lets every issuance enable confidential balances later unless it opts out
+// with an ImmutableFlags bit; here, as for every DynamicMPT flag, only an
+// issuance created with this flag can (see MPTokenIssuanceSet.cpp).
 inline constexpr FlagValue tmfMPTCanMutateCanHoldConfidentialBalance =
     lsmfMPTCanMutateCanHoldConfidentialBalance;
 inline constexpr FlagValue tmfMPTokenIssuanceCreateMutableMask =
@@ -375,7 +378,8 @@ inline constexpr FlagValue tmfMPTClearCanTransfer = 0x00000200;
 inline constexpr FlagValue tmfMPTSetCanClawback = 0x00000400;
 inline constexpr FlagValue tmfMPTClearCanClawback = 0x00000800;
 // XLS-0096: enabling confidential balances is one-way, so there is no
-// matching clear flag. Requires ConfidentialTransfer.
+// matching clear flag. Requires ConfidentialTransfer. Deviation: XLS-0096
+// section 12.3 uses a Flags bit (0x100) instead (see MPTokenIssuanceSet.cpp).
 inline constexpr FlagValue tmfMPTSetCanHoldConfidentialBalance = 0x00001000;
 inline constexpr FlagValue tmfMPTokenIssuanceSetMutableMask =
     ~(tmfMPTSetCanLock | tmfMPTClearCanLock | tmfMPTSetRequireAuth | tmfMPTClearRequireAuth |

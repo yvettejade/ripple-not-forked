@@ -80,7 +80,10 @@ static_assert(lsmfMPTCanMutateCanHoldConfidentialBalance == lsfMPTCanHoldConfide
 // combined with Flags. Confidential balances follow that model, so they can
 // only be enabled after creation if the issuance was created with
 // tmfMPTCanMutateCanHoldConfidentialBalance (XLS-0096 section 6.3.1 makes
-// that the default instead). There is no clear flag: enabling is one-way.
+// that the default instead). Consequently an issuance created without it,
+// including any created before ConfidentialTransfer, can never enable them,
+// and enabling after creation needs DynamicMPT. There is no clear flag:
+// enabling is one-way.
 static constexpr std::array<MPTMutabilityFlags, 7> kMptMutabilityFlags = {
     {{.setFlag = tmfMPTSetCanLock,
       .clearFlag = tmfMPTClearCanLock,

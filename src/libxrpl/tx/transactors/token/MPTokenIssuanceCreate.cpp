@@ -37,6 +37,8 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfMutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    // Creating an issuance that can enable confidential balances later is an
+    // explicit opt-in, unlike XLS-0096 section 6.3.1 (see MPTokenIssuanceSet.cpp).
     if ((ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) ||
          (ctx.tx[~sfMutableFlags].value_or(0) & tmfMPTCanMutateCanHoldConfidentialBalance) != 0u) &&
         !ctx.rules.enabled(featureConfidentialTransfer))
