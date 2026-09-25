@@ -191,7 +191,7 @@ ConfidentialMPTConvert::doApply()
                 !isTesSuccess(ter))
                 return ter;  // LCOV_EXCL_LINE
         }
-        mptoken->setFieldU32(sfConfidentialBalanceVersion, 0);
+        // Version 0 is ConfidentialBalanceVersion's default, stored as absent.
     }
 
     // A holder who knows a balance's randomness (EncZero's is public) or the

@@ -179,9 +179,7 @@ ConfidentialMPTConvertBack::doApply()
             !isTesSuccess(ter))
             return ter;
     }
-    mptoken->setFieldU32(
-        sfConfidentialBalanceVersion,
-        static_cast<std::uint32_t>(mptoken->getFieldU32(sfConfidentialBalanceVersion) + 1));
+    cm::advanceVersion(*mptoken);
 
     (*mptoken)[sfMPTAmount] = (*mptoken)[sfMPTAmount] + amount;
     (*issuance)[sfConfidentialOutstandingAmount] =

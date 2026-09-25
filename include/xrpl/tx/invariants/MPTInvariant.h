@@ -100,9 +100,10 @@ public:
  *  MPToken:
  *    - ConfidentialBalanceSpending or ConfidentialBalanceInbox is present
  *      exactly when IssuerEncryptedBalance is (XLS-0096 §7.4)
- *    - HolderEncryptionKey, both holder balances, IssuerEncryptedBalance and
- *      ConfidentialBalanceVersion are initialized together, and the key and
- *      ciphertexts are valid encodings
+ *    - HolderEncryptionKey, both holder balances and IssuerEncryptedBalance
+ *      are initialized together, and the key and ciphertexts are valid
+ *      encodings; ConfidentialBalanceVersion is a default field, never
+ *      present with value 0
  *    - encrypted balances only change for an existing issuance with
  *      lsfMPTCanHoldConfidentialBalance and an issuer key, and
  *      AuditorEncryptedBalance exists
@@ -111,7 +112,8 @@ public:
  *      confidential state keeps the holder and issuance of its ledger key
  *    - ConfidentialBalanceVersion starts at 0 and advances by exactly one;
  *      changing ConfidentialBalanceSpending changes it
- *    - no confidential field is ever removed, including by deleting it
+ *    - no confidential field other than the version (absent at 0) is ever
+ *      removed, including by deleting it
  *
  *  Transactions:
  *    - only successful transactions with MayModifyConfidentialMpt change
@@ -164,6 +166,7 @@ class ValidConfidentialMPToken
     bool malformedConfidentialFields_ = false;
     bool coaWithoutIssuerKey_ = false;
     bool badVersionStep_ = false;
+    bool explicitDefaultVersion_ = false;
     // MPTokens that hold encrypted balances after the transaction.
     std::vector<EncryptedToken> encryptedTokens_;
 

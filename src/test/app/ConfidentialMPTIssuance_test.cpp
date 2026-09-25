@@ -692,7 +692,6 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
             sle.setFieldVL(sfConfidentialBalanceSpending, ct);
             sle.setFieldVL(sfConfidentialBalanceInbox, ct);
             sle.setFieldVL(sfIssuerEncryptedBalance, ct);
-            sle.setFieldU32(sfConfidentialBalanceVersion, 0);
         });
 
         // The ledger edit only lives in the open ledger; check before closing.

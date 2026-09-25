@@ -109,8 +109,16 @@ isInitialized(SLE const& mptoken)
     return mptoken.isFieldPresent(sfHolderEncryptionKey) &&
         mptoken.isFieldPresent(sfConfidentialBalanceSpending) &&
         mptoken.isFieldPresent(sfConfidentialBalanceInbox) &&
-        mptoken.isFieldPresent(sfIssuerEncryptedBalance) &&
-        mptoken.isFieldPresent(sfConfidentialBalanceVersion);
+        mptoken.isFieldPresent(sfIssuerEncryptedBalance);
+}
+
+void
+advanceVersion(SLE& mptoken)
+{
+    // Wraps at 2^32 (XLS-0096 section 9.3). The proxy leaves the field
+    // absent at 0, its default.
+    mptoken[sfConfidentialBalanceVersion] =
+        static_cast<std::uint32_t>(mptoken[sfConfidentialBalanceVersion] + 1);
 }
 
 TER

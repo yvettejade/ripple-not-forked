@@ -92,8 +92,7 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
                 sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
                 sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
                 sleMpt->isFieldPresent(sfIssuerEncryptedBalance) ||
-                sleMpt->isFieldPresent(sfAuditorEncryptedBalance) ||
-                sleMpt->isFieldPresent(sfConfidentialBalanceVersion))
+                sleMpt->isFieldPresent(sfAuditorEncryptedBalance))
                 return tecHAS_OBLIGATIONS;
 
             return tesSUCCESS;

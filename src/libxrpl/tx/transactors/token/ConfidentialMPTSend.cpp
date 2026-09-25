@@ -238,9 +238,7 @@ ConfidentialMPTSend::doApply()
             cm::debit(*sender, sfIssuerEncryptedBalance, amount(sfIssuerEncryptedAmount));
         !isTesSuccess(ter))
         return ter;
-    sender->setFieldU32(
-        sfConfidentialBalanceVersion,
-        static_cast<std::uint32_t>(sender->getFieldU32(sfConfidentialBalanceVersion) + 1));
+    cm::advanceVersion(*sender);
 
     // Eq. (11)-(13): credit the receiver, re-randomized with Enc(0; e). The
     // challenge e hashes C1 and every C2, so no sender can steer the sum to

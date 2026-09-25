@@ -377,13 +377,20 @@ ValidMPTIssuance::finalize(
 namespace {
 
 // Every MPToken field that XLS-0096 initializes; none may be removed later.
-constexpr std::array<SField const*, 6> kConfidentialMPTokenFields{
+// ConfidentialBalanceVersion is not among them: it is a default field, absent
+// whenever it is 0.
+constexpr std::array<SField const*, 5> kConfidentialMPTokenFields{
     &sfHolderEncryptionKey,
     &sfConfidentialBalanceSpending,
     &sfConfidentialBalanceInbox,
     &sfIssuerEncryptedBalance,
-    &sfAuditorEncryptedBalance,
-    &sfConfidentialBalanceVersion};
+    &sfAuditorEncryptedBalance};
+
+std::uint32_t
+versionOf(SLE const* sle)
+{
+    return sle ? (*sle)[sfConfidentialBalanceVersion] : 0;
+}
 
 bool
 hasEncryptedBalance(SLE const& sle)
@@ -397,8 +404,9 @@ hasEncryptedBalance(SLE const& sle)
 bool
 hasConfidentialState(SLE const& sle)
 {
-    return std::ranges::any_of(
-        kConfidentialMPTokenFields, [&](SField const* f) { return sle.isFieldPresent(*f); });
+    return versionOf(&sle) != 0 ||
+        std::ranges::any_of(
+               kConfidentialMPTokenFields, [&](SField const* f) { return sle.isFieldPresent(*f); });
 }
 
 bool
@@ -419,7 +427,8 @@ validCiphertextField(SLE const& sle, SField const& field)
 bool
 confidentialFieldsDiffer(SLE const* before, SLE const* after)
 {
-    return std::ranges::any_of(kConfidentialMPTokenFields, [&](SField const* f) {
+    return versionOf(before) != versionOf(after) ||
+        std::ranges::any_of(kConfidentialMPTokenFields, [&](SField const* f) {
         auto const* b = before && before->isFieldPresent(*f) ? before->peekAtPField(*f) : nullptr;
         auto const* a = after && after->isFieldPresent(*f) ? after->peekAtPField(*f) : nullptr;
         if (!a || !b)
@@ -506,14 +515,14 @@ ValidConfidentialMPToken::validConvert(
     {
         if ((before && before->isFieldPresent(sfHolderEncryptionKey)) ||
             tx.getFieldVL(sfHolderEncryptionKey) != after.getFieldVL(sfHolderEncryptionKey) ||
-            after[~sfConfidentialBalanceVersion] != 0u ||
+            versionOf(&after) != 0 ||
             ciphertextField(after, sfConfidentialBalanceSpending) !=
                 encryptedZero(account, id, *key))
             return false;
     }
     else if (
         !before || !sameField(*before, after, sfConfidentialBalanceSpending) ||
-        !sameField(*before, after, sfConfidentialBalanceVersion))
+        versionOf(before) != versionOf(&after))
     {
         return false;
     }
@@ -547,8 +556,7 @@ ValidConfidentialMPToken::validDebit(
     auto const key = before ? pointField(*before, sfHolderEncryptionKey) : std::optional<Point>{};
     auto const issuerKey = pointField(issuance, sfIssuerEncryptionKey);
     auto const auditorKey = pointField(issuance, sfAuditorEncryptionKey);
-    auto const version = before ? (*before)[~sfConfidentialBalanceVersion] : std::nullopt;
-    if (!key || !issuerKey || !version)
+    if (!key || !issuerKey)
         return false;
     auto const debited = [&](SF_VL const& balance, SF_VL const& amount, Point const& pk) {
         auto const start = ciphertextField(*before, balance);
@@ -558,7 +566,7 @@ ValidConfidentialMPToken::validDebit(
             (!tx.isFieldPresent(sfBlindingFactor) || disclosed(tx, amount, pk)) &&
             ciphertextField(after, balance) == *start - *debit;
     };
-    return after[~sfConfidentialBalanceVersion] == static_cast<std::uint32_t>(*version + 1) &&
+    return versionOf(&after) == static_cast<std::uint32_t>(versionOf(before) + 1) &&
         sameField(*before, after, sfHolderEncryptionKey) &&
         sameField(*before, after, sfConfidentialBalanceInbox) &&
         debited(sfConfidentialBalanceSpending, holderAmount, *key) &&
@@ -591,7 +599,7 @@ ValidConfidentialMPToken::validReceive(
     };
     return sameField(*before, after, sfHolderEncryptionKey) &&
         sameField(*before, after, sfConfidentialBalanceSpending) &&
-        sameField(*before, after, sfConfidentialBalanceVersion) &&
+        versionOf(before) == versionOf(&after) &&
         credited(sfConfidentialBalanceInbox, sfDestinationEncryptedAmount, *key) &&
         credited(sfIssuerEncryptedBalance, sfIssuerEncryptedAmount, *issuerKey) &&
         (!auditorKey || credited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount, *auditorKey));
@@ -618,9 +626,7 @@ ValidConfidentialMPToken::validClawback(
     auto const zeroed = [&](SF_VL const& field, Point const& pk) {
         return ciphertextField(after, field) == encryptedZero(holder, id, pk);
     };
-    auto const version = (*before)[~sfConfidentialBalanceVersion];
-    return version &&
-        after[~sfConfidentialBalanceVersion] == static_cast<std::uint32_t>(*version + 1) &&
+    return versionOf(&after) == static_cast<std::uint32_t>(versionOf(before) + 1) &&
         sameField(*before, after, sfHolderEncryptionKey) &&
         zeroed(sfConfidentialBalanceSpending, *key) && zeroed(sfConfidentialBalanceInbox, *key) &&
         zeroed(sfIssuerEncryptedBalance, *issuerKey) &&
@@ -639,9 +645,8 @@ ValidConfidentialMPToken::validMerge(STTx const& tx, SLE const* before, SLE cons
     auto const key = pointField(after, sfHolderEncryptionKey);
     auto const spending = ciphertextField(*before, sfConfidentialBalanceSpending);
     auto const inbox = ciphertextField(*before, sfConfidentialBalanceInbox);
-    auto const version = (*before)[~sfConfidentialBalanceVersion];
-    return key && spending && inbox && version &&
-        after[~sfConfidentialBalanceVersion] == static_cast<std::uint32_t>(*version + 1) &&
+    return key && spending && inbox &&
+        versionOf(&after) == static_cast<std::uint32_t>(versionOf(before) + 1) &&
         ciphertextField(after, sfConfidentialBalanceSpending) == *spending + *inbox &&
         ciphertextField(after, sfConfidentialBalanceInbox) ==
         encryptedZero(tx[sfAccount], tx[sfMPTokenIssuanceID], *key) &&
@@ -889,14 +894,14 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
     if (hasHolderBalance != after.isFieldPresent(sfIssuerEncryptedBalance))
         inconsistentEncryptedFields_ = true;
 
-    // Convert initializes the key, both holder balances, the issuer mirror
-    // and the version at once; the auditor mirror depends on the issuance.
+    // Convert initializes the key, both holder balances and the issuer mirror
+    // at once (with the version at its default 0); the auditor mirror
+    // depends on the issuance.
     if (hasConfidentialState(after) &&
         !(after.isFieldPresent(sfHolderEncryptionKey) &&
           after.isFieldPresent(sfConfidentialBalanceSpending) &&
           after.isFieldPresent(sfConfidentialBalanceInbox) &&
-          after.isFieldPresent(sfIssuerEncryptedBalance) &&
-          after.isFieldPresent(sfConfidentialBalanceVersion)))
+          after.isFieldPresent(sfIssuerEncryptedBalance)))
         incompleteConfidentialFields_ = true;
 
     if (!validKeyField(after, sfHolderEncryptionKey) ||
@@ -906,15 +911,18 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
         !validCiphertextField(after, sfAuditorEncryptedBalance))
         malformedConfidentialFields_ = true;
 
+    // A default field explicitly holding its default serializes, but the
+    // entry then fails to deserialize.
+    if (after.isFieldPresent(sfConfidentialBalanceVersion) && versionOf(&after) == 0)
+        explicitDefaultVersion_ = true;
+
     // The version starts at 0 and every change advances it by exactly one,
     // wrapping at 2^32.
-    auto const versionAfter = after[~sfConfidentialBalanceVersion];
-    auto const versionBefore =
-        before ? (*before)[~sfConfidentialBalanceVersion] : std::optional<std::uint32_t>{};
-    if (versionAfter &&
-        (versionBefore ? (*versionAfter != *versionBefore &&
-                          *versionAfter != static_cast<std::uint32_t>(*versionBefore + 1))
-                       : *versionAfter != 0))
+    auto const versionAfter = versionOf(&after);
+    auto const versionBefore = versionOf(before);
+    if (before ? (versionAfter != versionBefore &&
+                  versionAfter != static_cast<std::uint32_t>(versionBefore + 1))
+               : versionAfter != 0)
         badVersionStep_ = true;
 
     if (hasConfidentialState(after) &&
@@ -951,7 +959,7 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
         after.isFieldPresent(sfConfidentialBalanceSpending) &&
         before->getFieldVL(sfConfidentialBalanceSpending) !=
             after.getFieldVL(sfConfidentialBalanceSpending) &&
-        (*before)[~sfConfidentialBalanceVersion] == after[~sfConfidentialBalanceVersion])
+        versionOf(before) == versionOf(&after))
         spendingChangedWithoutVersion_ = true;
 }
 
@@ -1175,6 +1183,8 @@ ValidConfidentialMPToken::finalize(
         fail("ConfidentialOutstandingAmount without an issuer encryption key");
     if (badVersionStep_)
         fail("MPToken ConfidentialBalanceVersion must start at 0 and advance by one");
+    if (explicitDefaultVersion_)
+        fail("MPToken ConfidentialBalanceVersion is present with its default value 0");
 
     bool const privileged = hasPrivilege(tx, MayModifyConfidentialMpt);
     if (privileged && isTesSuccess(result))

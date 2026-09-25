@@ -785,6 +785,8 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             auto const m1 = Scalar::fromUint64(100);
             BEAST_EXPECT(strHex(sle->getFieldVL(sfHolderEncryptionKey)) == key.hex());
             BEAST_EXPECT((*sle)[sfMPTAmount] == 900);
+            // Version 0 is the default, so it is not stored.
+            BEAST_EXPECT(!sle->isFieldPresent(sfConfidentialBalanceVersion));
             BEAST_EXPECT((*sle)[sfConfidentialBalanceVersion] == 0);
             BEAST_EXPECT(
                 stored(*sle, sfConfidentialBalanceSpending) ==
@@ -1055,6 +1057,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         env(mergeJV(env, alice, iss.id));
         after = env.le(keylet::mptoken(iss.id, alice));
         BEAST_EXPECT(after && (*after)[sfConfidentialBalanceVersion] == 0);
+        BEAST_EXPECT(after && !after->isFieldPresent(sfConfidentialBalanceVersion));
 
         // Section 14.2: ten times the base fee. The open ledger holds the
         // underpaying transaction for the next ledger, so this comes last.

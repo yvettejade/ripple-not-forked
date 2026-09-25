@@ -269,7 +269,7 @@ public:
     }
 
     /**
-     * @brief Get sfConfidentialBalanceVersion (SoeOptional)
+     * @brief Get sfConfidentialBalanceVersion (SoeDefault)
      * @return The field value, or std::nullopt if not present.
      */
     [[nodiscard]]
@@ -470,7 +470,7 @@ public:
     }
 
     /**
-     * @brief Set sfConfidentialBalanceVersion (SoeOptional)
+     * @brief Set sfConfidentialBalanceVersion (SoeDefault)
      * @return Reference to this builder for method chaining.
      */
     MPTokenBuilder&

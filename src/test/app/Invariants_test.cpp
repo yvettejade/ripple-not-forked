@@ -5074,7 +5074,6 @@ class Invariants_test : public beast::unit_test::Suite
             token.setFieldVL(sfConfidentialBalanceSpending, ctA);
             token.setFieldVL(sfConfidentialBalanceInbox, ctA);
             token.setFieldVL(sfIssuerEncryptedBalance, ctA);
-            token.setFieldU32(sfConfidentialBalanceVersion, 0);
         };
         Seed const seedHolder = [&](SLE&, SLE& token) {
             initialize(token);
@@ -5268,8 +5267,7 @@ class Invariants_test : public beast::unit_test::Suite
                  &sfConfidentialBalanceSpending,
                  &sfConfidentialBalanceInbox,
                  &sfIssuerEncryptedBalance,
-                 &sfAuditorEncryptedBalance,
-                 &sfConfidentialBalanceVersion})
+                 &sfAuditorEncryptedBalance})
         {
             check(
                 {"MPToken confidential state removed"},
@@ -5279,7 +5277,7 @@ class Invariants_test : public beast::unit_test::Suite
         }
 
         // Initialization is all-or-nothing, and the auditor mirror follows
-        // the issuance's auditor key.
+        // the issuance's auditor key. A version alone is confidential state.
         check(
             {"MPToken confidential fields are incomplete"},
             updateToken([&](SLE& sle) { sle.setFieldVL(sfHolderEncryptionKey, key); }),
@@ -5288,7 +5286,19 @@ class Invariants_test : public beast::unit_test::Suite
             {"MPToken confidential fields are incomplete"},
             updateToken([&](SLE& sle) {
                 initialize(sle);
-                sle.makeFieldAbsent(sfConfidentialBalanceVersion);
+                sle.makeFieldAbsent(sfConfidentialBalanceInbox);
+            }),
+            confidential);
+        check(
+            {"MPToken confidential fields are incomplete"},
+            updateToken([](SLE& sle) { sle.setFieldU32(sfConfidentialBalanceVersion, 1); }),
+            confidential);
+        // The version is a default field: 0 is stored as absent.
+        check(
+            {"MPToken ConfidentialBalanceVersion is present with its default value 0"},
+            updateToken([&](SLE& sle) {
+                initialize(sle);
+                sle.setFieldU32(sfConfidentialBalanceVersion, 0);
             }),
             confidential);
         check(
@@ -5369,7 +5379,7 @@ class Invariants_test : public beast::unit_test::Suite
             seedHolder);
         check(
             {"MPToken ConfidentialBalanceVersion must start at 0 and advance by one"},
-            updateToken([](SLE& sle) { sle.setFieldU32(sfConfidentialBalanceVersion, 0); }),
+            updateToken([](SLE& sle) { sle.makeFieldAbsent(sfConfidentialBalanceVersion); }),
             confidential,
             seedHolder);
 
@@ -5443,7 +5453,6 @@ class Invariants_test : public beast::unit_test::Suite
                     for (auto const& [field, pk] : balances)
                         token->setFieldVL(
                             *field, bufOf(confidential::encryptedZero(holder, id, pk)));
-                    token->setFieldU32(sfConfidentialBalanceVersion, 0);
                 }
                 for (auto const& [field, pk] : balances)
                 {
@@ -5479,9 +5488,8 @@ class Invariants_test : public beast::unit_test::Suite
                 token->setFieldVL(
                     sfConfidentialBalanceInbox,
                     bufOf(confidential::encryptedZero(holder, id, pointOf(key))));
-                token->setFieldU32(
-                    sfConfidentialBalanceVersion,
-                    token->getFieldU32(sfConfidentialBalanceVersion) + 1);
+                (*token)[sfConfidentialBalanceVersion] =
+                    static_cast<std::uint32_t>((*token)[sfConfidentialBalanceVersion] + 1);
                 if (tweak)
                     tweak(*token, *issuance);
                 ac.view().update(token);
@@ -5512,9 +5520,8 @@ class Invariants_test : public beast::unit_test::Suite
                         return false;
                     token->setFieldVL(*field, bufOf(*current - txAmount(amount, pk)));
                 }
-                token->setFieldU32(
-                    sfConfidentialBalanceVersion,
-                    token->getFieldU32(sfConfidentialBalanceVersion) + 1);
+                (*token)[sfConfidentialBalanceVersion] =
+                    static_cast<std::uint32_t>((*token)[sfConfidentialBalanceVersion] + 1);
                 (*token)[sfMPTAmount] = (*token)[sfMPTAmount] + amount;
                 (*issuance)[sfConfidentialOutstandingAmount] =
                     (*issuance)[sfConfidentialOutstandingAmount] - amount;
@@ -5544,9 +5551,8 @@ class Invariants_test : public beast::unit_test::Suite
                         sfAuditorEncryptedBalance,
                         zero(issuance->getFieldVL(sfAuditorEncryptionKey)));
                 }
-                token->setFieldU32(
-                    sfConfidentialBalanceVersion,
-                    token->getFieldU32(sfConfidentialBalanceVersion) + 1);
+                (*token)[sfConfidentialBalanceVersion] =
+                    static_cast<std::uint32_t>((*token)[sfConfidentialBalanceVersion] + 1);
                 (*issuance)[sfConfidentialOutstandingAmount] =
                     (*issuance)[sfConfidentialOutstandingAmount] - amount;
                 (*issuance)[sfOutstandingAmount] = (*issuance)[sfOutstandingAmount] - amount;
@@ -5579,7 +5585,7 @@ class Invariants_test : public beast::unit_test::Suite
             features,
             convertTx(25, true));
         check({}, applyMerge(), confidential, seedHolder, pass, features, merge);
-        // The version counter wraps to 0 and stays present.
+        // The version counter wraps to 0, which is stored as absent.
         check(
             {},
             applyMerge(),
@@ -6002,9 +6008,8 @@ class Invariants_test : public beast::unit_test::Suite
                             *sender, *field, [&](auto const& c) { return c - txAmount(30, pk); });
                         credit(*receiver, *field, pk);
                     }
-                    sender->setFieldU32(
-                        sfConfidentialBalanceVersion,
-                        sender->getFieldU32(sfConfidentialBalanceVersion) + 1);
+                    (*sender)[sfConfidentialBalanceVersion] =
+                    static_cast<std::uint32_t>((*sender)[sfConfidentialBalanceVersion] + 1);
                     if (tweak)
                         tweak(*sender, *receiver);
                     ac.view().update(sender);
@@ -6032,7 +6037,7 @@ class Invariants_test : public beast::unit_test::Suite
                 true);
             sendCheck(
                 {incorrect},
-                applySend([](SLE& s, SLE&) { s.setFieldU32(sfConfidentialBalanceVersion, 0); }),
+                applySend([](SLE& s, SLE&) { s.makeFieldAbsent(sfConfidentialBalanceVersion); }),
                 fails);
             // The receiver: inbox and mirrors credited and re-randomized; its
             // spending balance and version untouched.
@@ -6096,9 +6101,8 @@ class Invariants_test : public beast::unit_test::Suite
                     auto sender = ac.view().peek(keylet::mptoken(id, holder));
                     if (!sender)
                         return false;
-                    sender->setFieldU32(
-                        sfConfidentialBalanceVersion,
-                        sender->getFieldU32(sfConfidentialBalanceVersion) + 1);
+                    (*sender)[sfConfidentialBalanceVersion] =
+                    static_cast<std::uint32_t>((*sender)[sfConfidentialBalanceVersion] + 1);
                     ac.view().update(sender);
                     return true;
                 },

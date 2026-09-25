@@ -89,9 +89,7 @@ ConfidentialMPTMergeInbox::doApply()
             cm::store(*mptoken, sfConfidentialBalanceInbox, encryptedZero(accountID_, id, *key));
         !isTesSuccess(ter))
         return ter;  // LCOV_EXCL_LINE
-    mptoken->setFieldU32(
-        sfConfidentialBalanceVersion,
-        static_cast<std::uint32_t>(mptoken->getFieldU32(sfConfidentialBalanceVersion) + 1));
+    cm::advanceVersion(*mptoken);
     view().update(mptoken);
     return tesSUCCESS;
 }

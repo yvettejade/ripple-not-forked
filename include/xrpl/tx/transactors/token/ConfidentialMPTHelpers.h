@@ -60,11 +60,15 @@ struct IssuanceKeys
 [[nodiscard]] std::optional<IssuanceKeys>
 issuanceKeys(SLE const& issuance);
 
-/** True if the MPToken has a holder key, the holder and issuer balances and
-    a version.
+/** True if the MPToken has a holder key and the holder and issuer balances.
+    The version is a default field, absent while it is 0.
 */
 [[nodiscard]] bool
 isInitialized(SLE const& mptoken);
+
+/** Increments ConfidentialBalanceVersion, wrapping from 2^32 - 1 to 0. */
+void
+advanceVersion(SLE& mptoken);
 
 /** tecNO_PERMISSION unless the transaction carries an auditor ciphertext
     exactly when the issuance has an auditor key.

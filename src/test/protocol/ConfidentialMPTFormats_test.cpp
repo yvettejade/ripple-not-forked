@@ -135,12 +135,13 @@ class ConfidentialMPTFormats_test : public beast::unit_test::Suite
         sle.setFieldVL(sfIssuerEncryptedBalance, issuerBalance);
         sle.setFieldVL(sfAuditorEncryptedBalance, auditorBalance);
 
-        // The version is soeOPTIONAL so an initialized holder at version 0
-        // (and a counter that wrapped to 0) is stored explicitly.
-        sle.setFieldU32(sfConfidentialBalanceVersion, 0);
+        // The version is soeDEFAULT: an initialized holder at version 0 (and a
+        // counter that wrapped to 0) stores no version at all.
+        sle[sfConfidentialBalanceVersion] = 0;
+        BEAST_EXPECT(!sle.isFieldPresent(sfConfidentialBalanceVersion));
         auto copy = roundTrip(sle);
-        BEAST_EXPECT(copy->isFieldPresent(sfConfidentialBalanceVersion));
-        BEAST_EXPECT(copy->getFieldU32(sfConfidentialBalanceVersion) == 0);
+        BEAST_EXPECT(!copy->isFieldPresent(sfConfidentialBalanceVersion));
+        BEAST_EXPECT((*copy)[sfConfidentialBalanceVersion] == 0);
         BEAST_EXPECT(copy->getFieldVL(sfHolderEncryptionKey) == key);
         BEAST_EXPECT(copy->getFieldVL(sfConfidentialBalanceSpending) == spending);
         BEAST_EXPECT(copy->getFieldVL(sfConfidentialBalanceInbox) == inbox);
@@ -152,6 +153,23 @@ class ConfidentialMPTFormats_test : public beast::unit_test::Suite
         BEAST_EXPECT(
             copy->getFieldU32(sfConfidentialBalanceVersion) ==
             std::numeric_limits<std::uint32_t>::max());
+
+        // Wrapping through the proxy removes the field again, while an
+        // explicit 0 serializes but cannot be read back.
+        sle[sfConfidentialBalanceVersion] =
+            static_cast<std::uint32_t>(sle[sfConfidentialBalanceVersion] + 1);
+        BEAST_EXPECT(!sle.isFieldPresent(sfConfidentialBalanceVersion));
+        sle.setFieldU32(sfConfidentialBalanceVersion, 0);
+        bool threw = false;
+        try
+        {
+            (void)roundTrip(sle);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        BEAST_EXPECT(threw);
 
         // An MPToken without confidential state is unchanged.
         sle.makeFieldAbsent(sfHolderEncryptionKey);

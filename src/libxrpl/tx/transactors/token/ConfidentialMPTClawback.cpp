@@ -123,9 +123,7 @@ ConfidentialMPTClawback::doApply()
         if (auto const ter = reset(sfAuditorEncryptedBalance, *keys->auditor); !isTesSuccess(ter))
             return ter;  // LCOV_EXCL_LINE
     }
-    mptoken->setFieldU32(
-        sfConfidentialBalanceVersion,
-        static_cast<std::uint32_t>(mptoken->getFieldU32(sfConfidentialBalanceVersion) + 1));
+    cm::advanceVersion(*mptoken);
 
     (*issuance)[sfConfidentialOutstandingAmount] =
         (*issuance)[sfConfidentialOutstandingAmount] - amount;
