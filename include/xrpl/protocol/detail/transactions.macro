@@ -1133,6 +1133,28 @@ TRANSACTION(ttCONFIDENTIAL_MPT_CONVERT_BACK, 87, ConfidentialMPTConvertBack,
     {sfZKProof, SoeRequired},
 }))
 
+/** This transaction type sends a hidden amount of an MPT from the sender's
+    confidential spending balance to the destination's inbox (XLS-0096). */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
+#endif
+TRANSACTION(ttCONFIDENTIAL_MPT_SEND, 88, ConfidentialMPTSend,
+    Delegation::Delegable,
+    featureConfidentialTransfer,
+    MayModifyConfidentialMpt,
+    ({
+    {sfDestination, SoeRequired},
+    {sfMPTokenIssuanceID, SoeRequired},
+    {sfSenderEncryptedAmount, SoeRequired},
+    {sfDestinationEncryptedAmount, SoeRequired},
+    {sfIssuerEncryptedAmount, SoeRequired},
+    {sfAuditorEncryptedAmount, SoeOptional},
+    {sfZKProof, SoeRequired},
+    {sfBalanceCommitment, SoeRequired},
+    {sfAmountCommitment, SoeRequired},
+    {sfCredentialIDs, SoeOptional},
+}))
+
 /** This system-generated transaction type is used to update the status of the various amendments.
 
     For details, see: https://xrpl.org/amendments.html

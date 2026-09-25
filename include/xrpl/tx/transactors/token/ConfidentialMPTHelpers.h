@@ -40,6 +40,12 @@ blindingFactor(STTx const& tx);
 [[nodiscard]] NotTEC
 checkCiphertexts(STTx const& tx, std::initializer_list<SF_VL const*> fields);
 
+/** The Fiat-Shamir challenge e of a Send's sigma proof, its first scalar;
+    nullopt unless it is a canonical, non-zero scalar.
+*/
+[[nodiscard]] std::optional<confidential::Scalar>
+sendChallenge(STTx const& tx);
+
 /** TransactionContextID of tx with TxSpecific = party || u32be(version). */
 [[nodiscard]] uint256
 contextID(STTx const& tx, AccountID const& party, std::uint32_t version);

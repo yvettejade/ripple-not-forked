@@ -5,6 +5,7 @@
 #include <xrpl/beast/utility/Journal.h>
 #include <xrpl/ledger/ReadView.h>
 #include <xrpl/protocol/AccountID.h>
+#include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/protocol/TER.h>
@@ -193,7 +194,15 @@ class ValidConfidentialMPToken
     validConvert(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
 
     [[nodiscard]] static bool
-    validConvertBack(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
+    validDebit(
+        STTx const& tx,
+        SLE const* before,
+        SLE const& after,
+        SLE const& issuance,
+        SF_VL const& holderAmount);
+
+    [[nodiscard]] static bool
+    validReceive(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
 
     [[nodiscard]] static bool
     validMerge(STTx const& tx, SLE const* before, SLE const& after);
