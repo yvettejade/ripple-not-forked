@@ -11,8 +11,8 @@
 #include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/detail/secp256k1.h>
-#include <xrpl/protocol/digest.h>
 
+#include <openssl/sha.h>
 #include <secp256k1.h>
 #include <secp256k1_ecdh.h>
 
@@ -110,6 +110,20 @@ appendU32(std::vector<std::uint8_t>& out, std::uint32_t v)
 {
     for (int shift = 24; shift >= 0; shift -= 8)
         out.push_back(static_cast<std::uint8_t>(v >> shift));
+}
+
+// SHA-256 finalized straight into out, with the context wiped: no other copy
+// of the digest, or of state derived from the (possibly secret) input, is
+// left behind.
+void
+sha256Into(std::initializer_list<Slice> parts, std::array<std::uint8_t, kScalarLength>& out)
+{
+    SHA256_CTX ctx;
+    SHA256_Init(&ctx);
+    for (auto const& part : parts)
+        SHA256_Update(&ctx, part.data(), part.size());
+    SHA256_Final(out.data(), &ctx);
+    secureErase(&ctx, sizeof(ctx));
 }
 
 std::vector<Point>
@@ -487,7 +501,8 @@ HedgedNonces::next()
     {
         std::vector<std::uint8_t> ctr;
         appendU32(ctr, counter_++);
-        auto digest = sha256({makeSlice(seed_), makeSlice(ctr)});
+        std::array<std::uint8_t, kScalarLength> digest{};
+        sha256Into({makeSlice(seed_), makeSlice(ctr)}, digest);
         auto const k = Scalar::fromDigest(digest);
         secureErase(digest.data(), digest.size());
         if (!k.isZero())
@@ -498,23 +513,11 @@ HedgedNonces::next()
 std::array<std::uint8_t, kScalarLength>
 sha256(std::initializer_list<Slice> parts)
 {
-    // The context holds state derived from the (possibly secret) input, so it
-    // is wiped once the digest is out. The digest is returned as a prvalue,
-    // which initializes the caller's object directly: no named local copy is
-    // left behind unwiped.
-    struct Wipe
-    {
-        sha256_hasher& h;
-        ~Wipe()
-        {
-            secureErase(&h, sizeof(h));
-        }
-    };
-    sha256_hasher h;
-    Wipe const wipe{h};
-    for (auto const& part : parts)
-        h(part.data(), part.size());
-    return static_cast<sha256_hasher::result_type>(h);
+    // Secret inputs (the hedged nonces) use sha256Into, whose caller wipes
+    // the only copy of the digest.
+    std::array<std::uint8_t, kScalarLength> out{};
+    sha256Into(parts, out);
+    return out;
 }
 
 Point
