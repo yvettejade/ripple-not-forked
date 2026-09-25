@@ -30,6 +30,7 @@
 #include <xrpl/protocol/jss.h>
 #include <xrpl/tx/ApplyContext.h>
 #include <xrpl/tx/Transactor.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTClawback.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTConvertBack.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
@@ -2229,6 +2230,278 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceInbox), kb, 30));
     }
 
+    // The issuer's clawback of `amount` from holder, proved against the
+    // holder's on-ledger issuer mirror with the issuer's secret key.
+    static json::Value
+    clawbackJV(
+        jtx::Env& env,
+        jtx::Account const& issuer,
+        jtx::Account const& holder,
+        Issuance const& iss,
+        std::uint64_t amount,
+        std::optional<Key> const& signingKey = std::nullopt)
+    {
+        auto const sle = env.le(keylet::mptoken(iss.id, holder));
+        auto const mirror = sle ? stored(*sle, sfIssuerEncryptedBalance) : std::nullopt;
+        auto const& key = signingKey ? *signingKey : iss.issuer;
+        json::Value jv;
+        jv[jss::TransactionType] = jss::ConfidentialMPTClawback;
+        jv[jss::Account] = issuer.human();
+        jv[sfHolder.jsonName] = holder.human();
+        jv[sfMPTokenIssuanceID.jsonName] = to_string(iss.id);
+        jv[sfMPTAmount.jsonName] = std::to_string(amount);
+        auto const ctx = transactionContextID(
+            ttCONFIDENTIAL_MPT_CLAWBACK, issuer.id(), iss.id, env.seq(issuer), holder.id(), 0);
+        // An uninitialized holder gets a proof over a stand-in mirror.
+        jv[sfZKProof.jsonName] = strHex(proveClawback(
+            key.pub,
+            mirror.value_or(elGamalEncrypt(Scalar::fromUint64(1), Scalar::fromUint64(1), key.pub)),
+            Scalar::fromUint64(amount),
+            key.secret,
+            ctx));
+        jv[jss::Fee] = confidentialFee(env);
+        return jv;
+    }
+
+    static constexpr std::uint32_t kClawable = tfMPTCanHoldConfidentialBalance | tfMPTCanClawback;
+
+    void
+    testClawbackPreflight()
+    {
+        testcase("Clawback preflight");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+
+        {
+            Env env{*this, testableAmendments() - featureConfidentialTransfer};
+            env.fund(XRP(10'000), gw, alice);
+            env.close();
+            Issuance const iss{.id = makeMptID(1, gw)};
+            env(clawbackJV(env, gw, alice, iss, 10), Ter(temDISABLED));
+        }
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob);
+        env.close();
+        auto const iss = issue(env, gw, {alice, bob}, kClawable);
+        fundSendParties(env, alice, bob, iss);
+
+        // Section 11.3.1(2)-(5).
+        env(clawbackJV(env, alice, bob, iss, 200), Ter(temMALFORMED));
+        env(clawbackJV(env, gw, gw, iss, 100), Ter(temMALFORMED));
+        for (auto const size : {63, 65})
+        {
+            auto jv = clawbackJV(env, gw, alice, iss, 100);
+            auto const proof = jv[sfZKProof.jsonName].asString();
+            jv[sfZKProof.jsonName] = size == 63 ? proof.substr(0, 126) : proof + "00";
+            env(jv, Ter(temMALFORMED));
+        }
+        {
+            auto jv = clawbackJV(env, gw, alice, iss, 100);
+            jv[sfMPTAmount.jsonName] = "0";
+            env(jv, Ter(temBAD_AMOUNT));
+            jv[sfMPTAmount.jsonName] = std::to_string(kMaxMpTokenAmount + 1);
+            env(jv, Ter(temBAD_AMOUNT));
+        }
+        {
+            auto jv = clawbackJV(env, gw, alice, iss, 100);
+            jv[jss::Flags] = tfMPTLock;
+            env(jv, Ter(temINVALID_FLAG));
+        }
+
+        // The underpaying transaction is held for the next ledger, so this
+        // comes last.
+        auto jv = clawbackJV(env, gw, alice, iss, 100);
+        jv[jss::Fee] = to_string(env.current()->fees().base * 10 - 1);
+        env(jv, Ter(telINSUF_FEE_P));
+    }
+
+    void
+    testClawbackPreclaim()
+    {
+        testcase("Clawback preclaim");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Account const carol("carol");
+        Account const dave("dave");
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob, carol);
+        env.close();
+        auto const iss = issue(env, gw, {alice, bob, carol}, kClawable);
+        fundSendParties(env, alice, bob, iss);
+
+        // Section 11.3.2, in order.
+        env(clawbackJV(env, gw, dave, iss, 100), Ter(tecNO_TARGET));
+        {
+            Issuance missing = iss;
+            missing.id = makeMptID(999, gw);
+            env(clawbackJV(env, gw, alice, missing, 100), Ter(tecOBJECT_NOT_FOUND));
+        }
+        env.fund(XRP(10'000), dave);
+        env.close();
+        env(clawbackJV(env, gw, dave, iss, 100), Ter(tecOBJECT_NOT_FOUND));
+        {
+            auto const noClawback = issue(env, gw, {alice});
+            env(convertJV(env, alice, Key(11), noClawback, {.amount = 10}));
+            env.close();
+            env(clawbackJV(env, gw, alice, noClawback, 10), Ter(tecNO_PERMISSION));
+            auto const noKeys = issue(env, gw, {alice}, kClawable, false, false);
+            env(clawbackJV(env, gw, alice, noKeys, 10), Ter(tecNO_PERMISSION));
+        }
+        // Carol never converted, so she has no issuer mirror.
+        env(clawbackJV(env, gw, carol, iss, 100), Ter(tecNO_PERMISSION));
+        env(clawbackJV(env, gw, alice, iss, 301), Ter(tecINSUFFICIENT_FUNDS));
+
+        // Section 11.3.2(7): the proof opens the mirror to exactly MPTAmount,
+        // with the issuer key, for this holder.
+        env(clawbackJV(env, gw, alice, iss, 99), Ter(tecBAD_PROOF));
+        env(clawbackJV(env, gw, alice, iss, 100, Key(103)), Ter(tecBAD_PROOF));
+        {
+            // Bound to the issuer's sequence.
+            auto const early = clawbackJV(env, gw, alice, iss, 100);
+            env(noop(gw));
+            env(early, Ter(tecBAD_PROOF));
+        }
+        env(clawbackJV(env, gw, alice, iss, 100));
+    }
+
+    void
+    testClawbackApply()
+    {
+        testcase("Clawback apply");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Key const ka(11);
+        Key const kb(21);
+
+        for (bool const withAuditor : {false, true})
+        {
+            Env env{*this};
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            auto const iss = issue(
+                env, gw, {alice, bob}, kClawable | tfMPTCanLock | tfMPTRequireAuth, withAuditor);
+            fundSendParties(env, alice, bob, iss);
+
+            // Bob's mirror covers spending (200) and inbox (30).
+            env(sendJV(env, alice, ka, bob, kb, iss, {.amount = 30}));
+            env.close();
+
+            // The issuer may claw back from a locked, unauthorized holder.
+            env(issuanceSetJV(gw, iss.id, tfMPTLock, bob));
+            {
+                json::Value jv;
+                jv[jss::TransactionType] = jss::MPTokenAuthorize;
+                jv[jss::Account] = gw.human();
+                jv[sfMPTokenIssuanceID.jsonName] = to_string(iss.id);
+                jv[sfHolder.jsonName] = bob.human();
+                jv[jss::Flags] = tfMPTUnauthorize;
+                env(jv);
+            }
+            env.close();
+
+            auto const before = env.le(keylet::mptoken(iss.id, bob));
+            env(clawbackJV(env, gw, bob, iss, 230));
+            env.close();
+            auto const after = env.le(keylet::mptoken(iss.id, bob));
+            if (!BEAST_EXPECT(before && after))
+                return;
+
+            // Section 11.4 and updated spec eq. (63)-(68).
+            BEAST_EXPECT(
+                stored(*after, sfConfidentialBalanceSpending) ==
+                encryptedZero(bob.id(), iss.id, kb.pub));
+            BEAST_EXPECT(
+                stored(*after, sfConfidentialBalanceInbox) ==
+                encryptedZero(bob.id(), iss.id, kb.pub));
+            BEAST_EXPECT(
+                stored(*after, sfIssuerEncryptedBalance) ==
+                encryptedZero(bob.id(), iss.id, iss.issuer.pub));
+            BEAST_EXPECT(after->isFieldPresent(sfAuditorEncryptedBalance) == withAuditor);
+            if (withAuditor)
+            {
+                BEAST_EXPECT(
+                    stored(*after, sfAuditorEncryptedBalance) ==
+                    encryptedZero(bob.id(), iss.id, iss.auditor->pub));
+            }
+            BEAST_EXPECT(
+                (*after)[sfConfidentialBalanceVersion] ==
+                (*before)[sfConfidentialBalanceVersion] + 1);
+            BEAST_EXPECT(
+                after->getFieldVL(sfHolderEncryptionKey) ==
+                before->getFieldVL(sfHolderEncryptionKey));
+            BEAST_EXPECT((*after)[sfMPTAmount] == 800);
+            auto const issuance = env.le(keylet::mptIssuance(iss.id));
+            BEAST_EXPECT(issuance && (*issuance)[sfConfidentialOutstandingAmount] == 70);
+            BEAST_EXPECT(issuance && (*issuance)[sfOutstandingAmount] == 1'770);
+
+            // Clawing back an emptied holder fails: the mirror encrypts 0.
+            env(clawbackJV(env, gw, bob, iss, 1), Ter(tecBAD_PROOF));
+        }
+    }
+
+    // Updated spec section 5.6: the proof is not bound to the version, so a
+    // holder cannot invalidate a prepared clawback with a merge; changing the
+    // mirror (a Send) does.
+    void
+    testClawbackPrepared()
+    {
+        testcase("Clawback prepared ahead");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Account const carol("carol");
+        Key const ka(11);
+        Key const kb(21);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob, carol);
+        env.close();
+        auto const iss = issue(env, gw, {alice, bob}, kClawable);
+        fundSendParties(env, alice, bob, iss);
+
+        auto const prepared = clawbackJV(env, gw, alice, iss, 100);
+        env(mergeJV(env, alice, iss.id));
+        env.close();
+        env(prepared);
+        env.close();
+        auto sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && decrypts(stored(*sle, sfIssuerEncryptedBalance), iss.issuer, 0));
+
+        auto const stale = clawbackJV(env, gw, bob, iss, 200);
+        env(sendJV(env, bob, kb, alice, ka, iss, {.amount = 50, .balance = 200}));
+        env.close();
+        env(stale, Ter(tecBAD_PROOF));
+        env.close();
+
+        // The holder keeps its key and can use its confidential balance again;
+        // a delegate of the issuer can claw back (section 5.5).
+        env(delegate::set(gw, carol, {"ConfidentialMPTClawback"}));
+        env.close();
+        env(clawbackJV(env, gw, bob, iss, 150), delegate::As(carol));
+        env.close();
+        sle = env.le(keylet::mptoken(iss.id, bob));
+        BEAST_EXPECT(sle && decrypts(stored(*sle, sfIssuerEncryptedBalance), iss.issuer, 0));
+        env(convertJV(env, bob, kb, iss, {.amount = 10, .registerKey = false}));
+        env.close();
+        sle = env.le(keylet::mptoken(iss.id, bob));
+        BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceInbox), kb, 10));
+        auto const issuance = env.le(keylet::mptIssuance(iss.id));
+        BEAST_EXPECT(issuance && (*issuance)[sfConfidentialOutstandingAmount] == 60);
+    }
+
     // Transaction-specific invariants are disabled in Transactor; the protocol
     // invariant ValidConfidentialMPToken covers these transactions.
     void
@@ -2255,6 +2528,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         check.operator()<ConfidentialMPTMergeInbox>(ttCONFIDENTIAL_MPT_MERGE_INBOX);
         check.operator()<ConfidentialMPTConvertBack>(ttCONFIDENTIAL_MPT_CONVERT_BACK);
         check.operator()<ConfidentialMPTSend>(ttCONFIDENTIAL_MPT_SEND);
+        check.operator()<ConfidentialMPTClawback>(ttCONFIDENTIAL_MPT_CLAWBACK);
     }
 
 public:
@@ -2285,6 +2559,10 @@ public:
         testSendApply();
         testSendIdentity();
         testSendDelegation();
+        testClawbackPreflight();
+        testClawbackPreclaim();
+        testClawbackApply();
+        testClawbackPrepared();
         testTransactionInvariants();
     }
 };
