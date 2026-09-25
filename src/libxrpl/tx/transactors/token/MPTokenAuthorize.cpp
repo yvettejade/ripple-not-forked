@@ -13,6 +13,7 @@
 #include <xrpl/protocol/TxFlags.h>
 #include <xrpl/protocol/XRPAmount.h>
 #include <xrpl/tx/Transactor.h>
+#include <xrpl/tx/transactors/token/ConfidentialMPTHelpers.h>
 
 #include <cstdint>
 #include <memory>
@@ -94,11 +95,7 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
             // encrypted balance is zero) no transaction can act on the state
             // or recreate the MPToken, and blocking deletion would lock the
             // holder's reserve forever.
-            if ((sleMpt->isFieldPresent(sfHolderEncryptionKey) ||
-                 sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
-                 sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
-                 sleMpt->isFieldPresent(sfIssuerEncryptedBalance) ||
-                 sleMpt->isFieldPresent(sfAuditorEncryptedBalance)) &&
+            if (confidential_mpt::hasConfidentialState(*sleMpt) &&
                 ctx.view.exists(keylet::mptIssuance(ctx.tx[sfMPTokenIssuanceID])))
                 return tecHAS_OBLIGATIONS;
 

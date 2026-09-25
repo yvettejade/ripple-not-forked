@@ -401,13 +401,7 @@ hasEncryptedBalance(SLE const& sle)
         sle.isFieldPresent(sfAuditorEncryptedBalance);
 }
 
-bool
-hasConfidentialState(SLE const& sle)
-{
-    return versionOf(&sle) != 0 ||
-        std::ranges::any_of(
-               kConfidentialMPTokenFields, [&](SField const* f) { return sle.isFieldPresent(*f); });
-}
+using confidential_mpt::hasConfidentialState;
 
 bool
 validKeyField(SLE const& sle, SField const& field)

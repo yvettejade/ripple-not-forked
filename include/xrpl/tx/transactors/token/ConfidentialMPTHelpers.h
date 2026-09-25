@@ -66,6 +66,12 @@ issuanceKeys(SLE const& issuance);
 [[nodiscard]] bool
 isInitialized(SLE const& mptoken);
 
+/** True if the MPToken holds any XLS-0096 state: a holder key, an encrypted
+    balance or mirror, or a non-zero version.
+*/
+[[nodiscard]] bool
+hasConfidentialState(SLE const& mptoken);
+
 /** Increments ConfidentialBalanceVersion, wrapping from 2^32 - 1 to 0. */
 void
 advanceVersion(SLE& mptoken);

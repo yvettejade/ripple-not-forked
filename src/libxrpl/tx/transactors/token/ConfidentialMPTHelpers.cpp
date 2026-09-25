@@ -112,6 +112,17 @@ isInitialized(SLE const& mptoken)
         mptoken.isFieldPresent(sfIssuerEncryptedBalance);
 }
 
+bool
+hasConfidentialState(SLE const& mptoken)
+{
+    return mptoken[sfConfidentialBalanceVersion] != 0 ||
+        mptoken.isFieldPresent(sfHolderEncryptionKey) ||
+        mptoken.isFieldPresent(sfConfidentialBalanceSpending) ||
+        mptoken.isFieldPresent(sfConfidentialBalanceInbox) ||
+        mptoken.isFieldPresent(sfIssuerEncryptedBalance) ||
+        mptoken.isFieldPresent(sfAuditorEncryptedBalance);
+}
+
 void
 advanceVersion(SLE& mptoken)
 {
