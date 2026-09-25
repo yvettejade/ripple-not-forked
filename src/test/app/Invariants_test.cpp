@@ -4950,7 +4950,9 @@ class Invariants_test : public beast::unit_test::Suite
                 ctx->type, [&](STObject& tx) {
                     tx.setAccountID(sfAccount, account);
                     tx.setFieldH192(sfMPTokenIssuanceID, id);
-                    if (ctx->type != ttCONFIDENTIAL_MPT_CONVERT || !issuance)
+                    if ((ctx->type != ttCONFIDENTIAL_MPT_CONVERT &&
+                         ctx->type != ttCONFIDENTIAL_MPT_CONVERT_BACK) ||
+                        !issuance)
                         return;
                     tx.setFieldU64(sfMPTAmount, ctx->amount);
                     tx.setFieldH256(sfBlindingFactor, uint256{5});
@@ -4976,6 +4978,9 @@ class Invariants_test : public beast::unit_test::Suite
         auto const convertTx = [](std::uint64_t amount, bool registerKey = false) {
             return ConfidentialTx{
                 .type = ttCONFIDENTIAL_MPT_CONVERT, .amount = amount, .registerKey = registerKey};
+        };
+        auto const convertBackTx = [](std::uint64_t amount) {
+            return ConfidentialTx{.type = ttCONFIDENTIAL_MPT_CONVERT_BACK, .amount = amount};
         };
 
         // gw issues an MPT and pays 100 to A1; a confidential issuance also
@@ -5470,6 +5475,49 @@ class Invariants_test : public beast::unit_test::Suite
                 return true;
             };
         };
+        auto const applyConvertBack = [&](std::uint64_t amount, Tweak tweak = {}) {
+            return [=](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto token = ac.view().peek(keylet::mptoken(id, holder));
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!token || !issuance)
+                    return false;
+                std::vector<std::pair<SF_VL const*, confidential::Point>> balances{
+                    {&sfConfidentialBalanceSpending, pointOf(key)},
+                    {&sfIssuerEncryptedBalance,
+                     pointOf(issuance->getFieldVL(sfIssuerEncryptionKey))}};
+                if (issuance->isFieldPresent(sfAuditorEncryptionKey))
+                {
+                    balances.emplace_back(
+                        &sfAuditorEncryptedBalance,
+                        pointOf(issuance->getFieldVL(sfAuditorEncryptionKey)));
+                }
+                for (auto const& [field, pk] : balances)
+                {
+                    auto const current = confidential::ElGamalCiphertext::fromBytes(
+                        makeSlice(token->getFieldVL(*field)));
+                    if (!current)
+                        return false;
+                    token->setFieldVL(*field, bufOf(*current - txAmount(amount, pk)));
+                }
+                token->setFieldU32(
+                    sfConfidentialBalanceVersion,
+                    token->getFieldU32(sfConfidentialBalanceVersion) + 1);
+                (*token)[sfMPTAmount] = (*token)[sfMPTAmount] + amount;
+                (*issuance)[sfConfidentialOutstandingAmount] =
+                    (*issuance)[sfConfidentialOutstandingAmount] - amount;
+                if (tweak)
+                    tweak(*token, *issuance);
+                ac.view().update(token);
+                ac.view().update(issuance);
+                return true;
+            };
+        };
+        // A1 holds 60 publicly and 40 confidentially.
+        Seed const seedConverted = [&](SLE& issuance, SLE& token) {
+            seedHolder(issuance, token);
+            token[sfMPTAmount] = 60;
+            issuance[sfConfidentialOutstandingAmount] = 40;
+        };
         auto const features = defaultAmendments();
         auto const incorrect = "confidential transaction changed MPT state incorrectly";
 
@@ -5674,6 +5722,94 @@ class Invariants_test : public beast::unit_test::Suite
             applyMerge([&](SLE& t, SLE&) { t.setFieldVL(sfHolderEncryptionKey, otherKey); }),
             merge,
             seedHolder);
+
+        // ConvertBack: spending and mirrors -= the transaction's ciphertexts,
+        // version + 1, the key and inbox untouched, COA -= m and MPTAmount += m.
+        check(
+            {},
+            applyConvertBack(40),
+            confidential,
+            seedConverted,
+            pass,
+            features,
+            convertBackTx(40));
+        check(
+            {},
+            applyConvertBack(15),
+            confidential,
+            seedConverted,
+            pass,
+            features,
+            convertBackTx(15));
+        {
+            Seed const auditedConverted = [&](SLE& issuance, SLE& token) {
+                seedConverted(issuance, token);
+                withKeys(issuance, token);
+                token.setFieldVL(sfAuditorEncryptedBalance, ctA);
+            };
+            check(
+                {},
+                applyConvertBack(40),
+                confidential,
+                auditedConverted,
+                pass,
+                features,
+                convertBackTx(40));
+            broken(
+                applyConvertBack(
+                    40, [&](SLE& t, SLE&) { t.setFieldVL(sfAuditorEncryptedBalance, ctB); }),
+                convertBackTx(40),
+                auditedConverted);
+        }
+        for (SField const* field : std::initializer_list<SField const*>{
+                 &sfConfidentialBalanceSpending,
+                 &sfConfidentialBalanceInbox,
+                 &sfIssuerEncryptedBalance})
+        {
+            broken(
+                applyConvertBack(
+                    40,
+                    [&, field](SLE& t, SLE&) {
+                        t.setFieldVL(*static_cast<SF_VL const*>(field), ctB);
+                    }),
+                convertBackTx(40),
+                seedConverted);
+        }
+        broken(
+            applyConvertBack(
+                40, [](SLE& t, SLE&) { t.setFieldU32(sfConfidentialBalanceVersion, 1); }),
+            convertBackTx(40),
+            seedConverted);
+        broken(
+            applyConvertBack(
+                40, [&](SLE& t, SLE&) { t.setFieldVL(sfHolderEncryptionKey, otherKey); }),
+            convertBackTx(40),
+            seedConverted);
+        broken(applyConvertBack(40), convertBackTx(30), seedConverted);
+        broken(applyConvertBack(40), convertTx(40), seedConverted);
+        broken(
+            applyConvertBack(40, [](SLE&, SLE& issuance) { issuance[sfOutstandingAmount] = 60; }),
+            convertBackTx(40),
+            seedConverted);
+        broken(applyConvertBack(40), convertBackTx(kMaxMpTokenAmount + 1), seedConverted);
+        // A ConvertBack that creates the holder's token instead of updating it.
+        broken(
+            [&](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto sle = std::make_shared<SLE>(keylet::mptoken(id, AccountID{}));
+                (*sle)[sfAccount] = holder;
+                (*sle)[sfMPTokenIssuanceID] = id;
+                (*sle)[sfMPTAmount] = 40;
+                initialize(*sle);
+                ac.view().insert(sle);
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!issuance)
+                    return false;
+                (*issuance)[sfConfidentialOutstandingAmount] = 0;
+                ac.view().update(issuance);
+                return true;
+            },
+            convertBackTx(40),
+            seedConverted);
 
         // The supply rule: COA and the public balance move by exactly MPTAmount
         // and OutstandingAmount does not move.

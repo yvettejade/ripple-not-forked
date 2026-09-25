@@ -193,6 +193,9 @@ class ValidConfidentialMPToken
     validConvert(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
 
     [[nodiscard]] static bool
+    validConvertBack(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
+
+    [[nodiscard]] static bool
     validMerge(STTx const& tx, SLE const* before, SLE const& after);
 
 public:

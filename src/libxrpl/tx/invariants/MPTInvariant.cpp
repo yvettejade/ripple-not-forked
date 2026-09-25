@@ -516,6 +516,34 @@ ValidConfidentialMPToken::validConvert(
         (!auditorKey || credited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount, *auditorKey));
 }
 
+// XLS-0096 §10.5 and updated spec eq. (42)-(45): the spending balance and
+// the mirrors are debited by exactly the transaction's ciphertexts, the
+// version advances by one and the key and inbox are untouched.
+bool
+ValidConfidentialMPToken::validConvertBack(
+    STTx const& tx,
+    SLE const* before,
+    SLE const& after,
+    SLE const& issuance)
+{
+    if (!before)
+        return false;
+    auto const debited = [&](SF_VL const& balance, SF_VL const& amount) {
+        auto const start = ciphertextField(*before, balance);
+        auto const debit = ciphertextField(tx, amount);
+        return start && debit && ciphertextField(after, balance) == *start - *debit;
+    };
+    auto const version = (*before)[~sfConfidentialBalanceVersion];
+    return version &&
+        after[~sfConfidentialBalanceVersion] == static_cast<std::uint32_t>(*version + 1) &&
+        sameField(*before, after, sfHolderEncryptionKey) &&
+        sameField(*before, after, sfConfidentialBalanceInbox) &&
+        debited(sfConfidentialBalanceSpending, sfHolderEncryptedAmount) &&
+        debited(sfIssuerEncryptedBalance, sfIssuerEncryptedAmount) &&
+        (!issuance.isFieldPresent(sfAuditorEncryptionKey) ||
+         debited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount));
+}
+
 // XLS-0096 §9.3: the inbox moves into the spending balance, the inbox resets
 // to the canonical encrypted zero, the version advances by one and the key
 // and mirrors are untouched.
@@ -923,7 +951,7 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
     if (amountOverflow_)
         return false;
 
-    // XLS-0096 §6.5, §7.5 and §9.3.
+    // XLS-0096 §6.5, §7.5, §9.3 and §10.5.
     SupplyChange expected;
     std::int64_t accountAmount = 0;
     switch (tx.getTxnType())
@@ -934,6 +962,14 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
                 return false;
             expected.confidentialOutstanding = static_cast<std::int64_t>(amount);
             accountAmount = -expected.confidentialOutstanding;
+            break;
+        }
+        case ttCONFIDENTIAL_MPT_CONVERT_BACK: {
+            auto const amount = tx[sfMPTAmount];
+            if (amount > kMaxMpTokenAmount)
+                return false;
+            accountAmount = static_cast<std::int64_t>(amount);
+            expected.confidentialOutstanding = -accountAmount;
             break;
         }
         case ttCONFIDENTIAL_MPT_MERGE_INBOX:
@@ -954,8 +990,8 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
         (touched ? it->second : SupplyChange{}) != expected)
         return false;
 
-    // Both transactions change exactly the submitter's MPToken: Convert
-    // always credits the inbox and MergeInbox always advances the version.
+    // Each changes exactly the submitter's MPToken: Convert always credits
+    // the inbox, and MergeInbox and ConvertBack always advance the version.
     if (tokenChanges_.size() != 1)
         return false;
     auto const& change = tokenChanges_.front();
@@ -964,9 +1000,15 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView cons
         !change.after || !issuance)
         return false;
 
-    if (tx.getTxnType() == ttCONFIDENTIAL_MPT_CONVERT)
-        return validConvert(tx, change.before.get(), *change.after, *issuance);
-    return validMerge(tx, change.before.get(), *change.after);
+    switch (tx.getTxnType())
+    {
+        case ttCONFIDENTIAL_MPT_CONVERT:
+            return validConvert(tx, change.before.get(), *change.after, *issuance);
+        case ttCONFIDENTIAL_MPT_CONVERT_BACK:
+            return validConvertBack(tx, change.before.get(), *change.after, *issuance);
+        default:
+            return validMerge(tx, change.before.get(), *change.after);
+    }
 }
 
 bool

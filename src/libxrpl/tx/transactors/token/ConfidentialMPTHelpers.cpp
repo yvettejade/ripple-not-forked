@@ -117,4 +117,22 @@ store(SLE& sle, SF_VL const& field, ElGamalCiphertext const& ct)
     return tesSUCCESS;
 }
 
+TER
+credit(SLE& sle, SF_VL const& field, ElGamalCiphertext const& ct)
+{
+    auto const current = ciphertext(sle, field);
+    if (!current)
+        return tecINTERNAL;  // LCOV_EXCL_LINE
+    return store(sle, field, *current + ct);
+}
+
+TER
+debit(SLE& sle, SF_VL const& field, ElGamalCiphertext const& ct)
+{
+    auto const current = ciphertext(sle, field);
+    if (!current)
+        return tecINTERNAL;  // LCOV_EXCL_LINE
+    return store(sle, field, *current - ct);
+}
+
 }  // namespace xrpl::confidential_mpt
