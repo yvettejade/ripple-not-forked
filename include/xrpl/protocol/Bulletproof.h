@@ -66,7 +66,8 @@ static_assert(kAggregatedRangeProofLength == 754);
     their bits are only ever combined arithmetically.
 
     @throws std::invalid_argument unless 1 <= m <= kMaxRangeProofValues, the
-            spans have the same length and every value is below 2^64.
+            spans have the same length, every value is below 2^64 and no
+            blinding factor is zero.
 */
 [[nodiscard]] Buffer
 proveRange(

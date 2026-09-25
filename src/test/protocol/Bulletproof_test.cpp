@@ -184,7 +184,8 @@ class Bulletproof_test : public beast::unit_test::Suite
         "02C4CAE1CEEC309954F210D241516160CE7EC22DB91F1308E6BDB96740D77516AE";
     static constexpr char const* kCheatSecondOutOfRangeCommitment1 =
         "03D8922A25EFF188B070D11FBCB6AFEC2B1826C2FE0D05F10D669C735FD8D675A3";
-    // Aggregated cheats exactly at the boundary, in both positions: 2^64
+    // Aggregated cheats exactly at the boundary, in both positions, from the
+    // same independent reference prover run on inconsistent witnesses: 2^64
     // committed with the bits of 0 proven, and -1 (n - 1) committed with the
     // bits of 2^64 - 1 proven. The other value is honest.
     static constexpr char const* kCheatSecondTwoTo64 =
