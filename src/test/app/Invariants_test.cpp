@@ -5157,6 +5157,22 @@ class Invariants_test : public beast::unit_test::Suite
             },
             confidential,
             seedHolder);
+        // Also through MPTokenAuthorize, the one transaction that may delete it
+        // once the issuance is gone.
+        check(
+            {"MPToken confidential state removed"},
+            [](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto sle = ac.view().peek(keylet::mptoken(id, holder));
+                if (!sle)
+                    return false;
+                ac.view().erase(sle);
+                return true;
+            },
+            confidential,
+            seedHolder,
+            {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+            defaultAmendments(),
+            ConfidentialTx{.type = ttMPTOKEN_AUTHORIZE});
 
         // Once the issuance is gone, the holder may delete the MPToken with
         // its confidential state (the section 7.4 deviation in
