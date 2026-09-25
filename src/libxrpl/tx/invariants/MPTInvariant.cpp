@@ -467,6 +467,19 @@ sameField(SLE const& before, SLE const& after, SField const& field)
     return (!a && !b) || (a && b && a->isEquivalent(*b));
 }
 
+// The transaction's ciphertext in `amount` encrypts MPTAmount under pk with
+// the disclosed BlindingFactor (XLS-0096 §7.2, §10.3).
+bool
+disclosed(STTx const& tx, SF_VL const& amount, confidential::Point const& pk)
+{
+    auto const ct = ciphertextField(tx, amount);
+    auto const bf = tx[sfBlindingFactor];
+    auto const r = confidential::Scalar::fromBytes(Slice(bf.data(), bf.size()));
+    return ct && r &&
+        confidential::verifyElGamalEncryption(
+               *ct, confidential::Scalar::fromUint64(tx[sfMPTAmount]), *r, pk);
+}
+
 }  // namespace
 
 // XLS-0096 §7.5: on first use the key is registered and every balance starts
@@ -510,7 +523,8 @@ ValidConfidentialMPToken::validConvert(
             ? std::optional<ElGamalCiphertext>{encryptedZero(account, id, pk)}
             : ciphertextField(*before, balance);
         auto const credit = ciphertextField(tx, amount);
-        return start && credit && ciphertextField(after, balance) == *start + *credit;
+        return start && credit && disclosed(tx, amount, pk) &&
+            ciphertextField(after, balance) == *start + *credit;
     };
     return credited(sfConfidentialBalanceInbox, sfHolderEncryptedAmount, *key) &&
         credited(sfIssuerEncryptedBalance, sfIssuerEncryptedAmount, *issuerKey) &&
@@ -529,22 +543,27 @@ ValidConfidentialMPToken::validDebit(
     SLE const& issuance,
     SF_VL const& holderAmount)
 {
-    if (!before)
+    using namespace confidential;
+    auto const key = before ? pointField(*before, sfHolderEncryptionKey) : std::optional<Point>{};
+    auto const issuerKey = pointField(issuance, sfIssuerEncryptionKey);
+    auto const auditorKey = pointField(issuance, sfAuditorEncryptionKey);
+    auto const version = before ? (*before)[~sfConfidentialBalanceVersion] : std::nullopt;
+    if (!key || !issuerKey || !version)
         return false;
-    auto const debited = [&](SF_VL const& balance, SF_VL const& amount) {
+    auto const debited = [&](SF_VL const& balance, SF_VL const& amount, Point const& pk) {
         auto const start = ciphertextField(*before, balance);
         auto const debit = ciphertextField(tx, amount);
-        return start && debit && ciphertextField(after, balance) == *start - *debit;
+        // A Send's amount is hidden; its sigma proof binds the ciphertexts.
+        return start && debit &&
+            (!tx.isFieldPresent(sfBlindingFactor) || disclosed(tx, amount, pk)) &&
+            ciphertextField(after, balance) == *start - *debit;
     };
-    auto const version = (*before)[~sfConfidentialBalanceVersion];
-    return version &&
-        after[~sfConfidentialBalanceVersion] == static_cast<std::uint32_t>(*version + 1) &&
+    return after[~sfConfidentialBalanceVersion] == static_cast<std::uint32_t>(*version + 1) &&
         sameField(*before, after, sfHolderEncryptionKey) &&
         sameField(*before, after, sfConfidentialBalanceInbox) &&
-        debited(sfConfidentialBalanceSpending, holderAmount) &&
-        debited(sfIssuerEncryptedBalance, sfIssuerEncryptedAmount) &&
-        (!issuance.isFieldPresent(sfAuditorEncryptionKey) ||
-         debited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount));
+        debited(sfConfidentialBalanceSpending, holderAmount, *key) &&
+        debited(sfIssuerEncryptedBalance, sfIssuerEncryptedAmount, *issuerKey) &&
+        (!auditorKey || debited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount, *auditorKey));
 }
 
 // Updated spec eq. (11)-(13): a Send credits the receiver's inbox and mirrors

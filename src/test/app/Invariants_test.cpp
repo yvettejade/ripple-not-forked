@@ -4927,6 +4927,8 @@ class Invariants_test : public beast::unit_test::Suite
             TxType type;
             std::uint64_t amount = 0;
             bool registerKey = false;
+            // The disclosed BlindingFactor; the ciphertexts always use 5.
+            std::uint64_t blinding = 5;
         };
         auto const pointOf = [](Blob const& b) {
             return confidential::Point::fromBytes(makeSlice(b)).value_or(confidential::Point{});
@@ -4961,7 +4963,7 @@ class Invariants_test : public beast::unit_test::Suite
                         !issuance)
                         return;
                     tx.setFieldU64(sfMPTAmount, ctx->amount);
-                    tx.setFieldH256(sfBlindingFactor, uint256{5});
+                    tx.setFieldH256(sfBlindingFactor, uint256{ctx->blinding});
                     if (ctx->registerKey)
                         tx.setFieldVL(sfHolderEncryptionKey, key);
                     tx.setFieldVL(
@@ -5827,12 +5829,40 @@ class Invariants_test : public beast::unit_test::Suite
             convertBackTx(40),
             seedConverted);
         broken(applyConvertBack(40), convertBackTx(30), seedConverted);
+        // The ciphertexts must encrypt MPTAmount under the disclosed blinding
+        // factor.
+        broken(
+            applyConvertBack(40),
+            ConfidentialTx{.type = ttCONFIDENTIAL_MPT_CONVERT_BACK, .amount = 40, .blinding = 6},
+            seedConverted);
+        broken(
+            applyConvert(40, false),
+            ConfidentialTx{.type = ttCONFIDENTIAL_MPT_CONVERT, .amount = 40, .blinding = 6},
+            seedHolder);
         broken(applyConvertBack(40), convertTx(40), seedConverted);
         broken(
             applyConvertBack(40, [](SLE&, SLE& issuance) { issuance[sfOutstandingAmount] = 60; }),
             convertBackTx(40),
             seedConverted);
         broken(applyConvertBack(40), convertBackTx(kMaxMpTokenAmount + 1), seedConverted);
+        // A ConvertBack from an MPToken that never initialized.
+        broken(
+            [](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                auto token = ac.view().peek(keylet::mptoken(id, holder));
+                auto issuance = ac.view().peek(keylet::mptIssuance(id));
+                if (!token || !issuance)
+                    return false;
+                (*token)[sfMPTAmount] = 100;
+                (*issuance)[sfConfidentialOutstandingAmount] = 0;
+                ac.view().update(token);
+                ac.view().update(issuance);
+                return true;
+            },
+            convertBackTx(40),
+            [](SLE& issuance, SLE& token) {
+                token[sfMPTAmount] = 60;
+                issuance[sfConfidentialOutstandingAmount] = 40;
+            });
         // A ConvertBack that creates the holder's token instead of updating it.
         broken(
             [&](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
@@ -6033,6 +6063,27 @@ class Invariants_test : public beast::unit_test::Suite
             sendCheck({incorrect}, applySend(), fails, false, [](STObject& obj) {
                 obj.setFieldVL(sfZKProof, Blob{});
             });
+            sendCheck({incorrect}, applySend(), fails, false, [](STObject& obj) {
+                obj.setFieldVL(sfZKProof, Blob(32, 0));
+            });
+            sendCheck(
+                {incorrect},
+                applySend([&](SLE& s, SLE&) { s.setFieldVL(sfConfidentialBalanceInbox, ctB); }),
+                fails);
+            // A third MPToken changes.
+            sendCheck(
+                {incorrect},
+                [&](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                    if (!applySend()(id, holder, ac))
+                        return false;
+                    auto sle = std::make_shared<SLE>(keylet::mptoken(id, AccountID{3}));
+                    (*sle)[sfAccount] = AccountID{3};
+                    (*sle)[sfMPTokenIssuanceID] = id;
+                    initialize(*sle);
+                    ac.view().insert(sle);
+                    return true;
+                },
+                fails);
             // Exactly the sender and the destination change, with no amounts.
             sendCheck({incorrect}, applySend(), fails, false, [](STObject& obj) {
                 obj.setAccountID(sfDestination, AccountID{1});
