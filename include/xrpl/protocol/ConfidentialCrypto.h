@@ -23,8 +23,14 @@
     Validators only verify public data (ciphertexts, keys, commitments and
     disclosed blinding factors), for which the variable-time operations are
     appropriate. Code that handles secret scalars (provers, decryption) must
-    use mulGenerator and mulSecret, which are constant-time; Scalar arithmetic
-    and Scalar storage wiping are constant-time as well.
+    use mulGenerator and mulSecret, which are constant-time in the scalar,
+    zero included. Scalar arithmetic never branches on a value, and Scalar
+    and Point storage is wiped on destruction.
+
+    Point addition is variable-time and short-circuits the identity, so a
+    prover must not add a product whose scalar may be a secret zero (a bit,
+    an empty balance) without masking it first; pedersenCommit and
+    elGamalEncrypt do this for their message.
 
     Every hash is SHA-256, and hash outputs become scalars by reduction mod n.
 */
@@ -121,6 +127,16 @@ class Point
 public:
     /** The point at infinity (the group identity). */
     Point() = default;
+
+    Point(Point const&) = default;
+
+    Point&
+    operator=(Point const&) = default;
+
+    /** Wipes the value; products of secret scalars, such as m·G for a small
+        amount m, reveal the secret.
+    */
+    ~Point();
 
     /** The standard secp256k1 base point G. */
     [[nodiscard]] static Point
@@ -226,6 +242,15 @@ sha256(std::initializer_list<Slice> parts);
 */
 [[nodiscard]] Point
 hashToCurve(Slice seed);
+
+/** True if no point is the identity and no two points share an x
+    coordinate, that is, none equals another or its negation.
+
+    The generators below are checked with this on first use, together with
+    G; a collision throws std::logic_error.
+*/
+[[nodiscard]] bool
+distinctUpToSign(std::span<Point const> points);
 
 /** Number of Bulletproof vector generators: 64 bits for 2 aggregated values. */
 inline constexpr std::size_t kMaxBulletproofBits = 128;

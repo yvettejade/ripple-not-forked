@@ -440,6 +440,40 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         BEAST_EXPECT(orderMinusOne * orderMinusOne == one);
         BEAST_EXPECT(s(3) - s(5) == -s(2));
 
+        // Carries and borrows of the byte-wise addition and negation: a sum
+        // that carries out of 256 bits, one that lands exactly on n, one
+        // just below it, and carries across every byte.
+        auto const orderMinusFive = *Scalar::fromBytes(makeSlice(hex(kOrderMinusFive)));
+        auto const twoTo255 = *Scalar::fromBytes(makeSlice(hex("80" + std::string(62, '0'))));
+        BEAST_EXPECT(orderMinusOne + orderMinusOne == orderMinusOne - one);
+        BEAST_EXPECT(
+            strHex((twoTo255 + twoTo255).bytes()) ==
+            "000000000000000000000000000000014551231950B75FC4402DA1732FC9BEBF");
+        BEAST_EXPECT((orderMinusFive + s(5)).isZero());
+        BEAST_EXPECT(orderMinusFive + s(4) == orderMinusOne);
+        BEAST_EXPECT(orderMinusFive + s(6) == one);
+        BEAST_EXPECT(-orderMinusFive == s(5));
+        BEAST_EXPECT(-s(5) == orderMinusFive);
+        BEAST_EXPECT(
+            strHex((s(std::numeric_limits<std::uint64_t>::max()) + one).bytes()) ==
+            std::string(47, '0') + "1" + std::string(16, '0'));
+        BEAST_EXPECT(Scalar{} + Scalar{} == Scalar{});
+        BEAST_EXPECT((Scalar{} * Scalar{}).isZero());
+        BEAST_EXPECT((orderMinusOne * Scalar{}).isZero());
+        BEAST_EXPECT(one * one == one);
+        BEAST_EXPECT(Scalar{} - s(9) == -s(9));
+
+        // Zero scalars multiply to the identity through the same path as any
+        // other scalar.
+        auto const p = point(kP);
+        BEAST_EXPECT(mulSecret(Scalar{}, p).isInfinity());
+        BEAST_EXPECT(mulGenerator(Scalar{}).isInfinity());
+        BEAST_EXPECT(mulSecret(one, p) == p);
+        BEAST_EXPECT(mulGenerator(one) == Point::generator());
+        BEAST_EXPECT(mulSecret(orderMinusOne, p) == -p);
+        BEAST_EXPECT(mulSecret(s(3), Point{}).isInfinity());
+        BEAST_EXPECT((mulSecret(Scalar{}, p) + p) == p);
+
         // Inverses.
         BEAST_EXPECT(one.inverse() == one);
         BEAST_EXPECT(s(2).inverse() * s(2) == one);
@@ -568,6 +602,27 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         }
         BEAST_EXPECT(all.size() == 3 + 2 * kMaxBulletproofBits);
 
+        // The initialization check: no repeats, negations or identities.
+        {
+            std::vector<Point> points{Point::generator(), pedersenGenerator()};
+            points.push_back(innerProductGenerator());
+            points.insert(points.end(), g.begin(), g.end());
+            points.insert(points.end(), h.begin(), h.end());
+            BEAST_EXPECT(distinctUpToSign(points));
+            BEAST_EXPECT(distinctUpToSign({}));
+
+            auto repeated = points;
+            repeated.push_back(h[57]);
+            BEAST_EXPECT(!distinctUpToSign(repeated));
+            auto negated = points;
+            negated.push_back(-g[3]);
+            BEAST_EXPECT(!distinctUpToSign(negated));
+            BEAST_EXPECT(!distinctUpToSign(std::vector<Point>{Point::generator(), -Point::generator()}));
+            auto withIdentity = points;
+            withIdentity.push_back(Point{});
+            BEAST_EXPECT(!distinctUpToSign(withIdentity));
+        }
+
         // Every generator, pinned as SHA-256(G_0 || ... || G_127 || H_0 || ... || H_127).
         {
             Blob all;
@@ -626,6 +681,19 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
             pedersenCommit(s(10), s(3)));
         BEAST_EXPECT(pedersenCommit(Scalar{}, Scalar{}).isInfinity());
         BEAST_EXPECT(pedersenCommit(Scalar{}, s(5)) == s(5) * pedersenGenerator());
+
+        // The message is committed as (v + 1)·G - G, so v = n - 1 (where
+        // v + 1 wraps to zero) and v = 1 (where the sum is 2·G) need checks.
+        auto const orderMinusOne = *Scalar::fromBytes(makeSlice(hex(kOrderMinusOne)));
+        BEAST_EXPECT(
+            pedersenCommit(orderMinusOne, s(5)) ==
+            s(5) * pedersenGenerator() - Point::generator());
+        BEAST_EXPECT(pedersenCommit(orderMinusOne, Scalar{}) == -Point::generator());
+        BEAST_EXPECT(pedersenCommit(s(1), Scalar{}) == Point::generator());
+        BEAST_EXPECT(pedersenCommit(s(1), s(5)) == Point::generator() + s(5) * pedersenGenerator());
+        auto const pk = point(kP);
+        BEAST_EXPECT(elGamalEncrypt(Scalar{}, s(5), pk).c2 == s(5) * pk);
+        BEAST_EXPECT(elGamalEncrypt(orderMinusOne, s(5), pk).c2 == s(5) * pk - Point::generator());
     }
 
     void

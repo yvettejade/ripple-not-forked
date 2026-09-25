@@ -50,6 +50,55 @@ constexpr std::array<std::uint8_t, kScalarLength> kGroupOrder{
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
     0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41};
 
+using ScalarBytes = std::array<std::uint8_t, kScalarLength>;
+
+// Scalar arithmetic runs on secrets (the Bulletproof bits among them), so
+// none of these helpers branches on, or indexes by, a value: conditions
+// become all-ones/all-zero masks.
+
+// 0xFF if the bytes are all zero, else 0x00.
+std::uint8_t
+zeroMask(ScalarBytes const& s)
+{
+    std::uint32_t acc = 0;
+    for (auto const b : s)
+        acc |= b;
+    std::uint32_t const nonZero = (acc | (0u - acc)) >> 31;
+    return static_cast<std::uint8_t>(nonZero - 1);
+}
+
+// dst = mask ? src : dst
+void
+select(ScalarBytes& dst, ScalarBytes const& src, std::uint8_t mask)
+{
+    for (std::size_t i = 0; i < kScalarLength; ++i)
+        dst[i] = static_cast<std::uint8_t>((dst[i] & ~mask) | (src[i] & mask));
+}
+
+// out = a - b over 256 bits; returns the final borrow (0 or 1).
+std::uint32_t
+subtract(ScalarBytes const& a, ScalarBytes const& b, ScalarBytes& out)
+{
+    std::uint32_t borrow = 0;
+    for (std::size_t i = kScalarLength; i-- > 0;)
+    {
+        std::uint32_t const diff = std::uint32_t{a[i]} - b[i] - borrow;
+        out[i] = static_cast<std::uint8_t>(diff);
+        borrow = diff >> 31;
+    }
+    return borrow;
+}
+
+// Reduces a value in [0, 2n) that is given as its low 256 bits and a carry.
+void
+reduceOnce(ScalarBytes& value, std::uint32_t carry)
+{
+    ScalarBytes reduced;
+    std::uint32_t const borrow = subtract(value, kGroupOrder, reduced);
+    select(value, reduced, static_cast<std::uint8_t>(0u - (carry | (borrow ^ 1))));
+    secureErase(reduced.data(), reduced.size());
+}
+
 Slice
 asSlice(std::string_view s)
 {
@@ -109,19 +158,10 @@ Scalar::fromUint64(std::uint64_t v)
 Scalar
 Scalar::fromDigest(std::array<std::uint8_t, kScalarLength> const& digest)
 {
+    // digest < 2^256 < 2n, so one conditional subtraction of n reduces it.
     Scalar result;
     result.bytes_ = digest;
-    if (result.isZero() || secp256k1_ec_seckey_verify(secp256k1Context(), digest.data()) == 1)
-        return result;
-
-    // n <= digest < 2^256 < 2n, so one subtraction of n reduces it.
-    int borrow = 0;
-    for (std::size_t i = kScalarLength; i-- > 0;)
-    {
-        int const diff = int{digest[i]} - int{kGroupOrder[i]} - borrow;
-        borrow = diff < 0 ? 1 : 0;
-        result.bytes_[i] = static_cast<std::uint8_t>(diff + (borrow << 8));
-    }
+    reduceOnce(result.bytes_, 0);
     return result;
 }
 
@@ -148,37 +188,32 @@ Scalar::random()
 bool
 Scalar::isZero() const
 {
-    std::uint8_t acc = 0;
-    for (auto const b : bytes_)
-        acc |= b;
-    return acc == 0;
+    return zeroMask(bytes_) != 0;
 }
 
 Scalar
 operator+(Scalar const& a, Scalar const& b)
 {
-    if (a.isZero())
-        return b;
-    if (b.isZero())
-        return a;
-
-    // tweak_add rejects only a zero result, since both inputs are canonical.
-    Scalar result = a;
-    if (secp256k1_ec_seckey_tweak_add(secp256k1Context(), result.bytes_.data(), b.bytes_.data()) !=
-        1)
-        return Scalar{};
+    Scalar result;
+    std::uint32_t carry = 0;
+    for (std::size_t i = kScalarLength; i-- > 0;)
+    {
+        std::uint32_t const sum = std::uint32_t{a.bytes_[i]} + b.bytes_[i] + carry;
+        result.bytes_[i] = static_cast<std::uint8_t>(sum);
+        carry = sum >> 8;
+    }
+    // a + b < 2n because both are canonical.
+    reduceOnce(result.bytes_, carry);
     return result;
 }
 
 Scalar
 operator-(Scalar const& a)
 {
-    if (a.isZero())
-        return a;
-
-    Scalar result = a;
-    if (secp256k1_ec_seckey_negate(secp256k1Context(), result.bytes_.data()) != 1)
-        secp256k1Failure("seckey_negate");  // LCOV_EXCL_LINE
+    // n - a, masked so that -0 is 0 rather than n.
+    Scalar result;
+    subtract(kGroupOrder, a.bytes_, result.bytes_);
+    select(result.bytes_, ScalarBytes{}, zeroMask(a.bytes_));
     return result;
 }
 
@@ -191,13 +226,20 @@ operator-(Scalar const& a, Scalar const& b)
 Scalar
 operator*(Scalar const& a, Scalar const& b)
 {
-    if (a.isZero() || b.isZero())
-        return Scalar{};
-
+    // tweak_mul rejects a zero operand (and tests the tweak for zero with a
+    // branch), so zero operands are replaced by one and the product is
+    // masked to zero afterwards.
+    auto const one = Scalar::fromUint64(1);
+    auto const aZero = zeroMask(a.bytes_);
+    auto const bZero = zeroMask(b.bytes_);
     Scalar result = a;
-    if (secp256k1_ec_seckey_tweak_mul(secp256k1Context(), result.bytes_.data(), b.bytes_.data()) !=
-        1)
+    Scalar factor = b;
+    select(result.bytes_, one.bytes_, aZero);
+    select(factor.bytes_, one.bytes_, bZero);
+    if (secp256k1_ec_seckey_tweak_mul(
+            secp256k1Context(), result.bytes_.data(), factor.bytes_.data()) != 1)
         secp256k1Failure("seckey_tweak_mul");  // LCOV_EXCL_LINE
+    select(result.bytes_, ScalarBytes{}, aZero | bZero);
     return result;
 }
 
@@ -223,10 +265,16 @@ Scalar::inverse() const
     return result;
 }
 
+Point::~Point()
+{
+    secureErase(&pk_, sizeof(pk_));
+}
+
 Point
 Point::generator()
 {
-    return mulGenerator(Scalar::fromUint64(1));
+    static Point const kG = mulGenerator(Scalar::fromUint64(1));
+    return kG;
 }
 
 std::optional<Point>
@@ -314,8 +362,14 @@ operator==(Point const& a, Point const& b)
 Point
 mulSecret(Scalar const& k, Point const& p)
 {
-    if (p.infinity_ || k.isZero())
+    if (p.infinity_)
         return Point{};
+
+    // secp256k1_ecdh rejects a zero scalar, so zero is replaced by one and
+    // the product flagged as the identity: every scalar costs the same.
+    auto const kZero = zeroMask(k.bytes());
+    ScalarBytes scalar = k.bytes();
+    select(scalar, Scalar::fromUint64(1).bytes(), kZero);
 
     // secp256k1_ecdh multiplies with the constant-time ecmult_const; this hash
     // callback hands back the affine product instead of hashing it.
@@ -329,30 +383,30 @@ mulSecret(Scalar const& k, Point const& p)
     std::array<std::uint8_t, 65> uncompressed{};
     Point result;
     if (secp256k1_ecdh(
-            secp256k1Context(),
-            uncompressed.data(),
-            &p.pk_,
-            k.bytes().data(),
-            copyPoint,
-            nullptr) != 1 ||
+            secp256k1Context(), uncompressed.data(), &p.pk_, scalar.data(), copyPoint, nullptr) !=
+            1 ||
         secp256k1_ec_pubkey_parse(
             secp256k1Context(), &result.pk_, uncompressed.data(), uncompressed.size()) != 1)
         secp256k1Failure("ecdh");  // LCOV_EXCL_LINE
     secureErase(uncompressed.data(), uncompressed.size());
-    result.infinity_ = false;
+    secureErase(scalar.data(), scalar.size());
+    result.infinity_ = (kZero & 1) != 0;
     return result;
 }
 
 Point
 mulGenerator(Scalar const& k)
 {
-    if (k.isZero())
-        return Point{};
+    // As in mulSecret, a zero scalar is multiplied as one and flagged.
+    auto const kZero = zeroMask(k.bytes());
+    ScalarBytes scalar = k.bytes();
+    select(scalar, Scalar::fromUint64(1).bytes(), kZero);
 
     Point result;
-    if (secp256k1_ec_pubkey_create(secp256k1Context(), &result.pk_, k.bytes().data()) != 1)
+    if (secp256k1_ec_pubkey_create(secp256k1Context(), &result.pk_, scalar.data()) != 1)
         secp256k1Failure("create");  // LCOV_EXCL_LINE
-    result.infinity_ = false;
+    secureErase(scalar.data(), scalar.size());
+    result.infinity_ = (kZero & 1) != 0;
     return result;
 }
 
@@ -446,7 +500,10 @@ sha256(std::initializer_list<Slice> parts)
     sha256_hasher h;
     for (auto const& part : parts)
         h(part.data(), part.size());
-    return static_cast<sha256_hasher::result_type>(h);
+    auto const digest = static_cast<sha256_hasher::result_type>(h);
+    // The context still holds state derived from the (possibly secret) input.
+    secureErase(&h, sizeof(h));
+    return digest;
 }
 
 Point
@@ -468,38 +525,99 @@ hashToCurve(Slice seed)
     Throw<std::runtime_error>("confidential: hashToCurve found no point");  // LCOV_EXCL_LINE
 }
 
+bool
+distinctUpToSign(std::span<Point const> points)
+{
+    std::vector<std::array<std::uint8_t, kScalarLength>> xs;
+    xs.reserve(points.size());
+    for (auto const& p : points)
+    {
+        auto const b = p.bytes();
+        if (!b)
+            return false;
+        auto& x = xs.emplace_back();
+        std::memcpy(x.data(), b->data() + 1, x.size());
+    }
+    std::ranges::sort(xs);
+    return std::ranges::adjacent_find(xs) == xs.end();
+}
+
+namespace {
+
+struct Generators
+{
+    Point h;
+    Point u;
+    std::vector<Point> g;
+    std::vector<Point> hVec;
+};
+
+Generators const&
+generators()
+{
+    static Generators const kGenerators = [] {
+        Generators out{
+            .h = hashToCurve(asSlice("CMPT_PEDERSEN_H")),
+            .u = hashToCurve(asSlice("CMPT_BP_U")),
+            .g = deriveGenerators("CMPT_BP_G"),
+            .hVec = deriveGenerators("CMPT_BP_H")};
+
+        // Commitments bind only while no relation between the generators is
+        // known; a repeat (or a negation) of one is such a relation.
+        std::vector<Point> all{Point::generator(), out.h, out.u};
+        all.insert(all.end(), out.g.begin(), out.g.end());
+        all.insert(all.end(), out.hVec.begin(), out.hVec.end());
+        if (!distinctUpToSign(all))
+            Throw<std::logic_error>("confidential: generators collide");  // LCOV_EXCL_LINE
+        return out;
+    }();
+    return kGenerators;
+}
+
+}  // namespace
+
 Point const&
 pedersenGenerator()
 {
-    static Point const kH = hashToCurve(asSlice("CMPT_PEDERSEN_H"));
-    return kH;
+    return generators().h;
 }
 
 Point const&
 innerProductGenerator()
 {
-    static Point const kU = hashToCurve(asSlice("CMPT_BP_U"));
-    return kU;
+    return generators().u;
 }
 
 std::span<Point const>
 bulletproofGeneratorsG()
 {
-    static std::vector<Point> const kG = deriveGenerators("CMPT_BP_G");
-    return kG;
+    return generators().g;
 }
 
 std::span<Point const>
 bulletproofGeneratorsH()
 {
-    static std::vector<Point> const kH = deriveGenerators("CMPT_BP_H");
-    return kH;
+    return generators().hVec;
 }
+
+namespace {
+
+// v·G + p, computed as (v + 1)·G + p - G: a zero v (an empty balance, a
+// zero amount) would otherwise yield an identity term that addition skips.
+Point
+addGeneratorMultiple(Scalar const& v, Point const& p)
+{
+    std::array<Point, 3> const terms{
+        mulGenerator(v + Scalar::fromUint64(1)), p, -Point::generator()};
+    return sumPoints(terms);
+}
+
+}  // namespace
 
 Point
 pedersenCommit(Scalar const& value, Scalar const& blinding)
 {
-    return mulGenerator(value) + mulSecret(blinding, pedersenGenerator());
+    return addGeneratorMultiple(value, mulSecret(blinding, pedersenGenerator()));
 }
 
 bool
@@ -553,7 +671,7 @@ elGamalEncrypt(Scalar const& m, Scalar const& r, Point const& pk)
 {
     if (pk.isInfinity())
         Throw<std::invalid_argument>("confidential: encryption key is the point at infinity");
-    return ElGamalCiphertext{.c1 = mulGenerator(r), .c2 = mulGenerator(m) + mulSecret(r, pk)};
+    return ElGamalCiphertext{.c1 = mulGenerator(r), .c2 = addGeneratorMultiple(m, mulSecret(r, pk))};
 }
 
 Scalar
