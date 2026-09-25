@@ -111,8 +111,13 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         return tecOBJECT_NOT_FOUND;
 
     // XLS-0096 section 8.3.2, in order.
-    if (!ctx.view.exists(keylet::account(destination)))
+    auto const sleDst = ctx.view.read(keylet::account(destination));
+    if (!sleDst)
         return tecNO_TARGET;
+    // XLS-0096 section 8.2 has no DestinationTag, but every other transfer to
+    // an account that requires one fails without it, and so does a Send.
+    if (sleDst->isFlag(lsfRequireDestTag) && !tx.isFieldPresent(sfDestinationTag))
+        return tecDST_TAG_NEEDED;
     if (!issuance->isFlag(lsfMPTCanTransfer))
         return tecNO_AUTH;
     if (!issuance->isFlag(lsfMPTCanHoldConfidentialBalance))
@@ -145,8 +150,7 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     // Section 8.3.2.1: deposit authorization is decided here, before any
     // proof and without removing expired credentials; doApply removes those
     // (tecEXPIRED) only once authorization has passed.
-    if (auto const sleDst = ctx.view.read(keylet::account(destination));
-        sleDst->isFlag(lsfDepositAuth) &&
+    if (sleDst->isFlag(lsfDepositAuth) &&
         !ctx.view.exists(keylet::depositPreauth(destination, account)))
     {
         if (!tx.isFieldPresent(sfCredentialIDs))

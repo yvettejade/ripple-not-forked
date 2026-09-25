@@ -1153,6 +1153,7 @@ TRANSACTION(ttCONFIDENTIAL_MPT_SEND, 88, ConfidentialMPTSend,
     {sfBalanceCommitment, SoeRequired},
     {sfAmountCommitment, SoeRequired},
     {sfCredentialIDs, SoeOptional},
+    {sfDestinationTag, SoeOptional},
 }))
 
 /** This transaction type lets the issuer burn a holder's whole confidential

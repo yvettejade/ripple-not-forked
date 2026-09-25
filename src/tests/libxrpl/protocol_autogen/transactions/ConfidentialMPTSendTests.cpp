@@ -39,6 +39,7 @@ TEST(TransactionsConfidentialMPTSendTests, BuilderSettersRoundTrip)
     auto const balanceCommitmentValue = canonical_VL();
     auto const amountCommitmentValue = canonical_VL();
     auto const credentialIDsValue = canonical_VECTOR256();
+    auto const destinationTagValue = canonical_UINT32();
 
     ConfidentialMPTSendBuilder builder{
         accountValue,
@@ -57,6 +58,7 @@ TEST(TransactionsConfidentialMPTSendTests, BuilderSettersRoundTrip)
     // Set optional fields
     builder.setAuditorEncryptedAmount(auditorEncryptedAmountValue);
     builder.setCredentialIDs(credentialIDsValue);
+    builder.setDestinationTag(destinationTagValue);
 
     auto tx = builder.build(publicKey, secretKey);
 
@@ -138,6 +140,14 @@ TEST(TransactionsConfidentialMPTSendTests, BuilderSettersRoundTrip)
         EXPECT_TRUE(tx.hasCredentialIDs());
     }
 
+    {
+        auto const& expected = destinationTagValue;
+        auto const actualOpt = tx.getDestinationTag();
+        ASSERT_TRUE(actualOpt.has_value()) << "Optional field sfDestinationTag should be present";
+        expectEqualField(expected, *actualOpt, "sfDestinationTag");
+        EXPECT_TRUE(tx.hasDestinationTag());
+    }
+
 }
 
 // 2 & 4) Start from an STTx, construct a builder from it, build a new wrapper,
@@ -164,6 +174,7 @@ TEST(TransactionsConfidentialMPTSendTests, BuilderFromStTxRoundTrip)
     auto const balanceCommitmentValue = canonical_VL();
     auto const amountCommitmentValue = canonical_VL();
     auto const credentialIDsValue = canonical_VECTOR256();
+    auto const destinationTagValue = canonical_UINT32();
 
     // Build an initial transaction
     ConfidentialMPTSendBuilder initialBuilder{
@@ -182,6 +193,7 @@ TEST(TransactionsConfidentialMPTSendTests, BuilderFromStTxRoundTrip)
 
     initialBuilder.setAuditorEncryptedAmount(auditorEncryptedAmountValue);
     initialBuilder.setCredentialIDs(credentialIDsValue);
+    initialBuilder.setDestinationTag(destinationTagValue);
 
     auto initialTx = initialBuilder.build(publicKey, secretKey);
 
@@ -262,6 +274,13 @@ TEST(TransactionsConfidentialMPTSendTests, BuilderFromStTxRoundTrip)
         expectEqualField(expected, *actualOpt, "sfCredentialIDs");
     }
 
+    {
+        auto const& expected = destinationTagValue;
+        auto const actualOpt = rebuiltTx.getDestinationTag();
+        ASSERT_TRUE(actualOpt.has_value()) << "Optional field sfDestinationTag should be present";
+        expectEqualField(expected, *actualOpt, "sfDestinationTag");
+    }
+
 }
 
 // 3) Verify wrapper throws when constructed from wrong transaction type.
@@ -337,6 +356,8 @@ TEST(TransactionsConfidentialMPTSendTests, OptionalFieldsReturnNullopt)
     EXPECT_FALSE(tx.getAuditorEncryptedAmount().has_value());
     EXPECT_FALSE(tx.hasCredentialIDs());
     EXPECT_FALSE(tx.getCredentialIDs().has_value());
+    EXPECT_FALSE(tx.hasDestinationTag());
+    EXPECT_FALSE(tx.getDestinationTag().has_value());
 }
 
 }

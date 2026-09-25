@@ -186,6 +186,32 @@ public:
     {
         return this->tx_->isFieldPresent(sfCredentialIDs);
     }
+
+    /**
+     * @brief Get sfDestinationTag (SoeOptional)
+     * @return The field value, or std::nullopt if not present.
+     */
+    [[nodiscard]]
+    protocol_autogen::Optional<SF_UINT32::type::value_type>
+    getDestinationTag() const
+    {
+        if (hasDestinationTag())
+        {
+            return this->tx_->at(sfDestinationTag);
+        }
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Check if sfDestinationTag is present.
+     * @return True if the field is present, false otherwise.
+     */
+    [[nodiscard]]
+    bool
+    hasDestinationTag() const
+    {
+        return this->tx_->isFieldPresent(sfDestinationTag);
+    }
 };
 
 /**
@@ -351,6 +377,17 @@ public:
     setCredentialIDs(std::decay_t<typename SF_VECTOR256::type::value_type> const& value)
     {
         object_[sfCredentialIDs] = value;
+        return *this;
+    }
+
+    /**
+     * @brief Set sfDestinationTag (SoeOptional)
+     * @return Reference to this builder for method chaining.
+     */
+    ConfidentialMPTSendBuilder&
+    setDestinationTag(std::decay_t<typename SF_UINT32::type::value_type> const& value)
+    {
+        object_[sfDestinationTag] = value;
         return *this;
     }
 

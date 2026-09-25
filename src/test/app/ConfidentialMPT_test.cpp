@@ -5,6 +5,7 @@
 #include <test/jtx/deposit.h>
 #include <test/jtx/escrow.h>
 #include <test/jtx/mpt.h>
+#include <test/jtx/tag.h>
 #include <test/jtx/ticket.h>
 
 #include <xrpl/basics/Blob.h>
@@ -2132,7 +2133,15 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         // The remainder must be in range: b = 100 and m = 150.
         env(sendJV(env, alice, ka, bob, kb, iss, {.amount = 150}), Ter(tecBAD_PROOF));
 
-        env(sendJV(env, alice, ka, bob, kb, iss));
+        // Section 8.2 has no DestinationTag, but an account that requires
+        // one still gets tecDST_TAG_NEEDED without it.
+        env(fset(bob, asfRequireDest));
+        env.close();
+        env(sendJV(env, alice, ka, bob, kb, iss), Ter(tecDST_TAG_NEEDED));
+        env(sendJV(env, alice, ka, bob, kb, iss), Dtag(7));
+        env.close();
+        auto const sle = env.le(keylet::mptoken(iss.id, bob));
+        BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceInbox), kb, 30));
     }
 
     void
