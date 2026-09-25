@@ -4927,6 +4927,8 @@ class Invariants_test : public beast::unit_test::Suite
             TxType type;
             std::uint64_t amount = 0;
             bool registerKey = false;
+            // The disclosed BlindingFactor; the ciphertexts always use 5.
+            std::uint64_t blinding = 5;
         };
         auto const pointOf = [](Blob const& b) {
             return confidential::Point::fromBytes(makeSlice(b)).value_or(confidential::Point{});
@@ -4955,7 +4957,7 @@ class Invariants_test : public beast::unit_test::Suite
                         !issuance)
                         return;
                     tx.setFieldU64(sfMPTAmount, ctx->amount);
-                    tx.setFieldH256(sfBlindingFactor, uint256{5});
+                    tx.setFieldH256(sfBlindingFactor, uint256{ctx->blinding});
                     if (ctx->registerKey)
                         tx.setFieldVL(sfHolderEncryptionKey, key);
                     tx.setFieldVL(
@@ -5786,6 +5788,16 @@ class Invariants_test : public beast::unit_test::Suite
             convertBackTx(40),
             seedConverted);
         broken(applyConvertBack(40), convertBackTx(30), seedConverted);
+        // The ciphertexts must encrypt MPTAmount under the disclosed blinding
+        // factor.
+        broken(
+            applyConvertBack(40),
+            ConfidentialTx{.type = ttCONFIDENTIAL_MPT_CONVERT_BACK, .amount = 40, .blinding = 6},
+            seedConverted);
+        broken(
+            applyConvert(40, false),
+            ConfidentialTx{.type = ttCONFIDENTIAL_MPT_CONVERT, .amount = 40, .blinding = 6},
+            seedHolder);
         broken(applyConvertBack(40), convertTx(40), seedConverted);
         broken(
             applyConvertBack(40, [](SLE&, SLE& issuance) { issuance[sfOutstandingAmount] = 60; }),
