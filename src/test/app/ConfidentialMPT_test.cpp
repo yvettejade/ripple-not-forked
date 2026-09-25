@@ -2976,6 +2976,54 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         }
     }
 
+    // A public Clawback only reaches the public balance: OA falls by it, COA
+    // and the confidential state are untouched, and the confidential part
+    // needs a confidential clawback.
+    void
+    testPublicClawback()
+    {
+        testcase("Public clawback of a confidential holder");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Key const ka(11);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice);
+        env.close();
+        auto const iss = issue(env, gw, {alice}, kClawable);
+        env(convertJV(env, alice, ka, iss, {.amount = 600}));
+        env.close();
+
+        auto const before = env.le(keylet::mptoken(iss.id, alice));
+        MPT const mpt("MPT", iss.id);
+        env(claw(gw, mpt(1'000), alice));
+        env.close();
+        auto const after = env.le(keylet::mptoken(iss.id, alice));
+        if (!BEAST_EXPECT(before && after))
+            return;
+        BEAST_EXPECT((*after)[sfMPTAmount] == 0);
+        for (SField const* field : std::initializer_list<SField const*>{
+                 &sfHolderEncryptionKey,
+                 &sfConfidentialBalanceSpending,
+                 &sfConfidentialBalanceInbox,
+                 &sfIssuerEncryptedBalance,
+                 &sfConfidentialBalanceVersion})
+        {
+            BEAST_EXPECT(before->peekAtField(*field).isEquivalent(after->peekAtField(*field)));
+        }
+        auto issuance = env.le(keylet::mptIssuance(iss.id));
+        BEAST_EXPECT(issuance && (*issuance)[sfOutstandingAmount] == 600);
+        BEAST_EXPECT(issuance && (*issuance)[sfConfidentialOutstandingAmount] == 600);
+
+        env(clawbackJV(env, gw, alice, iss, 600));
+        env.close();
+        issuance = env.le(keylet::mptIssuance(iss.id));
+        BEAST_EXPECT(issuance && (*issuance)[sfOutstandingAmount] == 0);
+        BEAST_EXPECT(issuance && (*issuance)[sfConfidentialOutstandingAmount] == 0);
+    }
+
     // Transaction-specific invariants are disabled in Transactor; the protocol
     // invariant ValidConfidentialMPToken covers these transactions.
     void
@@ -3040,6 +3088,7 @@ public:
         testClawbackApply();
         testClawbackPrepared();
         testClawbackBinding();
+        testPublicClawback();
         testTransactionInvariants();
     }
 };
