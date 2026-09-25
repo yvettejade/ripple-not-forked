@@ -444,7 +444,7 @@ bulletproofGeneratorsH()
 Point
 pedersenCommit(Scalar const& value, Scalar const& blinding)
 {
-    return mulGenerator(value) + blinding * pedersenGenerator();
+    return mulGenerator(value) + mulSecret(blinding, pedersenGenerator());
 }
 
 bool
@@ -498,7 +498,7 @@ elGamalEncrypt(Scalar const& m, Scalar const& r, Point const& pk)
 {
     if (pk.isInfinity())
         Throw<std::invalid_argument>("confidential: encryption key is the point at infinity");
-    return ElGamalCiphertext{.c1 = mulGenerator(r), .c2 = mulGenerator(m) + r * pk};
+    return ElGamalCiphertext{.c1 = mulGenerator(r), .c2 = mulGenerator(m) + mulSecret(r, pk)};
 }
 
 Scalar
