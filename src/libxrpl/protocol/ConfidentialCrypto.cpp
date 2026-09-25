@@ -267,7 +267,8 @@ Scalar::inverse() const
 
 Point::~Point()
 {
-    secureErase(&pk_, sizeof(pk_));
+    // infinity_ is secret too: it flags a zero scalar in mulSecret.
+    secureErase(static_cast<void*>(this), sizeof(*this));
 }
 
 Point
