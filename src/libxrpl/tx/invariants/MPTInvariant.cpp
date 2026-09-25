@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 namespace xrpl {
 
@@ -433,6 +434,18 @@ blobChanged(SLE const& before, SLE const& after, SField const& field)
         (!after.isFieldPresent(field) || before.getFieldVL(field) != after.getFieldVL(field));
 }
 
+// A missing state counts as zero. nullopt if either value is out of range;
+// ValidMPTPayment reports those.
+std::optional<std::int64_t>
+amountDelta(SLE const* before, SLE const* after, SF_UINT64 const& field)
+{
+    std::uint64_t const b = before ? (*before)[field] : 0;
+    std::uint64_t const a = after ? (*after)[field] : 0;
+    if (a > kMaxMpTokenAmount || b > kMaxMpTokenAmount)
+        return std::nullopt;
+    return static_cast<std::int64_t>(a) - static_cast<std::int64_t>(b);
+}
+
 }  // namespace
 
 void
@@ -741,6 +754,47 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
 }
 
 void
+ValidConfidentialMPToken::recordChanges(SLE const* before, SLE const* after)
+{
+    auto const& sle = after ? *after : *before;
+    if (sle.getType() == ltMPTOKEN_ISSUANCE)
+    {
+        auto const value = [](SLE const* s) {
+            return s ? (*s)[sfConfidentialOutstandingAmount] : 0;
+        };
+        if (value(before) != value(after))
+            confidentialChanged_ = true;
+
+        auto const outstanding = amountDelta(before, after, sfOutstandingAmount);
+        auto const confidential = amountDelta(before, after, sfConfidentialOutstandingAmount);
+        if (!outstanding || !confidential)
+        {
+            amountOverflow_ = true;
+        }
+        else if (*outstanding != 0 || *confidential != 0)
+        {
+            supplyChanges_[makeMptID(sle[sfSequence], sle[sfIssuer])] = {
+                .outstanding = *outstanding, .confidentialOutstanding = *confidential};
+        }
+        return;
+    }
+
+    bool const confidential = confidentialFieldsDiffer(before, after);
+    if (confidential)
+        confidentialChanged_ = true;
+    auto const amount = amountDelta(before, after, sfMPTAmount);
+    if (!amount)
+        amountOverflow_ = true;
+    if (confidential || amount.value_or(0) != 0)
+    {
+        tokenChanges_.push_back(
+            {.issuanceID = sle[sfMPTokenIssuanceID],
+             .account = sle[sfAccount],
+             .amount = amount.value_or(0)});
+    }
+}
+
+void
 ValidConfidentialMPToken::visitEntry(
     bool isDelete,
     std::shared_ptr<SLE const> const& before,
@@ -749,20 +803,76 @@ ValidConfidentialMPToken::visitEntry(
     if (!after)
         return;  // LCOV_EXCL_LINE
 
-    if (after->getType() == ltMPTOKEN_ISSUANCE)
+    auto const type = after->getType();
+    if (type != ltMPTOKEN_ISSUANCE && type != ltMPTOKEN)
+        return;
+
+    if (type == ltMPTOKEN_ISSUANCE)
     {
         visitIssuance(isDelete, before.get(), *after);
     }
-    else if (after->getType() == ltMPTOKEN)
+    else
     {
         visitMPToken(isDelete, before.get(), *after);
     }
+
+    // A deleted entry leaves nothing behind; its committed state is `before`.
+    if (!isDelete || before)
+        recordChanges(before.get(), isDelete ? nullptr : after.get());
+}
+
+bool
+ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx) const
+{
+    if (amountOverflow_)
+        return false;
+
+    // XLS-0096 §6.5, §7.5 and §9.3.
+    SupplyChange expected;
+    std::int64_t accountAmount = 0;
+    switch (tx.getTxnType())
+    {
+        case ttCONFIDENTIAL_MPT_CONVERT: {
+            auto const amount = tx[sfMPTAmount];
+            if (amount > kMaxMpTokenAmount)
+                return false;
+            expected.confidentialOutstanding = static_cast<std::int64_t>(amount);
+            accountAmount = -expected.confidentialOutstanding;
+            break;
+        }
+        case ttCONFIDENTIAL_MPT_MERGE_INBOX:
+            break;
+        // LCOV_EXCL_START
+        default:
+            UNREACHABLE("xrpl::ValidConfidentialMPToken : unknown confidential transaction");
+            return false;
+            // LCOV_EXCL_STOP
+    }
+
+    auto const id = tx[sfMPTokenIssuanceID];
+    auto const account = tx[sfAccount];
+
+    auto const it = supplyChanges_.find(id);
+    bool const touched = it != supplyChanges_.end();
+    if (supplyChanges_.size() != (touched ? 1u : 0u) ||
+        (touched ? it->second : SupplyChange{}) != expected)
+        return false;
+
+    bool accountChanged = false;
+    for (auto const& change : tokenChanges_)
+    {
+        if (change.issuanceID != id || change.account != account || accountChanged ||
+            change.amount != accountAmount)
+            return false;
+        accountChanged = true;
+    }
+    return accountChanged || accountAmount == 0;
 }
 
 bool
 ValidConfidentialMPToken::finalize(
-    STTx const&,
-    TER const,
+    STTx const& tx,
+    TER const result,
     XRPAmount const,
     ReadView const& view,
     beast::Journal const& j) const
@@ -808,6 +918,16 @@ ValidConfidentialMPToken::finalize(
         fail("ConfidentialOutstandingAmount without an issuer encryption key");
     if (badVersionStep_)
         fail("MPToken ConfidentialBalanceVersion must start at 0 and advance by one");
+
+    if (hasPrivilege(tx, MayModifyConfidentialMpt))
+    {
+        if (isTesSuccess(result) && !validConfidentialChanges(tx))
+            fail("confidential transaction changed MPT amounts or tokens it may not");
+    }
+    else if (confidentialChanged_)
+    {
+        fail("confidential MPT state changed by a non-confidential transaction");
+    }
 
     for (auto const& token : encryptedTokens_)
     {

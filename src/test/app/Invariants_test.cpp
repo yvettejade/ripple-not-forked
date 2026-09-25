@@ -4918,6 +4918,30 @@ class Invariants_test : public beast::unit_test::Suite
         using Seed = std::function<void(SLE & issuance, SLE & token)>;
         using Change = std::function<bool(MPTID const&, AccountID const& holder, ApplyContext&)>;
 
+        // The transaction the change is attributed to: A1 submitting `type`
+        // for the checked issuance, or an AccountSet if nullopt.
+        struct ConfidentialTx
+        {
+            TxType type;
+            std::uint64_t amount = 0;
+        };
+        auto const makeTx = [](std::optional<ConfidentialTx> const& ctx,
+                               MPTID const& id,
+                               AccountID const& account) {
+            if (!ctx)
+                return STTx{ttACCOUNT_SET, [](STObject&) {}};
+            return STTx{ctx->type, [&](STObject& tx) {
+                            tx.setAccountID(sfAccount, account);
+                            tx.setFieldH192(sfMPTokenIssuanceID, id);
+                            if (ctx->type == ttCONFIDENTIAL_MPT_CONVERT)
+                                tx.setFieldU64(sfMPTAmount, ctx->amount);
+                        }};
+        };
+        ConfidentialTx const merge{.type = ttCONFIDENTIAL_MPT_MERGE_INBOX};
+        auto const convertTx = [](std::uint64_t amount) {
+            return ConfidentialTx{.type = ttCONFIDENTIAL_MPT_CONVERT, .amount = amount};
+        };
+
         // gw issues an MPT and pays 100 to A1; a confidential issuance also
         // gets an issuer key. `seed` then edits the open ledger so the check
         // starts from state that only the confidential transactors could
@@ -4928,7 +4952,8 @@ class Invariants_test : public beast::unit_test::Suite
                                Seed const& seed = {},
                                std::initializer_list<TER> ters =
                                    {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
-                               FeatureBitset features = defaultAmendments()) {
+                               FeatureBitset features = defaultAmendments(),
+                               std::optional<ConfidentialTx> const& tx = std::nullopt) {
             Env env{*this, features};
             Account const a1{"A1"};
             Account const a2{"A2"};
@@ -4966,7 +4991,7 @@ class Invariants_test : public beast::unit_test::Suite
                     return change(id, holder.id(), ac);
                 },
                 XRPAmount{},
-                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                makeTx(tx, id, a1.id()),
                 ters);
         };
 
@@ -5336,7 +5361,15 @@ class Invariants_test : public beast::unit_test::Suite
             pass);
 
         // Valid transitions.
-        check({}, updateToken([&](SLE& sle) { initialize(sle); }), confidential, {}, pass);
+        auto const features = defaultAmendments();
+        check(
+            {},
+            updateToken([&](SLE& sle) { initialize(sle); }),
+            confidential,
+            {},
+            pass,
+            features,
+            convertTx(0));
         check(
             {},
             updateToken([&](SLE& sle) {
@@ -5345,7 +5378,9 @@ class Invariants_test : public beast::unit_test::Suite
             }),
             confidential,
             seedHolder,
-            pass);
+            pass,
+            features,
+            merge);
         check(
             {},
             updateToken([&](SLE& sle) {
@@ -5354,7 +5389,9 @@ class Invariants_test : public beast::unit_test::Suite
             }),
             confidential,
             seedHolder,
-            pass);
+            pass,
+            features,
+            merge);
         // The version counter wraps to 0 and stays present.
         check(
             {},
@@ -5367,7 +5404,9 @@ class Invariants_test : public beast::unit_test::Suite
                 initialize(token);
                 token.setFieldU32(sfConfidentialBalanceVersion, 0xFFFFFFFF);
             },
-            pass);
+            pass,
+            features,
+            merge);
         check(
             {},
             updateToken([&](SLE& sle) {
@@ -5376,7 +5415,20 @@ class Invariants_test : public beast::unit_test::Suite
             }),
             confidential,
             withKeys,
-            pass);
+            pass,
+            features,
+            convertTx(0));
+
+        // Only the confidential transactions may change confidential state.
+        check(
+            {"confidential MPT state changed by a non-confidential transaction"},
+            updateToken([&](SLE& sle) { initialize(sle); }),
+            confidential);
+        check(
+            {"confidential MPT state changed by a non-confidential transaction"},
+            updateToken([&](SLE& sle) { sle.setFieldVL(sfConfidentialBalanceInbox, ctB); }),
+            confidential,
+            seedHolder);
 
         // OutstandingAmount accounts for tokens held confidentially.
         auto const convert = [](std::uint64_t publicDelta, std::uint64_t confidentialDelta) {
@@ -5393,16 +5445,95 @@ class Invariants_test : public beast::unit_test::Suite
                 return true;
             };
         };
-        check({}, convert(40, 40), confidential, {}, pass);
-        // ValidMPTPayment only checks successful transactions.
+        check({}, convert(40, 40), confidential, {}, pass, features, convertTx(40));
+        // ValidMPTPayment and the amount rule only check successful
+        // transactions.
         check(
-            {"invalid OutstandingAmount balance"},
+            {"invalid OutstandingAmount balance",
+             "confidential transaction changed MPT amounts or tokens it may not"},
             convert(40, 30),
             confidential,
             {},
-            {tecINVARIANT_FAILED, tecINVARIANT_FAILED});
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            features,
+            convertTx(40));
         check(
+            {"confidential transaction changed MPT amounts or tokens it may not"},
+            convert(40, 40),
+            confidential,
             {},
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            features,
+            convertTx(30));
+        check(
+            {"confidential transaction changed MPT amounts or tokens it may not"},
+            convert(40, 40),
+            confidential,
+            {},
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            features,
+            merge);
+        check(
+            {"confidential transaction changed MPT amounts or tokens it may not"},
+            convert(0, 0),
+            confidential,
+            {},
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            features,
+            convertTx(40));
+        check(
+            {"confidential transaction changed MPT amounts or tokens it may not"},
+            convert(0, 40),
+            confidential,
+            {},
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            features,
+            convertTx(40));
+        // Only the submitter's MPToken may change.
+        check(
+            {"confidential transaction changed MPT amounts or tokens it may not"},
+            [&](MPTID const& id, AccountID const&, ApplyContext& ac) {
+                AccountID const other = Account("A2").id();
+                auto sle = std::make_shared<SLE>(keylet::mptoken(id, other));
+                (*sle)[sfAccount] = other;
+                (*sle)[sfMPTokenIssuanceID] = id;
+                initialize(*sle);
+                ac.view().insert(sle);
+                return true;
+            },
+            confidential,
+            {},
+            {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+            features,
+            merge);
+        check(
+            {"confidential transaction changed MPT amounts or tokens it may not"},
+            updateToken([](SLE& sle) { sle[sfMPTAmount] = 60; }),
+            confidential,
+            {},
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            features,
+            merge);
+        check(
+            {"confidential transaction changed MPT amounts or tokens it may not"},
+            updateToken([](SLE& sle) { sle[sfMPTAmount] = kMaxMpTokenAmount + 1; }),
+            confidential,
+            {},
+            {tecINVARIANT_FAILED, tefINVARIANT_FAILED},
+            features,
+            merge);
+        check(
+            {"confidential transaction changed MPT amounts or tokens it may not"},
+            convert(40, 40),
+            confidential,
+            {},
+            {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
+            features,
+            convertTx(kMaxMpTokenAmount + 1));
+        // The OutstandingAmount decrease of a clawback without the
+        // ConfidentialMPTClawback transaction.
+        check(
+            {"confidential MPT state changed by a non-confidential transaction"},
             updateIssuance([](SLE& sle) {
                 sle[sfOutstandingAmount] = 60;
                 sle[sfConfidentialOutstandingAmount] = 0;
@@ -5411,8 +5542,7 @@ class Invariants_test : public beast::unit_test::Suite
             [](SLE& issuance, SLE& token) {
                 token[sfMPTAmount] = 60;
                 issuance[sfConfidentialOutstandingAmount] = 40;
-            },
-            pass);
+            });
         check(
             {"OutstandingAmount overflow"},
             updateIssuance(
@@ -5442,7 +5572,8 @@ class Invariants_test : public beast::unit_test::Suite
             confidential,
             {},
             {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
-            defaultAmendments() - featureMPTokensV2);
+            defaultAmendments() - featureMPTokensV2,
+            convertTx(40));
         check(
             {"invalid OutstandingAmount balance"},
             updateToken([](SLE& sle) { sle[sfMPTAmount] = 101; }),
@@ -5462,7 +5593,8 @@ class Invariants_test : public beast::unit_test::Suite
             confidential,
             seedHolder,
             {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
-            defaultAmendments() - featureMPTokensV2);
+            defaultAmendments() - featureMPTokensV2,
+            merge);
         check(
             {"OutstandingAmount overflow"},
             updateIssuance(
@@ -5495,7 +5627,8 @@ class Invariants_test : public beast::unit_test::Suite
                 issuance[sfMaximumAmount] = 100;
             },
             {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
-            defaultAmendments() - featureMPTokensV2);
+            defaultAmendments() - featureMPTokensV2,
+            merge);
 
         // A pre-existing overflow in the committed state does not hide a COA
         // change made by the same transaction.
@@ -5508,7 +5641,8 @@ class Invariants_test : public beast::unit_test::Suite
             confidential,
             [](SLE& issuance, SLE&) { issuance[sfOutstandingAmount] = kMaxMpTokenAmount + 1; },
             {tecINVARIANT_FAILED, tecINVARIANT_FAILED},
-            defaultAmendments() - featureMPTokensV2);
+            defaultAmendments() - featureMPTokensV2,
+            merge);
 
         // With several issuances the result must not depend on which failing
         // issuance is visited first, and a legacy failure (a mismatch or an
@@ -5579,7 +5713,7 @@ class Invariants_test : public beast::unit_test::Suite
                     return true;
                 },
                 XRPAmount{},
-                STTx{ttACCOUNT_SET, [](STObject&) {}},
+                makeTx(convertTx(40), confidentialMpt.issuanceID(), a1.id()),
                 {tecINVARIANT_FAILED, tecINVARIANT_FAILED});
         }
 
