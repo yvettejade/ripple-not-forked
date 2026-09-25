@@ -1,5 +1,7 @@
 #include <test/jtx.h>
+#include <test/jtx/batch.h>
 #include <test/jtx/delegate.h>
+#include <test/jtx/escrow.h>
 #include <test/jtx/mpt.h>
 #include <test/jtx/ticket.h>
 
@@ -27,6 +29,7 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
 #include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -54,6 +57,8 @@ struct ConvertArgs
     Scalar randomness = Scalar::fromUint64(7);
     bool registerKey = true;
     std::optional<std::uint32_t> ticket = std::nullopt;
+    // The sequence the proof is bound to, if not the account's next one.
+    std::optional<std::uint32_t> sequence = std::nullopt;
 };
 
 }  // namespace
@@ -206,7 +211,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             jv[sfAuditorEncryptedAmount.jsonName] =
                 hex(elGamalEncrypt(m, r, issuance.auditor->pub));
         jv[sfBlindingFactor.jsonName] = strHex(r.bytes());
-        std::uint32_t sequence = env.seq(holder);
+        std::uint32_t sequence = args.sequence.value_or(env.seq(holder));
         if (args.ticket)
         {
             jv[jss::Sequence] = 0;
@@ -933,6 +938,147 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         BEAST_EXPECT(decrypts(stored(*sle, sfConfidentialBalanceSpending), key, 150));
     }
 
+    // Funds accumulate across repeated Convert and MergeInbox cycles.
+    void
+    testRepeatedMerges()
+    {
+        testcase("Repeated merges");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Key const key(11);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice);
+        env.close();
+        auto const iss = issue(env, gw, {alice});
+
+        std::uint64_t total = 0;
+        std::uint64_t r = 30;
+        for (std::uint64_t const amount : {100, 50, 0, 25})
+        {
+            env(convertJV(
+                env,
+                alice,
+                key,
+                iss,
+                {.amount = amount,
+                 .randomness = Scalar::fromUint64(r++),
+                 .registerKey = total == 0 && amount == 100}));
+            env(mergeJV(env, alice, iss.id));
+            env.close();
+            total += amount;
+            auto const sle = env.le(keylet::mptoken(iss.id, alice));
+            if (!BEAST_EXPECT(sle))
+                return;
+            BEAST_EXPECT(decrypts(stored(*sle, sfConfidentialBalanceSpending), key, total));
+            BEAST_EXPECT(decrypts(stored(*sle, sfConfidentialBalanceInbox), key, 0));
+            BEAST_EXPECT(decrypts(stored(*sle, sfIssuerEncryptedBalance), iss.issuer, total));
+            BEAST_EXPECT((*sle)[sfMPTAmount] == 1'000 - total);
+        }
+        auto const sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && (*sle)[sfConfidentialBalanceVersion] == 4);
+    }
+
+    // Escrowed tokens are not part of the public balance Convert draws on.
+    void
+    testConvertEscrowed()
+    {
+        testcase("Convert with escrowed tokens");
+        using namespace jtx;
+        using namespace std::chrono;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Key const key(11);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob);
+        env.close();
+        auto const iss = issue(env, gw, {alice}, tfMPTCanHoldConfidentialBalance | tfMPTCanEscrow);
+        MPT const mpt("MPT", iss.id);
+        env(escrow::create(alice, bob, mpt(600)),
+            escrow::kCondition(escrow::kCb1),
+            escrow::kFinishTime(env.now() + 100s),
+            Fee(env.current()->fees().base * 150));
+        env.close();
+        auto sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && (*sle)[sfMPTAmount] == 400 && (*sle)[~sfLockedAmount] == 600);
+
+        env(convertJV(env, alice, key, iss, {.amount = 401}), Ter(tecINSUFFICIENT_FUNDS));
+        env(convertJV(env, alice, key, iss, {.amount = 400}));
+        env.close();
+        sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && (*sle)[sfMPTAmount] == 0 && (*sle)[~sfLockedAmount] == 600);
+        BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceInbox), key, 400));
+    }
+
+    // Inner Batch transactions pay their ten base fees in the outer fee, bind
+    // their proofs to their own sequence and roll back with the batch.
+    void
+    testBatch()
+    {
+        testcase("Batch");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Key const key(11);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice);
+        env.close();
+        auto const iss = issue(env, gw, {alice});
+        auto const base = env.current()->fees().base;
+        auto const batchFee = base * 2 + base * 10 * 2;
+
+        auto seq = env.seq(alice);
+        env(batch::outer(alice, seq, batchFee, tfAllOrNothing),
+            batch::Inner(convertJV(env, alice, key, iss, {.sequence = seq + 1}), seq + 1),
+            batch::Inner(mergeJV(env, alice, iss.id), seq + 2));
+        env.close();
+        auto sle = env.le(keylet::mptoken(iss.id, alice));
+        if (!BEAST_EXPECT(sle))
+            return;
+        BEAST_EXPECT((*sle)[sfMPTAmount] == 900);
+        BEAST_EXPECT((*sle)[sfConfidentialBalanceVersion] == 1);
+        BEAST_EXPECT(decrypts(stored(*sle, sfConfidentialBalanceSpending), key, 100));
+
+        // A doApply failure (a cancelled inbox C1) rolls the whole batch back.
+        auto const r0 = encryptedZeroRandomness(alice.id(), iss.id);
+        auto const inbox = sle->getFieldVL(sfConfidentialBalanceInbox);
+        seq = env.seq(alice);
+        env(batch::outer(alice, seq, batchFee, tfAllOrNothing),
+            batch::Inner(
+                convertJV(
+                    env,
+                    alice,
+                    key,
+                    iss,
+                    {.amount = 10, .randomness = -r0, .registerKey = false, .sequence = seq + 1}),
+                seq + 1),
+            batch::Inner(mergeJV(env, alice, iss.id), seq + 2));
+        env.close();
+        sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && (*sle)[sfMPTAmount] == 900);
+        BEAST_EXPECT(sle && (*sle)[sfConfidentialBalanceVersion] == 1);
+        BEAST_EXPECT(sle && sle->getFieldVL(sfConfidentialBalanceInbox) == inbox);
+        BEAST_EXPECT(env.seq(alice) == seq + 1);
+
+        // The outer fee must cover each inner transaction's ten base fees.
+        // The underpaying transaction is held for the next ledger, so this
+        // comes last.
+        seq = env.seq(alice);
+        env(batch::outer(alice, seq, batchFee - XRPAmount{1}, tfAllOrNothing),
+            batch::Inner(
+                convertJV(env, alice, key, iss, {.registerKey = false, .sequence = seq + 1}),
+                seq + 1),
+            batch::Inner(mergeJV(env, alice, iss.id), seq + 2),
+            Ter(telINSUF_FEE_P));
+    }
+
     // Each multisigner adds one base fee to the ten base fees.
     void
     testMultisignFee()
@@ -1005,6 +1151,9 @@ public:
         testIdentityResults();
         testMergeInbox();
         testMergeInboxAudited();
+        testRepeatedMerges();
+        testConvertEscrowed();
+        testBatch();
         testDelegation();
         testMultisignFee();
         testTransactionInvariants();

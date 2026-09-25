@@ -95,7 +95,8 @@ isInitialized(SLE const& mptoken)
     return mptoken.isFieldPresent(sfHolderEncryptionKey) &&
         mptoken.isFieldPresent(sfConfidentialBalanceSpending) &&
         mptoken.isFieldPresent(sfConfidentialBalanceInbox) &&
-        mptoken.isFieldPresent(sfIssuerEncryptedBalance);
+        mptoken.isFieldPresent(sfIssuerEncryptedBalance) &&
+        mptoken.isFieldPresent(sfConfidentialBalanceVersion);
 }
 
 TER

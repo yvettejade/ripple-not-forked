@@ -55,7 +55,7 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
     if (auto const ter = requireAuth(ctx.view, MPTIssue{id}, account); !isTesSuccess(ter))
         return ter;
 
-    if (mptoken->isFlag(lsfMPTLocked) || issuance->isFlag(lsfMPTLocked))
+    if (isFrozen(ctx.view, account, MPTIssue{id}))
         return tecLOCKED;
 
     return tesSUCCESS;

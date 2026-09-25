@@ -54,7 +54,9 @@ struct IssuanceKeys
 [[nodiscard]] std::optional<IssuanceKeys>
 issuanceKeys(SLE const& issuance);
 
-/** True if the MPToken has a holder key and all initialized balances. */
+/** True if the MPToken has a holder key, the holder and issuer balances and
+    a version.
+*/
 [[nodiscard]] bool
 isInitialized(SLE const& mptoken);
 
