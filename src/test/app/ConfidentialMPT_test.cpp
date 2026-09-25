@@ -592,6 +592,8 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         // The holder needs the public balance.
         env(convertJV(env, alice, key, iss, {.amount = 901, .registerKey = false}),
             Ter(tecINSUFFICIENT_FUNDS));
+        // Section 7.3.2 lists the funds check before the duplicate key.
+        env(convertJV(env, alice, key, iss, {.amount = 901}), Ter(tecINSUFFICIENT_FUNDS));
 
         // The disclosed blinding factor must reproduce every ciphertext.
         for (SF_VL const* field : {&sfHolderEncryptedAmount, &sfIssuerEncryptedAmount})
@@ -1649,6 +1651,23 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             // Nothing is left to convert back.
             env(convertBackJV(env, alice, key, iss, {.amount = 1, .balance = 0}),
                 Ter(tecBAD_PROOF));
+        }
+
+        // The version wraps from 2^32 - 1 to 0, and the proof binds 2^32 - 1.
+        // The open-ledger edit is lost at the next close, so this comes last.
+        {
+            Env env{*this};
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            auto const iss = issue(env, gw, {alice, bob});
+            fundConfidential(env, alice, bob, key, iss);
+            modifyEntry(env, keylet::mptoken(iss.id, alice), [](SLE& sle) {
+                sle.setFieldU32(sfConfidentialBalanceVersion, 0xFFFF'FFFF);
+            });
+            env(convertBackJV(env, alice, key, iss));
+            auto const sle = env.le(keylet::mptoken(iss.id, alice));
+            BEAST_EXPECT(sle && (*sle)[sfConfidentialBalanceVersion] == 0);
+            BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceSpending), key, 60));
         }
     }
 
