@@ -218,8 +218,12 @@ MPTokenIssuanceSet::checkPermission(ReadView const& view, STTx const& tx)
     if ((tx.getFlags() & tfMPTokenIssuanceSetMask) != 0u)
         return terNO_DELEGATE_PERMISSION;  // LCOV_EXCL_LINE
 
-    // Granular permissions only cover locking; enabling confidential balances
-    // or registering encryption keys needs the full transaction permission.
+    // The granular permissions name only locking, so enabling confidential
+    // balances or registering encryption keys needs the full transaction
+    // permission. The pre-existing path below still accepts the other
+    // mutations (MutableFlags, TransferFee, MPTokenMetadata, DomainID) from any
+    // delegate; closing that changes non-XLS-0096 behaviour and needs its own
+    // amendment.
     if (isConfidentialChange(tx))
         return terNO_DELEGATE_PERMISSION;
 
