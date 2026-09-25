@@ -170,6 +170,8 @@ public:
         return p.value_or(Point{});
     }
 
+    // Proof scalars must be canonical and, like every transmitted proof
+    // scalar in this protocol, non-zero.
     Scalar
     scalar()
     {
@@ -180,7 +182,7 @@ public:
         }
         auto s = Scalar::fromBytes(Slice(in_.data(), kScalarLength));
         in_ += kScalarLength;
-        if (!s)
+        if (!s || s->isZero())
             ok_ = false;
         return s.value_or(Scalar{});
     }
@@ -203,6 +205,34 @@ struct Proof
 // Honest provers hit an invalid transcript with probability about 2^-250.
 constexpr int kMaxProverAttempts = 8;
 
+// Σ k_i·P_i for secret k_i in constant time: every term is multiplied as
+// (k_i + m_i)·P_i - m_i·P_i with a fresh mask m_i, so zero and one
+// coefficients (the bits of a_L) cost the same as any other.
+Point
+maskedSum(std::span<Scalar const> scalars, std::span<Point const> points, HedgedNonces& masks)
+{
+    Points terms;
+    terms.reserve(2 * scalars.size());
+    for (std::size_t i = 0; i < scalars.size(); ++i)
+    {
+        auto const m = masks.next();
+        terms.push_back(mulSecret(scalars[i] + m, points[i]));
+        terms.push_back(-mulSecret(m, points[i]));
+    }
+    return sumPoints(terms);
+}
+
+// Σ k_i·P_i for secret k_i that are non-zero with overwhelming probability.
+Point
+secretSum(std::span<Scalar const> scalars, std::span<Point const> points)
+{
+    Points terms;
+    terms.reserve(scalars.size());
+    for (std::size_t i = 0; i < scalars.size(); ++i)
+        terms.push_back(mulSecret(scalars[i], points[i]));
+    return sumPoints(terms);
+}
+
 std::optional<Buffer>
 tryProve(
     std::span<std::uint64_t const> values,
@@ -219,37 +249,41 @@ tryProve(
     auto const one = Scalar::fromUint64(1);
 
     Transcript transcript(contextID, commitments);
+    HedgedNonces nonces(
+        "CMPT_BULLETPROOF",
+        {Scalar::fromUint64(values[0]),
+         blindings[0],
+         m > 1 ? Scalar::fromUint64(values[1]) : Scalar{},
+         m > 1 ? blindings[1] : Scalar{}},
+        contextID);
 
     // (41)-(47): commit to the bits a_L, a_R = a_L - 1 and blinding vectors.
+    // The bit value is folded into scalars with arithmetic, not branches.
     Scalars aL(n);
     Scalars aR(n);
     for (std::size_t i = 0; i < n; ++i)
     {
-        bool const bit = ((values[i / kRangeProofBits] >> (i % kRangeProofBits)) & 1) != 0;
-        aL[i] = bit ? one : Scalar{};
+        auto const bit = (values[i / kRangeProofBits] >> (i % kRangeProofBits)) & 1;
+        aL[i] = Scalar::fromUint64(bit);
         aR[i] = aL[i] - one;
     }
     Scalars sL(n);
     Scalars sR(n);
     for (std::size_t i = 0; i < n; ++i)
     {
-        sL[i] = Scalar::random();
-        sR[i] = Scalar::random();
+        sL[i] = nonces.next();
+        sR[i] = nonces.next();
     }
-    auto const alpha = Scalar::random();
-    auto const rho = Scalar::random();
+    auto const alpha = nonces.next();
+    auto const rho = nonces.next();
 
-    auto commit = [&](Scalar const& blind, Scalars const& left, Scalars const& right) {
-        Scalars sc{blind};
-        Points pt{h};
-        sc.insert(sc.end(), left.begin(), left.end());
-        pt.insert(pt.end(), gs.begin(), gs.end());
-        sc.insert(sc.end(), right.begin(), right.end());
-        pt.insert(pt.end(), hs.begin(), hs.end());
-        return multiScalarMul(sc, pt);
-    };
-    auto const bigA = commit(alpha, aL, aR);
-    auto const bigS = commit(rho, sL, sR);
+    // A = alpha·H + <a_L, G> + <a_R, H_vec> = alpha·H - Σ H_i + Σ a_L,i·(G_i + H_i)
+    // because a_R = a_L - 1.
+    Points gh(n);
+    for (std::size_t i = 0; i < n; ++i)
+        gh[i] = gs[i] + hs[i];
+    auto const bigA = mulSecret(alpha, h) - sumPoints(hs) + maskedSum(aL, gh, nonces);
+    auto const bigS = mulSecret(rho, h) + secretSum(sL, gs) + secretSum(sR, hs);
     transcript.append(bigA);
     transcript.append(bigS);
     auto const y = transcript.challenge();
@@ -274,10 +308,10 @@ tryProve(
     auto const t2 = inner(sL, r1);
 
     // (52)-(56)
-    auto const tau1 = Scalar::random();
-    auto const tau2 = Scalar::random();
-    auto const bigT1 = pedersenCommit(t1, tau1);
-    auto const bigT2 = pedersenCommit(t2, tau2);
+    auto const tau1 = nonces.next();
+    auto const tau2 = nonces.next();
+    auto const bigT1 = mulGenerator(t1) + mulSecret(tau1, h);
+    auto const bigT2 = mulGenerator(t2) + mulSecret(tau2, h);
     transcript.append(bigT1);
     transcript.append(bigT2);
     auto const x = transcript.challenge();
@@ -335,13 +369,7 @@ tryProve(
                         std::span<Scalar const> bv,
                         std::span<Point const> hv,
                         Scalar const& c) {
-            Scalars sc(av.begin(), av.end());
-            Points pt(gv.begin(), gv.end());
-            sc.insert(sc.end(), bv.begin(), bv.end());
-            pt.insert(pt.end(), hv.begin(), hv.end());
-            sc.push_back(c);
-            pt.push_back(u);
-            return multiScalarMul(sc, pt);
+            return secretSum(av, gv) + secretSum(bv, hv) + mulSecret(c, u);
         };
         auto const bigL = side(lo(a), hi(g), hi(b), lo(hPrime), cL);
         auto const bigR = side(hi(a), lo(g), lo(b), hi(hPrime), cR);
@@ -382,6 +410,8 @@ tryProve(
         if (ls[j].isInfinity() || rs[j].isInfinity())
             return std::nullopt;  // LCOV_EXCL_LINE
     }
+    if (taux.isZero() || mu.isZero() || that.isZero() || a[0].isZero() || b[0].isZero())
+        return std::nullopt;  // LCOV_EXCL_LINE
 
     Writer w(rangeProofLength(m));
     w.put(bigA);

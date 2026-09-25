@@ -23,11 +23,21 @@
     - Serialization in message order: A, S, T1, T2, tau_x, mu, t_hat,
       L_1, R_1, ..., L_k, R_k, a, b.
 
-    The prover is intended for tests and client tooling.
+    Every transmitted scalar must be canonical and non-zero, and no
+    commitment may be the point at infinity (it has no encoding): wallets
+    must pick blinding factors so that, e.g., PC_b - PC_m in a Send is never
+    the identity.
+
+    The prover is intended for tests and client tooling; it uses hedged
+    nonces and constant-time multiplication for secret scalars.
 */
 namespace xrpl::confidential {
 
 inline constexpr std::size_t kRangeProofBits = 64;
+
+static_assert(
+    (kMaxBulletproofBits & (kMaxBulletproofBits - 1)) == 0,
+    "the inner-product argument halves the vectors each round");
 
 /** Most commitments one proof covers; the generators support 64·2 bits. */
 inline constexpr std::size_t kMaxRangeProofValues = kMaxBulletproofBits / kRangeProofBits;

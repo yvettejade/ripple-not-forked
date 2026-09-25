@@ -385,6 +385,58 @@ multiScalarMul(std::span<Scalar const> scalars, std::span<Point const> points)
     return result;
 }
 
+Point
+sumPoints(std::span<Point const> points)
+{
+    std::vector<secp256k1_pubkey const*> ins;
+    ins.reserve(points.size());
+    for (auto const& p : points)
+    {
+        if (!p.infinity_)
+            ins.push_back(&p.pk_);
+    }
+    Point result;
+    if (!ins.empty() &&
+        secp256k1_ec_pubkey_combine(secp256k1Context(), &result.pk_, ins.data(), ins.size()) == 1)
+        result.infinity_ = false;
+    return result;
+}
+
+HedgedNonces::HedgedNonces(
+    std::string_view tag,
+    std::initializer_list<Scalar> secrets,
+    uint256 const& contextID)
+{
+    seed_.assign(tag.begin(), tag.end());
+    for (auto const& secret : secrets)
+        seed_.insert(seed_.end(), secret.bytes().begin(), secret.bytes().end());
+    seed_.insert(seed_.end(), contextID.begin(), contextID.end());
+    std::array<std::uint8_t, 32> entropy{};
+    cryptoPrng()(entropy.data(), entropy.size());
+    seed_.insert(seed_.end(), entropy.begin(), entropy.end());
+    secureErase(entropy.data(), entropy.size());
+}
+
+HedgedNonces::~HedgedNonces()
+{
+    secureErase(seed_.data(), seed_.size());
+}
+
+Scalar
+HedgedNonces::next()
+{
+    for (;;)
+    {
+        std::vector<std::uint8_t> ctr;
+        appendU32(ctr, counter_++);
+        auto digest = sha256({makeSlice(seed_), makeSlice(ctr)});
+        auto const k = Scalar::fromDigest(digest);
+        secureErase(digest.data(), digest.size());
+        if (!k.isZero())
+            return k;
+    }
+}
+
 std::array<std::uint8_t, kScalarLength>
 sha256(std::initializer_list<Slice> parts)
 {

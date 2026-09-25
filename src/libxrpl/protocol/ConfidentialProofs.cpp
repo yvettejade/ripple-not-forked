@@ -4,8 +4,6 @@
 #include <xrpl/basics/Slice.h>
 #include <xrpl/basics/base_uint.h>
 #include <xrpl/basics/contract.h>
-#include <xrpl/crypto/csprng.h>
-#include <xrpl/crypto/secure_erase.h>
 #include <xrpl/protocol/ConfidentialCrypto.h>
 #include <xrpl/protocol/digest.h>
 
@@ -149,59 +147,6 @@ encodable(Point const& p)
     return !p.isInfinity();
 }
 
-// Hedged nonces: SHA-256 over the tag, the witness, the context and fresh
-// randomness, so a weak or repeated RNG output alone never repeats a nonce
-// for different statements and a correct RNG alone suffices otherwise.
-class NonceSource
-{
-    std::vector<std::uint8_t> seed_;
-    std::uint32_t counter_ = 0;
-
-public:
-    NonceSource(
-        std::string_view tag,
-        std::initializer_list<Scalar const*> secrets,
-        uint256 const& contextID)
-    {
-        seed_.assign(tag.begin(), tag.end());
-        for (auto const* secret : secrets)
-            seed_.insert(seed_.end(), secret->bytes().begin(), secret->bytes().end());
-        seed_.insert(seed_.end(), contextID.begin(), contextID.end());
-        std::array<std::uint8_t, 32> entropy{};
-        cryptoPrng()(entropy.data(), entropy.size());
-        seed_.insert(seed_.end(), entropy.begin(), entropy.end());
-        secureErase(entropy.data(), entropy.size());
-    }
-
-    NonceSource(NonceSource const&) = delete;
-    NonceSource&
-    operator=(NonceSource const&) = delete;
-
-    ~NonceSource()
-    {
-        secureErase(seed_.data(), seed_.size());
-    }
-
-    Scalar
-    next()
-    {
-        for (;;)
-        {
-            std::array<std::uint8_t, 4> const ctr{
-                static_cast<std::uint8_t>(counter_ >> 24),
-                static_cast<std::uint8_t>(counter_ >> 16),
-                static_cast<std::uint8_t>(counter_ >> 8),
-                static_cast<std::uint8_t>(counter_)};
-            ++counter_;
-            auto digest = sha256({makeSlice(seed_), makeSlice(ctr)});
-            auto const k = Scalar::fromDigest(digest);
-            secureErase(digest.data(), digest.size());
-            if (!k.isZero())
-                return k;
-        }
-    }
-};
-
 Challenge&
 addSendStatement(Challenge& c, SendStatement const& s)
 {
@@ -228,7 +173,7 @@ proveKnowledge(Scalar const& secretKey, uint256 const& contextID)
 {
     require(!secretKey.isZero(), "secret key is zero");
     auto const pk = mulGenerator(secretKey);
-    NonceSource nonces("CMPT_POK_SK_REGISTER", {&secretKey}, contextID);
+    HedgedNonces nonces("CMPT_POK_SK_REGISTER", {secretKey}, contextID);
     for (int attempt = 0; attempt < kMaxProverAttempts; ++attempt)
     {
         auto const k = nonces.next();
@@ -273,9 +218,9 @@ proveSend(SendStatement const& statement, SendWitness const& w, uint256 const& c
         "statement point is the identity");
 
     auto const& h = pedersenGenerator();
-    NonceSource nonces(
+    HedgedNonces nonces(
         "CMPT_SEND_SIGMA",
-        {&w.amount, &w.randomness, &w.balance, &w.balanceBlinding, &w.secretKey},
+        {w.amount, w.randomness, w.balance, w.balanceBlinding, w.secretKey},
         contextID);
     for (int attempt = 0; attempt < kMaxProverAttempts; ++attempt)
     {
@@ -360,8 +305,7 @@ proveBalance(
         "statement point is the identity");
 
     auto const& h = pedersenGenerator();
-    NonceSource nonces(
-        "CMPT_CONVERTBACK_SIGMA", {&balance, &balanceBlinding, &secretKey}, contextID);
+    HedgedNonces nonces("CMPT_CONVERTBACK_SIGMA", {balance, balanceBlinding, secretKey}, contextID);
     for (int attempt = 0; attempt < kMaxProverAttempts; ++attempt)
     {
         auto const ab = nonces.next();
@@ -421,7 +365,7 @@ proveClawback(
         encodable(issuerKey) && encodable(mirror.c1) && encodable(mirror.c2) && encodable(mG),
         "statement point is the identity");
 
-    NonceSource nonces("CMPT_CLAWBACK_SIGMA", {&issuerSecretKey, &amount}, contextID);
+    HedgedNonces nonces("CMPT_CLAWBACK_SIGMA", {issuerSecretKey, amount}, contextID);
     for (int attempt = 0; attempt < kMaxProverAttempts; ++attempt)
     {
         auto const a = nonces.next();

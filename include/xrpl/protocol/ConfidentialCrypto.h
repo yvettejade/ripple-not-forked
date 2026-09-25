@@ -14,6 +14,8 @@
 #include <initializer_list>
 #include <optional>
 #include <span>
+#include <string_view>
+#include <vector>
 
 /** secp256k1 group primitives and EC-ElGamal encryption for XLS-0096
     Confidential MPTs.
@@ -169,7 +171,14 @@ public:
 
     friend Point
     multiScalarMul(std::span<Scalar const> scalars, std::span<Point const> points);
+
+    friend Point
+    sumPoints(std::span<Point const> points);
 };
+
+/** The sum of the points, computed in one pass. */
+[[nodiscard]] Point
+sumPoints(std::span<Point const> points);
 
 /** Σ scalars[i]·points[i]; the empty sum is the point at infinity.
 
@@ -177,6 +186,33 @@ public:
 */
 [[nodiscard]] Point
 multiScalarMul(std::span<Scalar const> scalars, std::span<Point const> points);
+
+/** Hedged prover nonces: SHA-256(tag || secrets || context || entropy ||
+    u32be(counter)) mod n with 32 bytes of fresh CSPRNG entropy, skipping
+    zero. Nonces stay unique if either the RNG or the witness differs, and
+    the seed is wiped on destruction.
+*/
+class HedgedNonces
+{
+    std::vector<std::uint8_t> seed_;
+    std::uint32_t counter_ = 0;
+
+public:
+    HedgedNonces(
+        std::string_view tag,
+        std::initializer_list<Scalar> secrets,
+        uint256 const& contextID);
+
+    HedgedNonces(HedgedNonces const&) = delete;
+
+    HedgedNonces&
+    operator=(HedgedNonces const&) = delete;
+
+    ~HedgedNonces();
+
+    [[nodiscard]] Scalar
+    next();
+};
 
 /** SHA-256 of the concatenation of the given byte strings. */
 [[nodiscard]] std::array<std::uint8_t, kScalarLength>
