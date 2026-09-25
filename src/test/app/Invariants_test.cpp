@@ -5158,6 +5158,57 @@ class Invariants_test : public beast::unit_test::Suite
             confidential,
             seedHolder);
 
+        // Once the issuance is gone, the holder may delete the MPToken with
+        // its confidential state (the section 7.4 deviation in
+        // MPTokenAuthorize).
+        {
+            Env env{*this, defaultAmendments()};
+            Account const a1{"A1"};
+            Account const a2{"A2"};
+            Account const gw{"gw"};
+            env.fund(XRP(1'000), a1, a2, gw);
+            env.close();
+            MPTTester const mpt(
+                {.env = env, .issuer = gw, .holders = {a1}, .pay = 100, .flags = confidential});
+            MPTID const id = mpt.issuanceID();
+            env.app().getOpenLedger().modify([&](OpenView& view, beast::Journal) {
+                Sandbox sb(&view, TapNone);
+                auto issuance = sb.peek(keylet::mptIssuance(id));
+                auto token = sb.peek(keylet::mptoken(id, a1));
+                if (!issuance || !token)
+                    return false;
+                initialize(*token);
+                token->setFieldU32(sfConfidentialBalanceVersion, 3);
+                (*token)[sfMPTAmount] = 0;
+                sb.update(token);
+                sb.erase(issuance);
+                sb.apply(view);
+                return true;
+            });
+            BEAST_EXPECT(!env.le(keylet::mptIssuance(id)));
+            doInvariantCheck(
+                std::move(env),
+                a1,
+                a2,
+                {},
+                [&](Account const& holder, Account const&, ApplyContext& ac) {
+                    auto sle = ac.view().peek(keylet::mptoken(id, holder.id()));
+                    if (!sle)
+                        return false;
+                    ac.view().erase(sle);
+                    return true;
+                },
+                XRPAmount{},
+                STTx{
+                    ttMPTOKEN_AUTHORIZE,
+                    [&](STObject& tx) {
+                        tx.setAccountID(sfAccount, a1.id());
+                        tx.setFieldH192(sfMPTokenIssuanceID, id);
+                        tx.setFieldU32(sfFlags, tfMPTUnauthorize);
+                    }},
+                {tesSUCCESS, tesSUCCESS});
+        }
+
         // Issuance settings: enabling after creation needs
         // lsmfMPTCanMutateCanHoldConfidentialBalance, and clearing is never
         // allowed.
