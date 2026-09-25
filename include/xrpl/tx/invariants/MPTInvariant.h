@@ -1,7 +1,10 @@
 #pragma once
 
+#include <xrpl/basics/UnorderedContainers.h>
+#include <xrpl/basics/base_uint.h>
 #include <xrpl/beast/utility/Journal.h>
 #include <xrpl/ledger/ReadView.h>
+#include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/protocol/TER.h>
@@ -108,6 +111,14 @@ public:
  *    - ConfidentialBalanceVersion starts at 0 and advances by exactly one;
  *      changing ConfidentialBalanceSpending changes it
  *    - no confidential field is ever removed, including by deleting it
+ *
+ *  Transactions:
+ *    - only successful transactions with MayModifyConfidentialMpt change
+ *      ConfidentialOutstandingAmount or a confidential MPToken field
+ *    - a successful confidential transaction changes OutstandingAmount,
+ *      ConfidentialOutstandingAmount and MPTAmount exactly as its type
+ *      prescribes (XLS-0096 §6.5), and changes only its parties' MPTokens,
+ *      each field following the type's state transition
  */
 class ValidConfidentialMPToken
 {
@@ -115,6 +126,25 @@ class ValidConfidentialMPToken
     {
         uint192 issuanceID;
         bool hasAuditorBalance;
+    };
+
+    struct SupplyChange
+    {
+        std::int64_t outstanding = 0;
+        std::int64_t confidentialOutstanding = 0;
+
+        bool
+        operator==(SupplyChange const&) const = default;
+    };
+
+    struct TokenChange
+    {
+        uint192 issuanceID;
+        AccountID account;
+        std::int64_t amount;
+        std::shared_ptr<SLE const> before;
+        // nullptr if the MPToken was deleted.
+        std::shared_ptr<SLE const> after;
     };
 
     bool coaExceedsOutstanding_ = false;
@@ -136,11 +166,34 @@ class ValidConfidentialMPToken
     // MPTokens that hold encrypted balances after the transaction.
     std::vector<EncryptedToken> encryptedTokens_;
 
+    // ConfidentialOutstandingAmount or a confidential MPToken field changed.
+    bool confidentialChanged_ = false;
+    // An amount exceeded kMaxMpTokenAmount, so the changes below are unknown.
+    bool amountOverflow_ = false;
+    // Non-zero OutstandingAmount or ConfidentialOutstandingAmount changes.
+    hash_map<uint192, SupplyChange> supplyChanges_;
+    // MPTokens whose MPTAmount or confidential fields changed.
+    std::vector<TokenChange> tokenChanges_;
+
     void
     visitIssuance(bool isDelete, SLE const* before, SLE const& after);
 
     void
     visitMPToken(bool isDelete, SLE const* before, SLE const& after);
+
+    void
+    recordChanges(
+        std::shared_ptr<SLE const> const& before,
+        std::shared_ptr<SLE const> const& after);
+
+    [[nodiscard]] bool
+    validConfidentialChanges(STTx const& tx, ReadView const& view) const;
+
+    [[nodiscard]] static bool
+    validConvert(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
+
+    [[nodiscard]] static bool
+    validMerge(STTx const& tx, SLE const* before, SLE const& after);
 
 public:
     void
