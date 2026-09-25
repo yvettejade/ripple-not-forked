@@ -163,6 +163,9 @@ public:
         std::initializer_list<Scalar const*> secrets,
         uint256 const& contextID)
     {
+        // Sized up front so no reallocation leaves unwiped copies of the
+        // secrets behind.
+        seed_.reserve(tag.size() + secrets.size() * kScalarLength + 2 * 32);
         seed_.assign(tag.begin(), tag.end());
         for (auto const* secret : secrets)
             seed_.insert(seed_.end(), secret->bytes().begin(), secret->bytes().end());
