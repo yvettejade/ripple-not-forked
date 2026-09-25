@@ -1,6 +1,7 @@
 #include <xrpl/tx/transactors/token/MPTokenIssuanceDestroy.h>
 
 #include <xrpl/ledger/helpers/AccountRootHelpers.h>
+#include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
@@ -37,6 +38,12 @@ MPTokenIssuanceDestroy::preclaim(PreclaimContext const& ctx)
 
     if ((*sleMPT)[~sfLockedAmount].value_or(0) != 0)
         return tecHAS_OBLIGATIONS;  // LCOV_EXCL_LINE
+
+    // Confidential outstanding supply blocks destroy the same way as public
+    // outstanding supply (XLS-0096 §6 / deletion rules).
+    if (ctx.view.rules().enabled(featureConfidentialTransfer) &&
+        (*sleMPT)[sfConfidentialOutstandingAmount] > 0)
+        return tecHAS_OBLIGATIONS;
 
     return tesSUCCESS;
 }

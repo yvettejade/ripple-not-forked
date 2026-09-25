@@ -82,6 +82,19 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
 
                 return tecHAS_OBLIGATIONS;
             }
+
+            // Spec §7.4: once confidential fields are initialized (including
+            // EncZero spending/inbox), the MPToken cannot be deleted even if
+            // public MPTAmount is 0 — EncZero is still an on-ledger obligation.
+            if (ctx.view.rules().enabled(featureConfidentialTransfer) &&
+                (sleMpt->isFieldPresent(sfHolderEncryptionKey) ||
+                 sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
+                 sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
+                 sleMpt->isFieldPresent(sfIssuerEncryptedBalance)))
+            {
+                return tecHAS_OBLIGATIONS;
+            }
+
             if (ctx.view.rules().enabled(featureSingleAssetVault) && sleMpt->isFlag(lsfMPTLocked))
                 return tecNO_PERMISSION;
 
