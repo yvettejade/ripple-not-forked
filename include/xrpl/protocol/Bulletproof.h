@@ -62,12 +62,15 @@ static_assert(kAggregatedRangeProofLength == 754);
 
 /** Prove that pedersenCommit(values[j], blindings[j]) opens to values[j].
 
-    @throws std::invalid_argument unless 1 <= m <= kMaxRangeProofValues and
-            the spans have the same length.
+    The values are secret, so they are Scalars (wiped on destruction) and
+    their bits are only ever combined arithmetically.
+
+    @throws std::invalid_argument unless 1 <= m <= kMaxRangeProofValues, the
+            spans have the same length and every value is below 2^64.
 */
 [[nodiscard]] Buffer
 proveRange(
-    std::span<std::uint64_t const> values,
+    std::span<Scalar const> values,
     std::span<Scalar const> blindings,
     uint256 const& contextID);
 

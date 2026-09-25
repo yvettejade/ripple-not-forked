@@ -6,6 +6,7 @@
 #include <xrpl/basics/contract.h>
 #include <xrpl/protocol/ConfidentialCrypto.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -233,9 +234,25 @@ secretSum(std::span<Scalar const> scalars, std::span<Point const> points)
     return sumPoints(terms);
 }
 
+// Bit i of a value below 2^64, read from its big-endian encoding.
+std::uint8_t
+valueBit(Scalar const& value, std::size_t i)
+{
+    return (value.bytes()[kScalarLength - 1 - i / 8] >> (i % 8)) & 1;
+}
+
+bool
+below2To64(Scalar const& value)
+{
+    std::uint8_t high = 0;
+    for (std::size_t i = 0; i < kScalarLength - sizeof(std::uint64_t); ++i)
+        high |= value.bytes()[i];
+    return high == 0;
+}
+
 std::optional<Buffer>
 tryProve(
-    std::span<std::uint64_t const> values,
+    std::span<Scalar const> values,
     std::span<Scalar const> blindings,
     Points const& commitments,
     uint256 const& contextID)
@@ -251,10 +268,7 @@ tryProve(
     Transcript transcript(contextID, commitments);
     HedgedNonces nonces(
         "CMPT_BULLETPROOF",
-        {Scalar::fromUint64(values[0]),
-         blindings[0],
-         m > 1 ? Scalar::fromUint64(values[1]) : Scalar{},
-         m > 1 ? blindings[1] : Scalar{}},
+        {values[0], blindings[0], m > 1 ? values[1] : Scalar{}, m > 1 ? blindings[1] : Scalar{}},
         contextID);
 
     // (41)-(47): commit to the bits a_L, a_R = a_L - 1 and blinding vectors.
@@ -263,8 +277,7 @@ tryProve(
     Scalars aR(n);
     for (std::size_t i = 0; i < n; ++i)
     {
-        auto const bit = (values[i / kRangeProofBits] >> (i % kRangeProofBits)) & 1;
-        aL[i] = Scalar::fromUint64(bit);
+        aL[i] = Scalar::fromUint64(valueBit(values[i / kRangeProofBits], i % kRangeProofBits));
         aR[i] = aL[i] - one;
     }
     Scalars sL(n);
@@ -435,18 +448,20 @@ tryProve(
 
 Buffer
 proveRange(
-    std::span<std::uint64_t const> values,
+    std::span<Scalar const> values,
     std::span<Scalar const> blindings,
     uint256 const& contextID)
 {
     std::size_t const m = values.size();
     if (m == 0 || m > kMaxRangeProofValues || blindings.size() != m)
         Throw<std::invalid_argument>("confidential: unsupported range proof size");
+    if (!std::ranges::all_of(values, below2To64))
+        Throw<std::invalid_argument>("confidential: range proof value is 2^64 or more");
 
     Points commitments;
     for (std::size_t j = 0; j < m; ++j)
     {
-        commitments.push_back(pedersenCommit(Scalar::fromUint64(values[j]), blindings[j]));
+        commitments.push_back(pedersenCommit(values[j], blindings[j]));
         if (commitments.back().isInfinity())
             Throw<std::invalid_argument>("confidential: commitment is the identity");
     }

@@ -332,7 +332,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             key.secret,
             ctx);
         // Wraps for an overdraft, so the proof opens a different commitment.
-        std::array<std::uint64_t, 1> const remainder{args.balance - args.amount};
+        std::array<Scalar, 1> const remainder{Scalar::fromUint64(args.balance - args.amount)};
         std::array<Scalar, 1> const blinding{args.blinding};
         auto const range = proveRange(remainder, blinding, ctx);
         jv[sfZKProof.jsonName] = strHex(sigma) + strHex(range);
@@ -413,7 +413,7 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
              .secretKey = senderKey.secret},
             ctx);
         // Wraps for an overdraft, so the proof opens a different commitment.
-        std::array<std::uint64_t, 2> const values{args.amount, args.balance - args.amount};
+        std::array<Scalar, 2> const values{m, Scalar::fromUint64(args.balance - args.amount)};
         std::array<Scalar, 2> const blindings{r, args.blinding - r};
         jv[sfZKProof.jsonName] = strHex(sigma) +
             (args.rangeProof ? strHex(*args.rangeProof)

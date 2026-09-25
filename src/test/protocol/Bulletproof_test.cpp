@@ -274,18 +274,25 @@ class Bulletproof_test : public beast::unit_test::Suite
               kMax})
         {
             auto const gamma = Scalar::random();
-            std::vector<std::uint64_t> const values{v};
+            std::vector<Scalar> const values{s(v)};
             std::vector<Scalar> const blindings{gamma};
             auto const proof = proveRange(values, blindings, ctx);
             BEAST_EXPECT(proof.size() == kSingleRangeProofLength);
             BEAST_EXPECTS(verify({pedersenCommit(s(v), gamma)}, proof), std::to_string(v));
         }
 
+        // Both boundaries in both positions.
         for (auto const& [a, b] : std::vector<std::pair<std::uint64_t, std::uint64_t>>{
-                 {0, 0}, {1, kMax}, {kMax, 0}, {123456789, 987654321}})
+                 {0, 0},
+                 {0, kMax},
+                 {kMax, 0},
+                 {kMax, kMax},
+                 {1, kMax},
+                 {kMax - 1, 1},
+                 {123456789, 987654321}})
         {
             std::vector<Scalar> const blindings{Scalar::random(), Scalar::random()};
-            std::vector<std::uint64_t> const values{a, b};
+            std::vector<Scalar> const values{s(a), s(b)};
             auto const proof = proveRange(values, blindings, ctx);
             BEAST_EXPECT(proof.size() == kAggregatedRangeProofLength);
             BEAST_EXPECT(verify(
@@ -333,8 +340,23 @@ class Bulletproof_test : public beast::unit_test::Suite
         BEAST_EXPECT(!verify({a0}, makeSlice(aggregated)));
         BEAST_EXPECT(!verify({a0, a1}, makeSlice(aggregated), otherCtx));
 
+        // An identity commitment has no encoding, so no proof covers it.
+        BEAST_EXPECT(!verify({Point{}, a1}, makeSlice(aggregated)));
+        BEAST_EXPECT(!verify({a0, Point{}}, makeSlice(aggregated)));
+        BEAST_EXPECT(!verify({Point{}, Point{}}, makeSlice(aggregated)));
+        // Nor does it transfer to the same commitment twice, or to either
+        // commitment on its own with the single-value proof length.
+        BEAST_EXPECT(!verify({a0, a0}, makeSlice(aggregated)));
+        BEAST_EXPECT(!verify({a1, a1}, makeSlice(aggregated)));
+        BEAST_EXPECT(!verify({a1}, makeSlice(aggregated)));
+        BEAST_EXPECT(!verify({a0}, Slice(aggregated.data(), kSingleRangeProofLength)));
+        BEAST_EXPECT(!verify({a0, a1}, makeSlice(single)));
+        // The second value 2^64 - 1 is at the boundary: shifted to -1 it is
+        // out of range (one more, 2^64, is checked above).
+        BEAST_EXPECT(!verify({a0, a1 - twoTo64 * g}, makeSlice(aggregated)));
+
         // An honest proof of one value does not transfer to another.
-        std::vector<std::uint64_t> const values{7};
+        std::vector<Scalar> const values{s(7)};
         std::vector<Scalar> const blindings{s(99)};
         auto const proof = proveRange(values, blindings, ctx);
         BEAST_EXPECT(verify({pedersenCommit(s(7), s(99))}, proof));
@@ -425,18 +447,33 @@ class Bulletproof_test : public beast::unit_test::Suite
         testcase("Prover arguments");
 
         auto const ctx = context();
-        std::vector<std::uint64_t> const none;
+        std::vector<Scalar> const none;
         std::vector<Scalar> const noBlind;
         BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(none, noBlind, ctx); }));
-        std::vector<std::uint64_t> const three{1, 2, 3};
+        std::vector<Scalar> const three{s(1), s(2), s(3)};
         std::vector<Scalar> const threeBlind{s(1), s(2), s(3)};
         BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(three, threeBlind, ctx); }));
-        std::vector<std::uint64_t> const two{1, 2};
+        std::vector<Scalar> const two{s(1), s(2)};
         std::vector<Scalar> const oneBlind{s(1)};
         BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(two, oneBlind, ctx); }));
-        std::vector<std::uint64_t> const zero{0};
+        std::vector<Scalar> const zero{Scalar{}};
         std::vector<Scalar> const zeroBlind{Scalar{}};
         BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(zero, zeroBlind, ctx); }));
+
+        // Values of 2^64 and above have no proof, in either position.
+        auto const twoTo64 = s(kMax) + s(1);
+        auto const top = -s(1);
+        for (auto const& big : {twoTo64, top})
+        {
+            std::vector<Scalar> const one{big};
+            std::vector<Scalar> const oneBlinding{s(5)};
+            BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(one, oneBlinding, ctx); }));
+            std::vector<Scalar> const first{big, s(1)};
+            std::vector<Scalar> const second{s(1), big};
+            std::vector<Scalar> const twoBlindings{s(5), s(6)};
+            BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(first, twoBlindings, ctx); }));
+            BEAST_EXPECT(throwsInvalid([&] { (void)proveRange(second, twoBlindings, ctx); }));
+        }
     }
 
     void
