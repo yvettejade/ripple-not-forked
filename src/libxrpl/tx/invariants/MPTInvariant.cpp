@@ -544,12 +544,10 @@ ValidConfidentialMPToken::validDebit(
     SF_VL const& holderAmount)
 {
     using namespace confidential;
-    if (!before)
-        return false;
-    auto const key = pointField(*before, sfHolderEncryptionKey);
+    auto const key = before ? pointField(*before, sfHolderEncryptionKey) : std::optional<Point>{};
     auto const issuerKey = pointField(issuance, sfIssuerEncryptionKey);
     auto const auditorKey = pointField(issuance, sfAuditorEncryptionKey);
-    auto const version = (*before)[~sfConfidentialBalanceVersion];
+    auto const version = before ? (*before)[~sfConfidentialBalanceVersion] : std::nullopt;
     if (!key || !issuerKey || !version)
         return false;
     auto const debited = [&](SF_VL const& balance, SF_VL const& amount, Point const& pk) {

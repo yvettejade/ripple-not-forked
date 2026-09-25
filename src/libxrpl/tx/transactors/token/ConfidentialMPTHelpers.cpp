@@ -63,7 +63,12 @@ sendChallenge(STTx const& tx)
     auto const proof = tx.getFieldVL(sfZKProof);
     if (proof.size() < kScalarLength)
         return std::nullopt;
-    return Scalar::fromBytes(Slice(proof.data(), kScalarLength));
+    auto e = Scalar::fromBytes(Slice(proof.data(), kScalarLength));
+    // Challenges are non-zero (resolution 2); Enc(0; 0) would re-randomize
+    // nothing.
+    if (e && e->isZero())
+        return std::nullopt;
+    return e;
 }
 
 NotTEC

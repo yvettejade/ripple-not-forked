@@ -13,6 +13,9 @@ public:
     {
     }
 
+    static bool
+    checkExtraFeatures(PreflightContext const& ctx);
+
     static XRPAmount
     calculateBaseFee(ReadView const& view, STTx const& tx);
 

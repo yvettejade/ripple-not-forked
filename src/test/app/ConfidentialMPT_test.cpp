@@ -76,6 +76,11 @@ struct SendArgs
     Scalar blinding = Scalar::fromUint64(29);
     // The version the proof is bound to, if not the sender's current one.
     std::optional<std::uint32_t> version = std::nullopt;
+    std::optional<std::uint32_t> ticket = std::nullopt;
+    // The sequence the proof is bound to, if not the account's next one.
+    std::optional<std::uint32_t> sequence = std::nullopt;
+    // Range proof bytes to send instead of an honest proof.
+    std::optional<Blob> rangeProof = std::nullopt;
 };
 
 struct ConvertBackArgs
@@ -379,13 +384,15 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
                 elGamalEncrypt(Scalar::fromUint64(1), Scalar::fromUint64(1), senderKey.pub))};
         for (auto const& ct : cts)
             statement.c2.push_back(ct.c2);
+        std::uint32_t sequence = args.sequence.value_or(env.seq(sender));
+        if (args.ticket)
+        {
+            jv[jss::Sequence] = 0;
+            jv[sfTicketSequence.jsonName] = *args.ticket;
+            sequence = *args.ticket;
+        }
         auto const ctx = transactionContextID(
-            ttCONFIDENTIAL_MPT_SEND,
-            sender.id(),
-            issuance.id,
-            env.seq(sender),
-            destination.id(),
-            version);
+            ttCONFIDENTIAL_MPT_SEND, sender.id(), issuance.id, sequence, destination.id(), version);
         auto const sigma = proveSend(
             statement,
             {.amount = m,
@@ -397,8 +404,9 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         // Wraps for an overdraft, so the proof opens a different commitment.
         std::array<std::uint64_t, 2> const values{args.amount, args.balance - args.amount};
         std::array<Scalar, 2> const blindings{r, args.blinding - r};
-        auto const range = proveRange(values, blindings, ctx);
-        jv[sfZKProof.jsonName] = strHex(sigma) + strHex(range);
+        jv[sfZKProof.jsonName] = strHex(sigma) +
+            (args.rangeProof ? strHex(*args.rangeProof)
+                             : strHex(proveRange(values, blindings, ctx)));
         jv[jss::Fee] = confidentialFee(env);
         return jv;
     }
@@ -1865,6 +1873,18 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             Issuance const iss{.id = makeMptID(1, gw)};
             env(sendJV(env, alice, ka, bob, kb, iss), Ter(temDISABLED));
         }
+        // CredentialIDs needs the Credentials amendment.
+        {
+            Env env{*this, testableAmendments() - featureCredentials};
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            auto const iss = issue(env, gw, {alice, bob});
+            fundSendParties(env, alice, bob, iss);
+            env(sendJV(env, alice, ka, bob, kb, iss),
+                credentials::Ids({to_string(uint256{7})}),
+                Ter(temDISABLED));
+            env(sendJV(env, alice, ka, bob, kb, iss));
+        }
 
         Env env{*this};
         env.fund(XRP(10'000), gw, alice, bob);
@@ -1872,9 +1892,10 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         auto const iss = issue(env, gw, {alice, bob});
         fundSendParties(env, alice, bob, iss);
 
-        // Section 8.3.1(2)-(3).
+        // Section 8.3.1(2)-(3), and the issuer cannot receive (section A.10).
         env(sendJV(env, gw, ka, bob, kb, iss), Ter(temMALFORMED));
         env(sendJV(env, alice, ka, alice, ka, iss), Ter(temMALFORMED));
+        env(sendJV(env, alice, ka, gw, kb, iss), Ter(temMALFORMED));
         {
             auto jv = sendJV(env, alice, ka, bob, kb, iss);
             jv[jss::Flags] = tfMPTLock;
@@ -2026,6 +2047,37 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             env(jv, Ter(tecBAD_PROOF));
         }
         {
+            auto jv = sendJV(env, alice, ka, bob, kb, iss);
+            jv[sfBalanceCommitment.jsonName] =
+                strHex(*pedersenCommit(Scalar::fromUint64(100), Scalar::fromUint64(30)).bytes());
+            env(jv, Ter(tecBAD_PROOF));
+        }
+        for (auto const& [field, pk] :
+             {std::pair{&sfSenderEncryptedAmount, ka.pub},
+              std::pair{&sfIssuerEncryptedAmount, iss.issuer.pub}})
+        {
+            // Another amount under the same C1.
+            auto jv = sendJV(env, alice, ka, bob, kb, iss);
+            jv[field->jsonName] =
+                hex(elGamalEncrypt(Scalar::fromUint64(31), Scalar::fromUint64(23), pk));
+            env(jv, Ter(tecBAD_PROOF));
+        }
+        {
+            // PC_b = PC_m makes PC_rem the identity, which no range proof
+            // opens.
+            auto const range = strUnHex(
+                sendJV(env, alice, ka, bob, kb, iss)[sfZKProof.jsonName].asString().substr(384));
+            env(sendJV(
+                    env,
+                    alice,
+                    ka,
+                    bob,
+                    kb,
+                    iss,
+                    {.amount = 100, .blinding = Scalar::fromUint64(23), .rangeProof = range}),
+                Ter(tecBAD_PROOF));
+        }
+        {
             auto const sle = env.le(keylet::mptoken(iss.id, alice));
             if (!BEAST_EXPECT(sle))
                 return;
@@ -2092,6 +2144,8 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
                 env(issuanceSetJV(gw, iss.id, tfMPTLock));
             env.close();
             env(sendJV(env, alice, ka, bob, kb, iss), Ter(terFROZEN));
+            // Before any proof.
+            env(sendJV(env, alice, ka, bob, kb, iss, {.balance = 101}), Ter(terFROZEN));
         }
 
         // Both parties must be authorized.
@@ -2114,6 +2168,95 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             env.close();
             env(sendJV(env, alice, ka, bob, kb, iss));
         }
+    }
+
+    // The auditor policy, ticket binding, and inner Batch Sends.
+    void
+    testSendBinding()
+    {
+        testcase("Send binding");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Key const ka(11);
+        Key const kb(21);
+
+        {
+            Env env{*this};
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            auto const iss = issue(env, gw, {alice, bob}, tfMPTCanHoldConfidentialBalance, true);
+            fundSendParties(env, alice, bob, iss);
+
+            Issuance unaudited = iss;
+            unaudited.auditor.reset();
+            env(sendJV(env, alice, ka, bob, kb, unaudited), Ter(tecNO_PERMISSION));
+            {
+                auto jv = sendJV(env, alice, ka, bob, kb, iss);
+                jv[sfAuditorEncryptedAmount.jsonName] = hex(elGamalEncrypt(
+                    Scalar::fromUint64(31), Scalar::fromUint64(23), iss.auditor->pub));
+                env(jv, Ter(tecBAD_PROOF));
+            }
+
+            std::uint32_t const ticket = env.seq(alice) + 1;
+            env(ticket::create(alice, 2));
+            env.close();
+            {
+                auto jv = sendJV(env, alice, ka, bob, kb, iss, {.ticket = ticket});
+                jv[sfZKProof.jsonName] = sendJV(env, alice, ka, bob, kb, iss)[sfZKProof.jsonName];
+                env(jv, Ter(tecBAD_PROOF));
+            }
+            env(sendJV(env, alice, ka, bob, kb, iss, {.ticket = ticket + 1}));
+            env.close();
+            auto const sle = env.le(keylet::mptoken(iss.id, bob));
+            BEAST_EXPECT(sle && decrypts(stored(*sle, sfConfidentialBalanceInbox), kb, 30));
+        }
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob);
+        env.close();
+        auto const iss = issue(env, gw, {alice, bob});
+        fundSendParties(env, alice, bob, iss);
+        auto const base = env.current()->fees().base;
+        auto const batchFee = base * 2 + base * 10 * 2;
+
+        // The inner Send binds its proofs to its own sequence.
+        auto seq = env.seq(alice);
+        env(batch::outer(alice, seq, batchFee, tfAllOrNothing),
+            batch::Inner(sendJV(env, alice, ka, bob, kb, iss, {.sequence = seq + 1}), seq + 1),
+            batch::Inner(mergeJV(env, alice, iss.id), seq + 2));
+        env.close();
+        auto sle = env.le(keylet::mptoken(iss.id, alice));
+        if (!BEAST_EXPECT(sle))
+            return;
+        BEAST_EXPECT((*sle)[sfConfidentialBalanceVersion] == 3);
+        BEAST_EXPECT(decrypts(stored(*sle, sfConfidentialBalanceSpending), ka, 70));
+        BEAST_EXPECT(decrypts(
+            stored(*env.le(keylet::mptoken(iss.id, bob)), sfConfidentialBalanceInbox), kb, 30));
+
+        // A cancelled sender debit rolls the whole batch back.
+        auto const r0 = encryptedZeroRandomness(alice.id(), iss.id);
+        auto const spendingR = r0 + r0 + Scalar::fromUint64(7) + r0 - Scalar::fromUint64(23);
+        auto const before = sle->getFieldVL(sfConfidentialBalanceSpending);
+        seq = env.seq(alice);
+        env(batch::outer(alice, seq, batchFee, tfAllOrNothing),
+            batch::Inner(
+                sendJV(
+                    env,
+                    alice,
+                    ka,
+                    bob,
+                    kb,
+                    iss,
+                    {.amount = 10, .balance = 70, .randomness = spendingR, .sequence = seq + 1}),
+                seq + 1),
+            batch::Inner(mergeJV(env, alice, iss.id), seq + 2));
+        env.close();
+        sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && sle->getFieldVL(sfConfidentialBalanceSpending) == before);
+        BEAST_EXPECT(env.seq(alice) == seq + 1);
     }
 
     // Section 8.3.2.1: deposit authorization and credentials.
@@ -2180,6 +2323,31 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
                 .asString();
         for (int i = 0; i < 5; ++i)
             env.close();
+        // An expired credential of an unauthorized type fails authorization
+        // first: tecNO_PERMISSION, and it is not removed (section
+        // 8.3.2.1(4)).
+        std::string const otherType = "AML";
+        {
+            auto jv = credentials::create(alice, carol, otherType);
+            jv[sfExpiration.jsonName] =
+                env.current()->header().parentCloseTime.time_since_epoch().count() + 20;
+            env(jv);
+        }
+        env.close();
+        env(credentials::accept(alice, carol, otherType));
+        env.close();
+        auto const otherIdx =
+            credentials::ledgerEntry(env, alice, carol, otherType)[jss::result][jss::index]
+                .asString();
+        for (int i = 0; i < 5; ++i)
+            env.close();
+        env(sendJV(env, alice, ka, bob, kb, iss, {.balance = 40}),
+            credentials::Ids({otherIdx}),
+            Ter(tecNO_PERMISSION));
+        env.close();
+        BEAST_EXPECT(env.le(credentials::keylet(alice, carol, otherType)));
+
+        // An expired credential of the authorized type is removed.
         env(sendJV(env, alice, ka, bob, kb, iss, {.balance = 40}),
             credentials::Ids({expiredIdx}),
             Ter(tecEXPIRED));
@@ -2432,6 +2600,7 @@ public:
         testSendApply();
         testSendIdentity();
         testSendDelegation();
+        testSendBinding();
         testTransactionInvariants();
     }
 };

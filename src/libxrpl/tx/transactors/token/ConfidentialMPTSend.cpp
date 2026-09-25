@@ -8,6 +8,7 @@
 #include <xrpl/protocol/Bulletproof.h>
 #include <xrpl/protocol/ConfidentialCrypto.h>
 #include <xrpl/protocol/ConfidentialProofs.h>
+#include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/MPTIssue.h>
@@ -22,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace xrpl {
@@ -50,12 +52,21 @@ ConfidentialMPTSend::calculateBaseFee(ReadView const& view, STTx const& tx)
     return cm::baseFee(view, tx);
 }
 
+bool
+ConfidentialMPTSend::checkExtraFeatures(PreflightContext const& ctx)
+{
+    return !ctx.tx.isFieldPresent(sfCredentialIDs) || ctx.rules.enabled(featureCredentials);
+}
+
 NotTEC
 ConfidentialMPTSend::preflight(PreflightContext const& ctx)
 {
     auto const& tx = ctx.tx;
 
-    if (MPTIssue{tx[sfMPTokenIssuanceID]}.getIssuer() == tx[sfAccount] ||
+    // XLS-0096 section 8.3.1(2)-(3); section A.10 also rules out the issuer
+    // as a destination, since it cannot hold confidential balances.
+    auto const issuer = MPTIssue{tx[sfMPTokenIssuanceID]}.getIssuer();
+    if (issuer == tx[sfAccount] || issuer == tx[sfDestination] ||
         tx[sfAccount] == tx[sfDestination])
         return temMALFORMED;
 
@@ -74,8 +85,8 @@ ConfidentialMPTSend::preflight(PreflightContext const& ctx)
 
     // The relation (eq. 19) has one C1 = r·G shared by every recipient
     // (resolution 17).
-    auto const c1 = cm::ciphertext(tx, sfSenderEncryptedAmount)->c1;
-    for (auto const* field : kAmountFields)
+    auto const c1 = cm::ciphertext(tx, *kAmountFields.front())->c1;
+    for (auto const* field : std::span(kAmountFields).subspan(1))
     {
         if (tx.isFieldPresent(*field) && cm::ciphertext(tx, *field)->c1 != c1)
             return temBAD_CIPHERTEXT;
@@ -131,6 +142,21 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     if (auto const err = credentials::valid(tx, ctx.view, account, ctx.j); !isTesSuccess(err))
         return err;
 
+    // Section 8.3.2.1: deposit authorization is decided here, before any
+    // proof and without removing expired credentials; doApply removes those
+    // (tecEXPIRED) only once authorization has passed.
+    if (auto const sleDst = ctx.view.read(keylet::account(destination));
+        sleDst->isFlag(lsfDepositAuth) &&
+        !ctx.view.exists(keylet::depositPreauth(destination, account)))
+    {
+        if (!tx.isFieldPresent(sfCredentialIDs))
+            return tecNO_PERMISSION;
+        if (auto const err = credentials::authorizedDepositPreauth(
+                ctx.view, tx.getFieldV256(sfCredentialIDs), destination);
+            !isTesSuccess(err))
+            return err;
+    }
+
     auto const senderKey = cm::point(*sender, sfHolderEncryptionKey);
     auto const receiverKey = cm::point(*receiver, sfHolderEncryptionKey);
     auto const spending = cm::ciphertext(*sender, sfConfidentialBalanceSpending);
@@ -179,8 +205,8 @@ ConfidentialMPTSend::doApply()
     auto const id = tx[sfMPTokenIssuanceID];
     auto const destination = tx[sfDestination];
 
-    // Section 8.3.2.1: deposit authorization and credentials; expired
-    // credentials are removed.
+    // Section 8.3.2.1: removes expired credentials (tecEXPIRED); preclaim
+    // already decided deposit authorization.
     if (auto const err = verifyDepositPreauth(
             tx, view(), accountID_, destination, view().read(keylet::account(destination)), j_);
         !isTesSuccess(err))

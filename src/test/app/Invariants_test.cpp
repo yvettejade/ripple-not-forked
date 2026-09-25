@@ -6004,6 +6004,27 @@ class Invariants_test : public beast::unit_test::Suite
             sendCheck({incorrect}, applySend(), fails, false, [](STObject& obj) {
                 obj.setFieldVL(sfZKProof, Blob{});
             });
+            sendCheck({incorrect}, applySend(), fails, false, [](STObject& obj) {
+                obj.setFieldVL(sfZKProof, Blob(32, 0));
+            });
+            sendCheck(
+                {incorrect},
+                applySend([&](SLE& s, SLE&) { s.setFieldVL(sfConfidentialBalanceInbox, ctB); }),
+                fails);
+            // A third MPToken changes.
+            sendCheck(
+                {incorrect},
+                [&](MPTID const& id, AccountID const& holder, ApplyContext& ac) {
+                    if (!applySend()(id, holder, ac))
+                        return false;
+                    auto sle = std::make_shared<SLE>(keylet::mptoken(id, AccountID{3}));
+                    (*sle)[sfAccount] = AccountID{3};
+                    (*sle)[sfMPTokenIssuanceID] = id;
+                    initialize(*sle);
+                    ac.view().insert(sle);
+                    return true;
+                },
+                fails);
             // Exactly the sender and the destination change, with no amounts.
             sendCheck({incorrect}, applySend(), fails, false, [](STObject& obj) {
                 obj.setAccountID(sfDestination, AccountID{1});
