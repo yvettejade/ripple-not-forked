@@ -446,7 +446,98 @@ amountDelta(SLE const* before, SLE const* after, SF_UINT64 const& field)
     return static_cast<std::int64_t>(a) - static_cast<std::int64_t>(b);
 }
 
+std::optional<confidential::ElGamalCiphertext>
+ciphertextField(STObject const& object, SF_VL const& field)
+{
+    return confidential::ElGamalCiphertext::fromBytes(makeSlice(object.getFieldVL(field)));
+}
+
+std::optional<confidential::Point>
+pointField(STObject const& object, SF_VL const& field)
+{
+    return confidential::Point::fromBytes(makeSlice(object.getFieldVL(field)));
+}
+
+bool
+sameField(SLE const& before, SLE const& after, SField const& field)
+{
+    auto const* b = before.isFieldPresent(field) ? before.peekAtPField(field) : nullptr;
+    auto const* a = after.isFieldPresent(field) ? after.peekAtPField(field) : nullptr;
+    return (!a && !b) || (a && b && a->isEquivalent(*b));
+}
+
 }  // namespace
+
+// XLS-0096 §7.5: on first use the key is registered and every balance starts
+// as the canonical encrypted zero with version 0; the inbox and mirrors are
+// then credited with exactly the transaction's ciphertexts.
+bool
+ValidConfidentialMPToken::validConvert(
+    STTx const& tx,
+    SLE const* before,
+    SLE const& after,
+    SLE const& issuance)
+{
+    using namespace confidential;
+    auto const account = tx[sfAccount];
+    auto const id = tx[sfMPTokenIssuanceID];
+    auto const key = pointField(after, sfHolderEncryptionKey);
+    auto const issuerKey = pointField(issuance, sfIssuerEncryptionKey);
+    auto const auditorKey = pointField(issuance, sfAuditorEncryptionKey);
+    if (!key || !issuerKey)
+        return false;
+
+    bool const registering = tx.isFieldPresent(sfHolderEncryptionKey);
+    if (registering)
+    {
+        if ((before && before->isFieldPresent(sfHolderEncryptionKey)) ||
+            tx.getFieldVL(sfHolderEncryptionKey) != after.getFieldVL(sfHolderEncryptionKey) ||
+            after[~sfConfidentialBalanceVersion] != 0u ||
+            ciphertextField(after, sfConfidentialBalanceSpending) !=
+                encryptedZero(account, id, *key))
+            return false;
+    }
+    else if (
+        !before || !sameField(*before, after, sfConfidentialBalanceSpending) ||
+        !sameField(*before, after, sfConfidentialBalanceVersion))
+    {
+        return false;
+    }
+
+    auto const credited = [&](SF_VL const& balance, SF_VL const& amount, Point const& pk) {
+        auto const start = registering
+            ? std::optional<ElGamalCiphertext>{encryptedZero(account, id, pk)}
+            : ciphertextField(*before, balance);
+        auto const credit = ciphertextField(tx, amount);
+        return start && credit && ciphertextField(after, balance) == *start + *credit;
+    };
+    return credited(sfConfidentialBalanceInbox, sfHolderEncryptedAmount, *key) &&
+        credited(sfIssuerEncryptedBalance, sfIssuerEncryptedAmount, *issuerKey) &&
+        (!auditorKey || credited(sfAuditorEncryptedBalance, sfAuditorEncryptedAmount, *auditorKey));
+}
+
+// XLS-0096 §9.3: the inbox moves into the spending balance, the inbox resets
+// to the canonical encrypted zero, the version advances by one and the key
+// and mirrors are untouched.
+bool
+ValidConfidentialMPToken::validMerge(STTx const& tx, SLE const* before, SLE const& after)
+{
+    using namespace confidential;
+    if (!before)
+        return false;
+    auto const key = pointField(after, sfHolderEncryptionKey);
+    auto const spending = ciphertextField(*before, sfConfidentialBalanceSpending);
+    auto const inbox = ciphertextField(*before, sfConfidentialBalanceInbox);
+    auto const version = (*before)[~sfConfidentialBalanceVersion];
+    return key && spending && inbox && version &&
+        after[~sfConfidentialBalanceVersion] == static_cast<std::uint32_t>(*version + 1) &&
+        ciphertextField(after, sfConfidentialBalanceSpending) == *spending + *inbox &&
+        ciphertextField(after, sfConfidentialBalanceInbox) ==
+        encryptedZero(tx[sfAccount], tx[sfMPTokenIssuanceID], *key) &&
+        sameField(*before, after, sfHolderEncryptionKey) &&
+        sameField(*before, after, sfIssuerEncryptedBalance) &&
+        sameField(*before, after, sfAuditorEncryptedBalance);
+}
 
 void
 ValidMPTPayment::visitEntry(
@@ -754,19 +845,22 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
 }
 
 void
-ValidConfidentialMPToken::recordChanges(SLE const* before, SLE const* after)
+ValidConfidentialMPToken::recordChanges(
+    std::shared_ptr<SLE const> const& before,
+    std::shared_ptr<SLE const> const& after)
 {
     auto const& sle = after ? *after : *before;
     if (sle.getType() == ltMPTOKEN_ISSUANCE)
     {
-        auto const value = [](SLE const* s) {
+        auto const value = [](std::shared_ptr<SLE const> const& s) {
             return s ? (*s)[sfConfidentialOutstandingAmount] : 0;
         };
         if (value(before) != value(after))
             confidentialChanged_ = true;
 
-        auto const outstanding = amountDelta(before, after, sfOutstandingAmount);
-        auto const confidential = amountDelta(before, after, sfConfidentialOutstandingAmount);
+        auto const outstanding = amountDelta(before.get(), after.get(), sfOutstandingAmount);
+        auto const confidential =
+            amountDelta(before.get(), after.get(), sfConfidentialOutstandingAmount);
         if (!outstanding || !confidential)
         {
             amountOverflow_ = true;
@@ -779,10 +873,10 @@ ValidConfidentialMPToken::recordChanges(SLE const* before, SLE const* after)
         return;
     }
 
-    bool const confidential = confidentialFieldsDiffer(before, after);
+    bool const confidential = confidentialFieldsDiffer(before.get(), after.get());
     if (confidential)
         confidentialChanged_ = true;
-    auto const amount = amountDelta(before, after, sfMPTAmount);
+    auto const amount = amountDelta(before.get(), after.get(), sfMPTAmount);
     if (!amount)
         amountOverflow_ = true;
     if (confidential || amount.value_or(0) != 0)
@@ -790,7 +884,9 @@ ValidConfidentialMPToken::recordChanges(SLE const* before, SLE const* after)
         tokenChanges_.push_back(
             {.issuanceID = sle[sfMPTokenIssuanceID],
              .account = sle[sfAccount],
-             .amount = amount.value_or(0)});
+             .amount = amount.value_or(0),
+             .before = before,
+             .after = after});
     }
 }
 
@@ -818,11 +914,11 @@ ValidConfidentialMPToken::visitEntry(
 
     // A deleted entry leaves nothing behind; its committed state is `before`.
     if (!isDelete || before)
-        recordChanges(before.get(), isDelete ? nullptr : after.get());
+        recordChanges(before, isDelete ? nullptr : after);
 }
 
 bool
-ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx) const
+ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx, ReadView const& view) const
 {
     if (amountOverflow_)
         return false;
@@ -858,15 +954,19 @@ ValidConfidentialMPToken::validConfidentialChanges(STTx const& tx) const
         (touched ? it->second : SupplyChange{}) != expected)
         return false;
 
-    bool accountChanged = false;
-    for (auto const& change : tokenChanges_)
-    {
-        if (change.issuanceID != id || change.account != account || accountChanged ||
-            change.amount != accountAmount)
-            return false;
-        accountChanged = true;
-    }
-    return accountChanged || accountAmount == 0;
+    // Both transactions change exactly the submitter's MPToken: Convert
+    // always credits the inbox and MergeInbox always advances the version.
+    if (tokenChanges_.size() != 1)
+        return false;
+    auto const& change = tokenChanges_.front();
+    auto const issuance = view.read(keylet::mptIssuance(id));
+    if (change.issuanceID != id || change.account != account || change.amount != accountAmount ||
+        !change.after || !issuance)
+        return false;
+
+    if (tx.getTxnType() == ttCONFIDENTIAL_MPT_CONVERT)
+        return validConvert(tx, change.before.get(), *change.after, *issuance);
+    return validMerge(tx, change.before.get(), *change.after);
 }
 
 bool
@@ -919,14 +1019,17 @@ ValidConfidentialMPToken::finalize(
     if (badVersionStep_)
         fail("MPToken ConfidentialBalanceVersion must start at 0 and advance by one");
 
-    if (hasPrivilege(tx, MayModifyConfidentialMpt))
+    bool const privileged = hasPrivilege(tx, MayModifyConfidentialMpt);
+    if (privileged && isTesSuccess(result))
     {
-        if (isTesSuccess(result) && !validConfidentialChanges(tx))
-            fail("confidential transaction changed MPT amounts or tokens it may not");
+        if (!validConfidentialChanges(tx, view))
+            fail("confidential transaction changed MPT state incorrectly");
     }
     else if (confidentialChanged_)
     {
-        fail("confidential MPT state changed by a non-confidential transaction");
+        fail(
+            privileged ? "failed confidential transaction changed confidential MPT state"
+                       : "confidential MPT state changed by a non-confidential transaction");
     }
 
     for (auto const& token : encryptedTokens_)

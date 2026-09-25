@@ -113,11 +113,12 @@ public:
  *    - no confidential field is ever removed, including by deleting it
  *
  *  Transactions:
- *    - only those with MayModifyConfidentialMpt change
+ *    - only successful transactions with MayModifyConfidentialMpt change
  *      ConfidentialOutstandingAmount or a confidential MPToken field
  *    - a successful confidential transaction changes OutstandingAmount,
  *      ConfidentialOutstandingAmount and MPTAmount exactly as its type
- *      prescribes, and only on its own issuance and parties (XLS-0096 §6.5)
+ *      prescribes (XLS-0096 §6.5), and changes only its parties' MPTokens,
+ *      each field following the type's state transition
  */
 class ValidConfidentialMPToken
 {
@@ -141,6 +142,9 @@ class ValidConfidentialMPToken
         uint192 issuanceID;
         AccountID account;
         std::int64_t amount;
+        std::shared_ptr<SLE const> before;
+        // nullptr if the MPToken was deleted.
+        std::shared_ptr<SLE const> after;
     };
 
     bool coaExceedsOutstanding_ = false;
@@ -178,10 +182,18 @@ class ValidConfidentialMPToken
     visitMPToken(bool isDelete, SLE const* before, SLE const& after);
 
     void
-    recordChanges(SLE const* before, SLE const* after);
+    recordChanges(
+        std::shared_ptr<SLE const> const& before,
+        std::shared_ptr<SLE const> const& after);
 
     [[nodiscard]] bool
-    validConfidentialChanges(STTx const& tx) const;
+    validConfidentialChanges(STTx const& tx, ReadView const& view) const;
+
+    [[nodiscard]] static bool
+    validConvert(STTx const& tx, SLE const* before, SLE const& after, SLE const& issuance);
+
+    [[nodiscard]] static bool
+    validMerge(STTx const& tx, SLE const* before, SLE const& after);
 
 public:
     void

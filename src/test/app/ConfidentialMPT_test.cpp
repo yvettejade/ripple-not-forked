@@ -1,4 +1,5 @@
 #include <test/jtx.h>
+#include <test/jtx/delegate.h>
 #include <test/jtx/mpt.h>
 #include <test/jtx/ticket.h>
 
@@ -327,6 +328,13 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             auto jv = convertJV(env, alice, key, iss);
             jv[sfMPTAmount.jsonName] = std::to_string(kMaxMpTokenAmount + 1);
             env(jv, Ter(temBAD_AMOUNT));
+        }
+
+        // No transaction flags are defined.
+        {
+            auto jv = convertJV(env, alice, key, iss);
+            jv[jss::Flags] = tfMPTLock;
+            env(jv, Ter(temINVALID_FLAG));
         }
 
         // XLS-0096 section 14.2: ten times the base fee.
@@ -735,6 +743,11 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
             tfMPTCanHoldConfidentialBalance | tfMPTRequireAuth | tfMPTCanLock);
 
         env(mergeJV(env, gw, iss.id), Ter(temMALFORMED));
+        {
+            auto jv = mergeJV(env, alice, iss.id);
+            jv[jss::Flags] = tfMPTLock;
+            env(jv, Ter(temINVALID_FLAG));
+        }
         env(mergeJV(env, alice, makeMptID(999, gw)), Ter(tecOBJECT_NOT_FOUND));
         env(mergeJV(env, carol, iss.id), Ter(tecOBJECT_NOT_FOUND));
 
@@ -826,6 +839,135 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         env(jv, Ter(telINSUF_FEE_P));
     }
 
+    // MergeInbox leaves both mirrors alone: they already track spending plus
+    // inbox.
+    void
+    testMergeInboxAudited()
+    {
+        testcase("MergeInbox with an auditor");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Key const key(11);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice);
+        env.close();
+        auto const iss = issue(env, gw, {alice}, tfMPTCanHoldConfidentialBalance, true);
+        env(convertJV(env, alice, key, iss, {.amount = 70}));
+        env.close();
+        auto const before = env.le(keylet::mptoken(iss.id, alice));
+        env(mergeJV(env, alice, iss.id));
+        env.close();
+        auto const after = env.le(keylet::mptoken(iss.id, alice));
+        if (!BEAST_EXPECT(before && after))
+            return;
+        for (SF_VL const* field : {&sfIssuerEncryptedBalance, &sfAuditorEncryptedBalance})
+            BEAST_EXPECT(before->getFieldVL(*field) == after->getFieldVL(*field));
+        BEAST_EXPECT(decrypts(stored(*after, sfConfidentialBalanceSpending), key, 70));
+        BEAST_EXPECT(decrypts(stored(*after, sfAuditorEncryptedBalance), *iss.auditor, 70));
+    }
+
+    // XLS-0096 section 5.5: delegates operate an account; they cannot choose
+    // the key that controls its confidential balance.
+    void
+    testDelegation()
+    {
+        testcase("Delegation");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Key const key(11);
+
+        auto const setup = [&](Env& env) {
+            env.fund(XRP(10'000), gw, alice, bob);
+            env.close();
+            return issue(env, gw, {alice});
+        };
+
+        // Without a delegation entry. terNO_DELEGATE_PERMISSION is a retry
+        // code, so this ledger history ends here.
+        {
+            Env env{*this};
+            auto const iss = setup(env);
+            env(convertJV(env, alice, key, iss), Ter(tesSUCCESS));
+            env.close();
+            env(convertJV(env, alice, key, iss, {.registerKey = false}),
+                delegate::As(bob),
+                Ter(terNO_DELEGATE_PERMISSION));
+            env(mergeJV(env, alice, iss.id), delegate::As(bob), Ter(terNO_DELEGATE_PERMISSION));
+        }
+
+        Env env{*this};
+        auto const iss = setup(env);
+        env(delegate::set(alice, bob, {"ConfidentialMPTConvert", "ConfidentialMPTMergeInbox"}));
+        env.close();
+
+        // Only the holder registers its key.
+        env(convertJV(env, alice, Key(12), iss), delegate::As(bob), Ter(terNO_DELEGATE_PERMISSION));
+        auto sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && !sle->isFieldPresent(sfHolderEncryptionKey));
+        env(convertJV(env, alice, key, iss, {.amount = 100}));
+        env.close();
+
+        // The delegate converts and merges under the holder's key and pays
+        // the fee; the proofs are bound to the holder's account.
+        auto const aliceXrp = env.balance(alice).value().xrp();
+        auto const bobXrp = env.balance(bob).value().xrp();
+        env(convertJV(env, alice, key, iss, {.amount = 50, .registerKey = false}),
+            delegate::As(bob));
+        env(mergeJV(env, alice, iss.id), delegate::As(bob));
+        env.close();
+        auto const fee = env.current()->fees().base * 10;
+        BEAST_EXPECT(env.balance(alice).value().xrp() == aliceXrp);
+        BEAST_EXPECT(env.balance(bob).value().xrp() == bobXrp - fee - fee);
+        sle = env.le(keylet::mptoken(iss.id, alice));
+        if (!BEAST_EXPECT(sle))
+            return;
+        BEAST_EXPECT(strHex(sle->getFieldVL(sfHolderEncryptionKey)) == key.hex());
+        BEAST_EXPECT((*sle)[sfMPTAmount] == 850);
+        BEAST_EXPECT((*sle)[sfConfidentialBalanceVersion] == 1);
+        BEAST_EXPECT(decrypts(stored(*sle, sfConfidentialBalanceSpending), key, 150));
+    }
+
+    // Each multisigner adds one base fee to the ten base fees.
+    void
+    testMultisignFee()
+    {
+        testcase("Multisigned fee");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Account const bob("bob");
+        Account const carol("carol");
+        Key const key(11);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice, bob, carol);
+        env.close();
+        auto const iss = issue(env, gw, {alice});
+        env(signers(alice, 2, {{bob, 1}, {carol, 1}}));
+        env.close();
+
+        auto const base = env.current()->fees().base;
+        auto jv = convertJV(env, alice, key, iss);
+        jv[jss::Fee] = to_string(base * 12);
+        env(jv, Msig(bob, carol));
+        env.close();
+        auto const sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && sle->isFieldPresent(sfHolderEncryptionKey));
+
+        // The underpaying transaction is held for the next ledger, so this
+        // comes last.
+        jv = mergeJV(env, alice, iss.id);
+        jv[jss::Fee] = to_string(base * 12 - 1);
+        env(jv, Msig(bob, carol), Ter(telINSUF_FEE_P));
+    }
+
     // Transaction-specific invariants are disabled in Transactor; the protocol
     // invariant ValidConfidentialMPToken covers these transactions.
     void
@@ -862,6 +1004,9 @@ public:
         testConvertApply();
         testIdentityResults();
         testMergeInbox();
+        testMergeInboxAudited();
+        testDelegation();
+        testMultisignFee();
         testTransactionInvariants();
     }
 };

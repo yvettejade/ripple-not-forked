@@ -6,14 +6,16 @@
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/ConfidentialCrypto.h>
 #include <xrpl/protocol/SField.h>
+#include <xrpl/protocol/STArray.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/STTx.h>
+#include <xrpl/protocol/SystemParameters.h>
 #include <xrpl/protocol/TER.h>
 #include <xrpl/protocol/XRPAmount.h>
-#include <xrpl/tx/Transactor.h>
 
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <optional>
 
 namespace xrpl::confidential_mpt {
@@ -23,7 +25,16 @@ using namespace confidential;
 XRPAmount
 baseFee(ReadView const& view, STTx const& tx)
 {
-    return Transactor::calculateBaseFee(view, tx) * kFeeMultiplier;
+    // Each multisigner adds one base fee, as in Transactor::calculateBaseFee;
+    // the surcharge pays for proof verification, which does not grow with them.
+    auto const signers = tx.isFieldPresent(sfSigners) ? tx.getFieldArray(sfSigners).size() : 0;
+    auto const units = static_cast<XRPAmount::value_type>(kFeeMultiplier + signers);
+    auto const base = view.fees().base.drops();
+    // LCOV_EXCL_START
+    if (base > std::numeric_limits<XRPAmount::value_type>::max() / units)
+        return kInitialXrp;
+    // LCOV_EXCL_STOP
+    return XRPAmount{base * units};
 }
 
 // An absent field reads as an empty blob, which neither parser accepts.

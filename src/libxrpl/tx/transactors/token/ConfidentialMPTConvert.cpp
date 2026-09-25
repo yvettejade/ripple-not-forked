@@ -67,6 +67,17 @@ ConfidentialMPTConvert::preflight(PreflightContext const& ctx)
     return tesSUCCESS;
 }
 
+NotTEC
+ConfidentialMPTConvert::checkPermission(ReadView const& view, STTx const& tx)
+{
+    // The registered key can never change and controls the confidential
+    // balance, so only the holder may choose it (XLS-0096 section 5.5 trusts
+    // delegates to operate an account, not to take it over).
+    if (tx.isFieldPresent(sfDelegate) && tx.isFieldPresent(sfHolderEncryptionKey))
+        return terNO_DELEGATE_PERMISSION;
+    return Transactor::checkPermission(view, tx);
+}
+
 TER
 ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
 {
@@ -96,8 +107,8 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
         return tecNO_PERMISSION;
 
     MPTIssue const mptIssue{id};
-    if (!isTesSuccess(requireAuth(ctx.view, mptIssue, account)))
-        return tecNO_AUTH;
+    if (auto const ter = requireAuth(ctx.view, mptIssue, account); !isTesSuccess(ter))
+        return ter;
 
     // XLS-0096 lists no freeze rule for Convert; locked funds must not move,
     // and converting would change the mirror an issuer's clawback proof uses.

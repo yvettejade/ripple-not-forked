@@ -20,6 +20,7 @@ namespace xrpl::confidential_mpt {
 /** XLS-0096 section 14.2: confidential transactions pay 10x the base fee. */
 inline constexpr std::uint32_t kFeeMultiplier = 10;
 
+/** kFeeMultiplier base fees plus one base fee per multisigner. */
 [[nodiscard]] XRPAmount
 baseFee(ReadView const& view, STTx const& tx);
 
