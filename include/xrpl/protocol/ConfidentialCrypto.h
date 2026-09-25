@@ -246,7 +246,9 @@ bulletproofGeneratorsG();
 [[nodiscard]] std::span<Point const>
 bulletproofGeneratorsH();
 
-/** Pedersen commitment value·G + blinding·H. */
+/** Pedersen commitment value·G + blinding·H; both products are
+    constant-time multiplications.
+*/
 [[nodiscard]] Point
 pedersenCommit(Scalar const& value, Scalar const& blinding);
 
@@ -291,7 +293,8 @@ struct ElGamalCiphertext
     operator==(ElGamalCiphertext const&, ElGamalCiphertext const&) = default;
 };
 
-/** Enc_pk(m; r) = (r·G, m·G + r·pk).
+/** Enc_pk(m; r) = (r·G, m·G + r·pk); every product is a constant-time
+    multiplication.
 
     @throws std::invalid_argument if pk is the point at infinity.
 */

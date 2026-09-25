@@ -407,6 +407,9 @@ HedgedNonces::HedgedNonces(
     std::initializer_list<Scalar> secrets,
     uint256 const& contextID)
 {
+    // Sized up front so no reallocation leaves unwiped copies of the secrets
+    // behind.
+    seed_.reserve(tag.size() + secrets.size() * kScalarLength + 2 * 32);
     seed_.assign(tag.begin(), tag.end());
     for (auto const& secret : secrets)
         seed_.insert(seed_.end(), secret.bytes().begin(), secret.bytes().end());
@@ -496,7 +499,7 @@ bulletproofGeneratorsH()
 Point
 pedersenCommit(Scalar const& value, Scalar const& blinding)
 {
-    return mulGenerator(value) + blinding * pedersenGenerator();
+    return mulGenerator(value) + mulSecret(blinding, pedersenGenerator());
 }
 
 bool
@@ -550,7 +553,7 @@ elGamalEncrypt(Scalar const& m, Scalar const& r, Point const& pk)
 {
     if (pk.isInfinity())
         Throw<std::invalid_argument>("confidential: encryption key is the point at infinity");
-    return ElGamalCiphertext{.c1 = mulGenerator(r), .c2 = mulGenerator(m) + r * pk};
+    return ElGamalCiphertext{.c1 = mulGenerator(r), .c2 = mulGenerator(m) + mulSecret(r, pk)};
 }
 
 Scalar
