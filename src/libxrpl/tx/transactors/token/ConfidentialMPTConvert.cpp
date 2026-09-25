@@ -97,8 +97,13 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (!keys)
         return tecNO_PERMISSION;
 
+    // XLS-0096 section 7.3.2, in order.
     if (auto const ter = cm::checkAuditorPolicy(tx, *keys); !isTesSuccess(ter))
         return ter;
+
+    auto const amount = tx[sfMPTAmount];
+    if (amount > (*mptoken)[sfMPTAmount])
+        return tecINSUFFICIENT_FUNDS;
 
     bool const registering = tx.isFieldPresent(sfHolderEncryptionKey);
     if (registering && mptoken->isFieldPresent(sfHolderEncryptionKey))
@@ -114,10 +119,6 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     // and converting would change the mirror an issuer's clawback proof uses.
     if (isFrozen(ctx.view, account, mptIssue))
         return tecLOCKED;
-
-    auto const amount = tx[sfMPTAmount];
-    if (amount > (*mptoken)[sfMPTAmount])
-        return tecINSUFFICIENT_FUNDS;
 
     auto const holderKey = registering ? cm::point(tx, sfHolderEncryptionKey)
                                        : cm::point(*mptoken, sfHolderEncryptionKey);
