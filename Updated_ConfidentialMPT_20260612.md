@@ -791,7 +791,7 @@ The Chaum–Pedersen ciphertext–amount consistency proof (previously 98 bytes:
 - **Transaction fields:** `ZKProof` replaced by `CompactClawbackProof`.
 - **Appendix references:** Appendix C (issuer secret-key instantiation) is superseded by the compact protocol specified inline.
 
-The ConfidentialMPTClawback transaction allows the issuer to forcibly reclaim confidential MPT value from a holder. This operation is issuer-only and is fundamentally distinct from ordinary confidential transfers. Because the issuer does not possess the holder’s private ElGamal key, it cannot construct a standard ConfidentialMPTSend transaction on the holder’s behalf. Instead, the protocol defines a single privileged transaction that enables verifiable reclamation in one atomic ledger operation. Clawback converts a holder’s entire confidential balance directly into the issuer’s public reserve. Partial clawbacks are not supported. This restriction simplifies verification, prevents ambiguous intermediate states, and ensures that public supply accounting remains consistent and auditable.
+The ConfidentialMPTClawback transaction allows the issuer to forcibly reclaim confidential MPT value from a holder. This operation is issuer-only and is fundamentally distinct from ordinary confidential transfers. Because the issuer does not possess the holder’s private ElGamal key, it cannot construct a standard ConfidentialMPTSend transaction on the holder’s behalf. Instead, the protocol defines a single privileged transaction that enables verifiable reclamation in one atomic ledger operation. Clawback burns a holder’s entire confidential balance, decreasing both OA and COA. The funds are permanently removed from circulation and are not credited to any account, including the issuer’s public reserve. Partial clawbacks are not supported. This restriction simplifies verification, prevents ambiguous intermediate states, and ensures that public supply accounting remains consistent and auditable.
 
 ### 5.1 Notation
 
@@ -841,7 +841,7 @@ $$
 \mathrm{COA} \leftarrow \mathrm{COA} - m. \tag{68}
 $$
 
-All confidential balances associated with the holder are reset to canonical encryptions of zero. The issuer’s public reserve is increased by the revealed amount $m$, and both global accounting fields are updated accordingly. This transaction is atomic: either all updates are applied, or none are.
+All confidential balances associated with the holder are reset to canonical encryptions of zero. Both global accounting fields are decreased by the revealed amount $m$ (OA and COA), permanently burning the clawed-back tokens. No account, including the issuer, is credited. This transaction is atomic: either all updates are applied, or none are.
 
 > **Remark 5.2 (Canonical zero reset and TOB-RIPCTXR-5).** After Clawback, all balances are reset to canonical encrypted zero with publicly known deterministic randomness. This does not reintroduce the inbox-locking vulnerability described in TOB-RIPCTXR-5 because the fix operates at the ConfidentialMPTSend level: every subsequent Send re-randomizes the receiver’s inbox ciphertext using the Fiat–Shamir challenge $e$, making the final inbox randomness unpredictable regardless of the starting state.
 
@@ -965,7 +965,7 @@ Full security proofs for the compact AND-composed sigma construction are provide
 
 ### 5.9 Effect and Accounting
 
-ConfidentialMPTClawback is the only transaction that simultaneously: (i) reveals a holder’s confidential balance, (ii) reduces both OA and COA, and (iii) transfers value directly into the issuer’s public reserve. This operation preserves public supply soundness while enabling issuer-enforced recovery for compliance, regulatory, or emergency scenarios.
+ConfidentialMPTClawback is the only transaction that simultaneously: (i) reveals a holder’s confidential balance, (ii) reduces both OA and COA, and (iii) permanently burns the clawed-back value without crediting any account. This operation preserves public supply soundness while enabling issuer-enforced recovery for compliance, regulatory, or emergency scenarios.
 
 ### 5.10 Leakage Discussion
 
@@ -983,7 +983,7 @@ A ConfidentialMPTClawback transaction includes the fields summarized in Table 11
 | `Account` | The issuer account initiating the clawback transaction. | M |
 | `Holder` | The holder account from which confidential funds are being clawed back. | M |
 | `MPTokenIssuanceID` | The unique identifier of the associated MPT issuance. | M |
-| `MPTAmount` | The plaintext total amount $m$ removed from the holder’s confidential balance and credited to the issuer’s public reserve. | M |
+| `MPTAmount` | The plaintext total amount $m$ removed from the holder’s confidential balance and burned (decreasing OA and COA; not credited to any account). | M |
 | `ZKProof` | The compact Chaum–Pedersen proof $\pi_{\mathrm{claw}} = (e, z_{\mathrm{sk}})$ (64 bytes) validating that the revealed plaintext amount matches the issuer-encrypted balance representation. | M |
 
 M = Mandatory
