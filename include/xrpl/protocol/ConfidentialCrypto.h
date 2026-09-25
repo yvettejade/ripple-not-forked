@@ -18,9 +18,11 @@
 /** secp256k1 group primitives and EC-ElGamal encryption for XLS-0096
     Confidential MPTs.
 
-    These routines verify public data (ciphertexts, keys, commitments and
-    disclosed blinding factors) and are not constant-time. The provers built
-    on them are meant for tests and client tooling, not for validators.
+    Validators only verify public data (ciphertexts, keys, commitments and
+    disclosed blinding factors), for which the variable-time operations are
+    appropriate. Code that handles secret scalars (provers, decryption) must
+    use mulGenerator and mulSecret, which are constant-time; Scalar arithmetic
+    and Scalar storage wiping are constant-time as well.
 
     Every hash is SHA-256, and hash outputs become scalars by reduction mod n.
 */
@@ -44,6 +46,14 @@ public:
     /** The zero scalar. */
     Scalar() = default;
 
+    Scalar(Scalar const&) = default;
+
+    Scalar&
+    operator=(Scalar const&) = default;
+
+    /** Wipes the value; scalars may hold secrets. */
+    ~Scalar();
+
     /** Parse a canonical 32-byte big-endian scalar.
 
         @return the scalar, or nullopt unless the input is exactly 32 bytes
@@ -59,7 +69,11 @@ public:
     [[nodiscard]] static Scalar
     fromDigest(std::array<std::uint8_t, kScalarLength> const& digest);
 
-    /** A uniformly random non-zero scalar from the system CSPRNG. */
+    /** A uniformly random non-zero scalar from the system CSPRNG.
+
+        @throws std::runtime_error if the CSPRNG keeps returning invalid
+                scalars, which only a broken generator does.
+    */
     [[nodiscard]] static Scalar
     random();
 
@@ -142,6 +156,10 @@ public:
     friend Point
     operator*(Scalar const& k, Point const& p);
 
+    /** k·p in constant time, for secret k. */
+    friend Point
+    mulSecret(Scalar const& k, Point const& p);
+
     friend bool
     operator==(Point const& a, Point const& b);
 
@@ -166,6 +184,9 @@ sha256(std::initializer_list<Slice> parts);
 
 /** Deterministic hash-to-curve by try-and-increment: for ctr = 0, 1, ... the
     first valid point with compressed encoding 02 || SHA-256(seed || u32be(ctr)).
+
+    Seeds must be fixed-format, domain-separated tags: variable-length seeds
+    could alias another seed's counter bytes.
 */
 [[nodiscard]] Point
 hashToCurve(Slice seed);
@@ -195,6 +216,9 @@ pedersenCommit(Scalar const& value, Scalar const& blinding);
 
 [[nodiscard]] Point
 mulGenerator(Scalar const& k);
+
+[[nodiscard]] Point
+mulSecret(Scalar const& k, Point const& p);
 
 /** True if the input is a valid 33-byte compressed secp256k1 point. */
 [[nodiscard]] bool

@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -41,6 +42,17 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
         "777343E7EED364510A543EA24441CB38DEB1783F6AF9EC84AF98FC5AE912DEE5"
         "E22E54DB067F89CB5E2063BD66C2DD254DDB768A4219B6D9AA7341EE5C5952E7"
         "FB07B8CF2BBFEC4C8FB0109F91207A2FD3364BD747C0CEAB66ED2F1D123C1A61";
+    static constexpr char const* kSend4Challenge =
+        "B7ED6D614184D1C3AA4015910EEA8FD0CEF712B1FBA81B79E174A35F0D06763E";
+    // Recipients (P_B, P_I, P_U) with sender key P_A outside them, so P_A and
+    // P_1 occupy distinct hash slots.
+    static constexpr char const* kSendSeparateSender =
+        "4BDE6AE78E4FD4F8BE8F1F534D804CE7B59F5663567F6A6AED057AF106D38DA7"
+        "17346620F9F5FAEA17C49759AF4B1AA5670E8253CD6F9B26048ABAAC7AE9794D"
+        "0A586122C2384DDCCAEC0F64552298602B7848E743FFAF328698C442063846AB"
+        "5CD19883E7D7EBA85F125D66BD2C6A959C3A094F35BE6C98122AEAB1EBA5E233"
+        "D936DAF682A9F708F381AC11FFC31D3F2FE90834776CEC0607C603F3146EEF36"
+        "CEDE79D3C071A92C28959CADAAA084DF0470BF4D336D3CD3812D3FB10E36A98E";
     static constexpr char const* kBalance =
         "52530865EF078BBD7889CC3FB57D1533DDE674AB22D412FE95CBC5382418ECE0"
         "9458CE2DB579DC1EDA45D8DCF09AD432B6F4BF3E4259478D9D31D4BBED557A80"
@@ -162,7 +174,7 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
         {
             f();
         }
-        catch (std::runtime_error const&)
+        catch (std::exception const&)
         {
             return true;
         }
@@ -194,6 +206,7 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
 
         // A zero key has no encoding, so no proof can be produced for it.
         BEAST_EXPECT(throws([&] { (void)proveKnowledge(Scalar{}, ctx); }));
+        BEAST_EXPECT(!(Slice(proof) == Slice(proveKnowledge(f.skA, ctx))));
     }
 
     void
@@ -209,7 +222,19 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
         BEAST_EXPECT(v3.size() == kSendSigmaProofLength);
         auto const e = verifySend(f.send(false), makeSlice(v3), ctx);
         BEAST_EXPECT(e && strHex(e->bytes()) == kSend3Challenge);
-        BEAST_EXPECT(verifySend(f.send(true), makeSlice(v4), ctx));
+        auto const e4 = verifySend(f.send(true), makeSlice(v4), ctx);
+        BEAST_EXPECT(e4 && strHex(e4->bytes()) == kSend4Challenge);
+        {
+            auto separate = f.send(true);
+            separate.recipientKeys.erase(separate.recipientKeys.begin());
+            separate.c2.erase(separate.c2.begin());
+            auto const vx = hex(kSendSeparateSender);
+            BEAST_EXPECT(verifySend(separate, makeSlice(vx), ctx));
+            // Hashing P_1 in P_A's slot would not produce this challenge.
+            auto swapped = separate;
+            swapped.senderKey = separate.recipientKeys[0];
+            BEAST_EXPECT(!verifySend(swapped, makeSlice(vx), ctx));
+        }
         // The recipient count is part of the statement.
         BEAST_EXPECT(!verifySend(f.send(true), makeSlice(v3), ctx));
         BEAST_EXPECT(!verifySend(f.send(false), makeSlice(v4), ctx));
@@ -235,6 +260,10 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
                 [&](SendStatement& x) { x.recipientKeys[1] = other; },
                 [&](SendStatement& x) { x.recipientKeys.back() = other; },
                 [&](SendStatement& x) { std::swap(x.recipientKeys[1], x.recipientKeys[2]); },
+                [&](SendStatement& x) {
+                    std::swap(x.recipientKeys[1], x.recipientKeys[2]);
+                    std::swap(x.c2[1], x.c2[2]);
+                },
                 [&](SendStatement& x) { x.senderKey = other; },
                 [&](SendStatement& x) { x.c1 = other; },
                 [&](SendStatement& x) { x.c2[0] = other; },
@@ -281,10 +310,29 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
             BEAST_EXPECT(!verifySend(bad, proveSend(bad, f.witness(), ctx), ctx));
         }
 
-        // A statement point at infinity cannot be proven.
+        // Provers reject malformed statements up front.
         auto noC1 = f.send(false);
         noC1.c1 = Point{};
         BEAST_EXPECT(throws([&] { (void)proveSend(noC1, f.witness(), ctx); }));
+        auto shortC2 = f.send(false);
+        shortC2.c2.pop_back();
+        BEAST_EXPECT(throws([&] { (void)proveSend(shortC2, f.witness(), ctx); }));
+        auto noRecipients = f.send(false);
+        noRecipients.recipientKeys.clear();
+        noRecipients.c2.clear();
+        BEAST_EXPECT(throws([&] { (void)proveSend(noRecipients, f.witness(), ctx); }));
+        auto identityRecipient = f.send(false);
+        identityRecipient.recipientKeys[2] = Point{};
+        BEAST_EXPECT(throws([&] { (void)proveSend(identityRecipient, f.witness(), ctx); }));
+
+        // Nonces are fresh: proving twice gives different, valid proofs.
+        {
+            auto const st = f.send(false);
+            auto const p1 = proveSend(st, f.witness(), ctx);
+            auto const p2 = proveSend(st, f.witness(), ctx);
+            BEAST_EXPECT(!(Slice(p1) == Slice(p2)));
+            BEAST_EXPECT(verifySend(st, p1, ctx) && verifySend(st, p2, ctx));
+        }
     }
 
     void
@@ -379,6 +427,21 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
 
         // m·G must be encodable, so the amount cannot be zero.
         BEAST_EXPECT(throws([&] { (void)proveClawback(f.pi, mirror, Scalar{}, skI, ctx); }));
+        BEAST_EXPECT(throws([&] { (void)proveClawback(Point{}, mirror, s(1000), skI, ctx); }));
+
+        // Identity statement points never verify.
+        BEAST_EXPECT(!verifyClawback(Point{}, mirror, s(1000), proof, ctx));
+        auto identityC1 = mirror;
+        identityC1.c1 = Point{};
+        BEAST_EXPECT(!verifyClawback(f.pi, identityC1, s(1000), proof, ctx));
+        // C2 = m·G makes C2 - m·G the identity.
+        auto degenerate = mirror;
+        degenerate.c2 = mulGenerator(s(1000));
+        BEAST_EXPECT(!verifyClawback(f.pi, degenerate, s(1000), proof, ctx));
+
+        auto const c1 = proveClawback(f.pi, mirror, s(1000), skI, ctx);
+        auto const c2 = proveClawback(f.pi, mirror, s(1000), skI, ctx);
+        BEAST_EXPECT(!(Slice(c1) == Slice(c2)));
     }
 
 public:

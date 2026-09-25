@@ -4,15 +4,19 @@
 #include <xrpl/basics/Slice.h>
 #include <xrpl/basics/base_uint.h>
 #include <xrpl/basics/contract.h>
+#include <xrpl/crypto/csprng.h>
+#include <xrpl/crypto/secure_erase.h>
 #include <xrpl/protocol/ConfidentialCrypto.h>
 #include <xrpl/protocol/digest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -124,11 +128,79 @@ allNonZero(std::initializer_list<Scalar> scalars)
 // 2^-250 per attempt; bound the retries anyway.
 constexpr int kMaxProverAttempts = 8;
 
+// LCOV_EXCL_START
 [[noreturn]] void
 proverFailed()
 {
     Throw<std::runtime_error>("confidential: prover could not produce a proof");
 }
+// LCOV_EXCL_STOP
+
+void
+require(bool condition, char const* what)
+{
+    if (!condition)
+        Throw<std::invalid_argument>(std::string("confidential: ") + what);
+}
+
+bool
+encodable(Point const& p)
+{
+    return !p.isInfinity();
+}
+
+// Hedged nonces: SHA-256 over the tag, the witness, the context and fresh
+// randomness, so a weak or repeated RNG output alone never repeats a nonce
+// for different statements and a correct RNG alone suffices otherwise.
+class NonceSource
+{
+    std::vector<std::uint8_t> seed_;
+    std::uint32_t counter_ = 0;
+
+public:
+    NonceSource(
+        std::string_view tag,
+        std::initializer_list<Scalar const*> secrets,
+        uint256 const& contextID)
+    {
+        seed_.assign(tag.begin(), tag.end());
+        for (auto const* secret : secrets)
+            seed_.insert(seed_.end(), secret->bytes().begin(), secret->bytes().end());
+        seed_.insert(seed_.end(), contextID.begin(), contextID.end());
+        std::array<std::uint8_t, 32> entropy{};
+        cryptoPrng()(entropy.data(), entropy.size());
+        seed_.insert(seed_.end(), entropy.begin(), entropy.end());
+        secureErase(entropy.data(), entropy.size());
+    }
+
+    NonceSource(NonceSource const&) = delete;
+    NonceSource&
+    operator=(NonceSource const&) = delete;
+
+    ~NonceSource()
+    {
+        secureErase(seed_.data(), seed_.size());
+    }
+
+    Scalar
+    next()
+    {
+        for (;;)
+        {
+            std::array<std::uint8_t, 4> const ctr{
+                static_cast<std::uint8_t>(counter_ >> 24),
+                static_cast<std::uint8_t>(counter_ >> 16),
+                static_cast<std::uint8_t>(counter_ >> 8),
+                static_cast<std::uint8_t>(counter_)};
+            ++counter_;
+            auto digest = sha256({makeSlice(seed_), makeSlice(ctr)});
+            auto const k = Scalar::fromDigest(digest);
+            secureErase(digest.data(), digest.size());
+            if (!k.isZero())
+                return k;
+        }
+    }
+};
 
 Challenge&
 addSendStatement(Challenge& c, SendStatement const& s)
@@ -154,20 +226,22 @@ addBalanceStatement(Challenge& c, BalanceStatement const& s)
 Buffer
 proveKnowledge(Scalar const& secretKey, uint256 const& contextID)
 {
+    require(!secretKey.isZero(), "secret key is zero");
     auto const pk = mulGenerator(secretKey);
+    NonceSource nonces("CMPT_POK_SK_REGISTER", {&secretKey}, contextID);
     for (int attempt = 0; attempt < kMaxProverAttempts; ++attempt)
     {
-        auto const k = Scalar::random();
+        auto const k = nonces.next();
         auto const e =
             Challenge("CMPT_POK_SK_REGISTER").add(pk).add(mulGenerator(k)).add(contextID).finish();
         if (!e)
-            continue;
+            continue;  // LCOV_EXCL_LINE
         auto const s = k + *e * secretKey;
         if (s.isZero())
             continue;  // LCOV_EXCL_LINE
         return serialize({*e, s});
     }
-    proverFailed();
+    proverFailed();  // LCOV_EXCL_LINE
 }
 
 bool
@@ -188,27 +262,41 @@ verifyKnowledge(Point const& publicKey, Slice proof, uint256 const& contextID)
 Buffer
 proveSend(SendStatement const& statement, SendWitness const& w, uint256 const& contextID)
 {
+    auto const n = statement.recipientKeys.size();
+    require(n > 0 && statement.c2.size() == n, "recipient and ciphertext counts differ");
+    require(
+        std::ranges::all_of(statement.recipientKeys, encodable) &&
+            std::ranges::all_of(statement.c2, encodable) && encodable(statement.senderKey) &&
+            encodable(statement.c1) && encodable(statement.amountCommitment) &&
+            encodable(statement.balanceCommitment) && encodable(statement.balance.c1) &&
+            encodable(statement.balance.c2),
+        "statement point is the identity");
+
     auto const& h = pedersenGenerator();
+    NonceSource nonces(
+        "CMPT_SEND_SIGMA",
+        {&w.amount, &w.randomness, &w.balance, &w.balanceBlinding, &w.secretKey},
+        contextID);
     for (int attempt = 0; attempt < kMaxProverAttempts; ++attempt)
     {
-        auto const am = Scalar::random();
-        auto const ar = Scalar::random();
-        auto const ab = Scalar::random();
-        auto const arho = Scalar::random();
-        auto const ask = Scalar::random();
+        auto const am = nonces.next();
+        auto const ar = nonces.next();
+        auto const ab = nonces.next();
+        auto const arho = nonces.next();
+        auto const ask = nonces.next();
 
         Challenge c("CMPT_SEND_SIGMA");
         addSendStatement(c, statement);
         c.add(mulGenerator(ar));
         for (auto const& p : statement.recipientKeys)
-            c.add(mulGenerator(am) + ar * p);
-        c.add(mulGenerator(am) + ar * h);
-        c.add(mulGenerator(ab) + arho * h);
+            c.add(mulGenerator(am) + mulSecret(ar, p));
+        c.add(mulGenerator(am) + mulSecret(ar, h));
+        c.add(mulGenerator(ab) + mulSecret(arho, h));
         c.add(mulGenerator(ask));
-        c.add(mulGenerator(ab) + ask * statement.balance.c1);
+        c.add(mulGenerator(ab) + mulSecret(ask, statement.balance.c1));
         auto const e = c.add(contextID).finish();
         if (!e)
-            continue;
+            continue;  // LCOV_EXCL_LINE
 
         auto const zm = am + *e * w.amount;
         auto const zr = ar + *e * w.randomness;
@@ -219,7 +307,7 @@ proveSend(SendStatement const& statement, SendWitness const& w, uint256 const& c
             continue;  // LCOV_EXCL_LINE
         return serialize({*e, zm, zr, zb, zrho, zsk});
     }
-    proverFailed();
+    proverFailed();  // LCOV_EXCL_LINE
 }
 
 std::optional<Scalar>
@@ -266,21 +354,28 @@ proveBalance(
     Scalar const& secretKey,
     uint256 const& contextID)
 {
+    require(
+        encodable(statement.key) && encodable(statement.balance.c1) &&
+            encodable(statement.balance.c2) && encodable(statement.balanceCommitment),
+        "statement point is the identity");
+
     auto const& h = pedersenGenerator();
+    NonceSource nonces(
+        "CMPT_CONVERTBACK_SIGMA", {&balance, &balanceBlinding, &secretKey}, contextID);
     for (int attempt = 0; attempt < kMaxProverAttempts; ++attempt)
     {
-        auto const ab = Scalar::random();
-        auto const arho = Scalar::random();
-        auto const ask = Scalar::random();
+        auto const ab = nonces.next();
+        auto const arho = nonces.next();
+        auto const ask = nonces.next();
 
         Challenge c("CMPT_CONVERTBACK_SIGMA");
         addBalanceStatement(c, statement);
         c.add(mulGenerator(ask));
-        c.add(mulGenerator(ab) + ask * statement.balance.c1);
-        c.add(mulGenerator(ab) + arho * h);
+        c.add(mulGenerator(ab) + mulSecret(ask, statement.balance.c1));
+        c.add(mulGenerator(ab) + mulSecret(arho, h));
         auto const e = c.add(contextID).finish();
         if (!e)
-            continue;
+            continue;  // LCOV_EXCL_LINE
 
         auto const zb = ab + *e * balance;
         auto const zrho = arho + *e * balanceBlinding;
@@ -289,7 +384,7 @@ proveBalance(
             continue;  // LCOV_EXCL_LINE
         return serialize({*e, zb, zrho, zsk});
     }
-    proverFailed();
+    proverFailed();  // LCOV_EXCL_LINE
 }
 
 bool
@@ -322,26 +417,31 @@ proveClawback(
     uint256 const& contextID)
 {
     auto const mG = mulGenerator(amount);
+    require(
+        encodable(issuerKey) && encodable(mirror.c1) && encodable(mirror.c2) && encodable(mG),
+        "statement point is the identity");
+
+    NonceSource nonces("CMPT_CLAWBACK_SIGMA", {&issuerSecretKey, &amount}, contextID);
     for (int attempt = 0; attempt < kMaxProverAttempts; ++attempt)
     {
-        auto const a = Scalar::random();
+        auto const a = nonces.next();
         auto const e = Challenge("CMPT_CLAWBACK_SIGMA")
                            .add(issuerKey)
                            .add(mirror.c1)
                            .add(mirror.c2)
                            .add(mG)
                            .add(mulGenerator(a))
-                           .add(a * mirror.c1)
+                           .add(mulSecret(a, mirror.c1))
                            .add(contextID)
                            .finish();
         if (!e)
-            continue;
+            continue;  // LCOV_EXCL_LINE
         auto const z = a + *e * issuerSecretKey;
         if (z.isZero())
             continue;  // LCOV_EXCL_LINE
         return serialize({*e, z});
     }
-    proverFailed();
+    proverFailed();  // LCOV_EXCL_LINE
 }
 
 bool
