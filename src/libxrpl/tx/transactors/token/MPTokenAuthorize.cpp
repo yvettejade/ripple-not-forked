@@ -86,13 +86,20 @@ MPTokenAuthorize::preclaim(PreclaimContext const& ctx)
                 return tecNO_PERMISSION;
 
             // XLS-0096 §7.4: once confidential fields are initialized the
-            // MPToken can never be deleted, even when every encrypted balance
-            // is zero. The specification does not name a result code.
-            if (sleMpt->isFieldPresent(sfHolderEncryptionKey) ||
-                sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
-                sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
-                sleMpt->isFieldPresent(sfIssuerEncryptedBalance) ||
-                sleMpt->isFieldPresent(sfAuditorEncryptedBalance))
+            // MPToken cannot be deleted, even when every encrypted balance is
+            // zero. The specification does not name a result code.
+            //
+            // Deviation: §7.4 has no exception, but once the issuance is
+            // destroyed (which needs ConfidentialOutstandingAmount 0, so every
+            // encrypted balance is zero) no transaction can act on the state
+            // or recreate the MPToken, and blocking deletion would lock the
+            // holder's reserve forever.
+            if ((sleMpt->isFieldPresent(sfHolderEncryptionKey) ||
+                 sleMpt->isFieldPresent(sfConfidentialBalanceSpending) ||
+                 sleMpt->isFieldPresent(sfConfidentialBalanceInbox) ||
+                 sleMpt->isFieldPresent(sfIssuerEncryptedBalance) ||
+                 sleMpt->isFieldPresent(sfAuditorEncryptedBalance)) &&
+                ctx.view.exists(keylet::mptIssuance(ctx.tx[sfMPTokenIssuanceID])))
                 return tecHAS_OBLIGATIONS;
 
             return tesSUCCESS;

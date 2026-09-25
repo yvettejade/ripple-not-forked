@@ -3074,6 +3074,54 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         BEAST_EXPECT(issuance && (*issuance)[sfConfidentialOutstandingAmount] == 0);
     }
 
+    // XLS-0096 §7.4 blocks deleting an initialized MPToken; once the issuance
+    // is destroyed the holder can delete it and recover the reserve.
+    void
+    testDeleteAfterIssuanceDestroyed()
+    {
+        testcase("Delete after issuance destroyed");
+        using namespace jtx;
+
+        Account const gw("gw");
+        Account const alice("alice");
+        Key const key(11);
+
+        Env env{*this};
+        env.fund(XRP(10'000), gw, alice);
+        env.close();
+        auto const iss = issue(env, gw, {alice});
+        env(convertJV(env, alice, key, iss, {.amount = 0}));
+        env.close();
+        auto const sle = env.le(keylet::mptoken(iss.id, alice));
+        BEAST_EXPECT(sle && sle->isFieldPresent(sfHolderEncryptionKey));
+
+        json::Value unauthorize;
+        unauthorize[jss::TransactionType] = jss::MPTokenAuthorize;
+        unauthorize[jss::Account] = alice.human();
+        unauthorize[sfMPTokenIssuanceID.jsonName] = to_string(iss.id);
+        unauthorize[jss::Flags] = tfMPTUnauthorize;
+
+        MPT const mpt("MPT", iss.id);
+        env(pay(alice, gw, mpt(1'000)));
+        env.close();
+        env(unauthorize, Ter(tecHAS_OBLIGATIONS));
+        env.close();
+
+        json::Value destroy;
+        destroy[jss::TransactionType] = jss::MPTokenIssuanceDestroy;
+        destroy[jss::Account] = gw.human();
+        destroy[sfMPTokenIssuanceID.jsonName] = to_string(iss.id);
+        env(destroy);
+        env.close();
+        BEAST_EXPECT(!env.le(keylet::mptIssuance(iss.id)));
+
+        auto const owners = env.ownerCount(alice);
+        env(unauthorize);
+        env.close();
+        BEAST_EXPECT(!env.le(keylet::mptoken(iss.id, alice)));
+        BEAST_EXPECT(env.ownerCount(alice) == owners - 1);
+    }
+
     // Transaction-specific invariants are disabled in Transactor; the protocol
     // invariant ValidConfidentialMPToken covers these transactions.
     void
@@ -3139,6 +3187,7 @@ public:
         testClawbackPrepared();
         testClawbackBinding();
         testPublicClawback();
+        testDeleteAfterIssuanceDestroyed();
         testTransactionInvariants();
     }
 };

@@ -883,9 +883,11 @@ ValidConfidentialMPToken::visitMPToken(bool isDelete, SLE const* before, SLE con
     if (isDelete)
     {
         // XLS-0096 §7.4: an MPToken cannot be deleted once confidential
-        // fields are initialized, even if every balance is an encrypted zero.
-        if (hasConfidentialState(*(before ? before : &after)))
-            confidentialStateRemoved_ = true;
+        // fields are initialized, even if every balance is an encrypted zero,
+        // unless its issuance is gone (see MPTokenAuthorize); finalize checks.
+        auto const& deleted = before ? *before : after;
+        if (hasConfidentialState(deleted))
+            confidentialTokensDeleted_.push_back(deleted[sfMPTokenIssuanceID]);
         return;
     }
 
@@ -992,8 +994,9 @@ ValidConfidentialMPToken::recordChanges(
         return;
     }
 
+    // Deleting confidential state is checked against its issuance instead.
     bool const confidential = confidentialFieldsDiffer(before.get(), after.get());
-    if (confidential)
+    if (confidential && after)
         confidentialChanged_ = true;
     auto const amount = amountDelta(before.get(), after.get(), sfMPTAmount);
     if (!amount)
@@ -1175,7 +1178,10 @@ ValidConfidentialMPToken::finalize(
         fail("MPToken with confidential state changed its holder or issuance");
     if (spendingChangedWithoutVersion_)
         fail("MPToken ConfidentialBalanceSpending changed without a version change");
-    if (confidentialStateRemoved_)
+    if (confidentialStateRemoved_ ||
+        std::ranges::any_of(confidentialTokensDeleted_, [&](uint192 const& id) {
+            return view.exists(keylet::mptIssuance(id));
+        }))
         fail("MPToken confidential state removed");
     if (malformedConfidentialFields_)
         fail("confidential key or ciphertext is not a valid encoding");

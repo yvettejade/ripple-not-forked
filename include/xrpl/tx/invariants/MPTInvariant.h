@@ -113,7 +113,8 @@ public:
  *    - ConfidentialBalanceVersion starts at 0 and advances by exactly one;
  *      changing ConfidentialBalanceSpending changes it
  *    - no confidential field other than the version (absent at 0) is ever
- *      removed, including by deleting it
+ *      removed, including by deleting the MPToken while its issuance
+ *      exists
  *
  *  Transactions:
  *    - only successful transactions with MayModifyConfidentialMpt change
@@ -167,6 +168,8 @@ class ValidConfidentialMPToken
     bool coaWithoutIssuerKey_ = false;
     bool badVersionStep_ = false;
     bool explicitDefaultVersion_ = false;
+    // Issuances of deleted MPTokens that had confidential state.
+    std::vector<uint192> confidentialTokensDeleted_;
     // MPTokens that hold encrypted balances after the transaction.
     std::vector<EncryptedToken> encryptedTokens_;
 
