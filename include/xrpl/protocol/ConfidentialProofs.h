@@ -44,7 +44,9 @@ struct SendStatement
 {
     // P_1..P_n: sender, destination, issuer and, if configured, auditor.
     std::vector<Point> recipientKeys;
-    // P_A, the sender's key.
+    // P_A, the sender's key. It must equal P_1: the debit subtracts the
+    // amount encrypted under P_1 from the balance decryptable under P_A, and
+    // the proof relates the two only when they are the same key.
     Point senderKey;
     // C1 and C2_1..C2_n of the transfer amount ciphertexts.
     Point c1;

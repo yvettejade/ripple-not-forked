@@ -44,8 +44,8 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
         "FB07B8CF2BBFEC4C8FB0109F91207A2FD3364BD747C0CEAB66ED2F1D123C1A61";
     static constexpr char const* kSend4Challenge =
         "B7ED6D614184D1C3AA4015910EEA8FD0CEF712B1FBA81B79E174A35F0D06763E";
-    // Recipients (P_B, P_I, P_U) with sender key P_A outside them, so P_A and
-    // P_1 occupy distinct hash slots.
+    // A sigma proof that holds for recipients (P_B, P_I, P_U) with sender key
+    // P_A outside them. The relation requires P_A = P_1, so it is rejected.
     static constexpr char const* kSendSeparateSender =
         "4BDE6AE78E4FD4F8BE8F1F534D804CE7B59F5663567F6A6AED057AF106D38DA7"
         "17346620F9F5FAEA17C49759AF4B1AA5670E8253CD6F9B26048ABAAC7AE9794D"
@@ -229,8 +229,10 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
             separate.recipientKeys.erase(separate.recipientKeys.begin());
             separate.c2.erase(separate.c2.begin());
             auto const vx = hex(kSendSeparateSender);
-            BEAST_EXPECT(verifySend(separate, makeSlice(vx), ctx));
-            // Hashing P_1 in P_A's slot would not produce this challenge.
+            BEAST_EXPECT(!verifySend(separate, makeSlice(vx), ctx));
+            BEAST_EXPECT(throws([&] { (void)proveSend(separate, f.witness(), ctx); }));
+            // Making P_A = P_1 changes the hashed statement, so the proof
+            // does not carry over either.
             auto swapped = separate;
             swapped.senderKey = separate.recipientKeys[0];
             BEAST_EXPECT(!verifySend(swapped, makeSlice(vx), ctx));
@@ -265,6 +267,10 @@ class ConfidentialProofs_test : public beast::unit_test::Suite
                     std::swap(x.c2[1], x.c2[2]);
                 },
                 [&](SendStatement& x) { x.senderKey = other; },
+                [&](SendStatement& x) {
+                    x.senderKey = other;
+                    x.recipientKeys[0] = other;
+                },
                 [&](SendStatement& x) { x.c1 = other; },
                 [&](SendStatement& x) { x.c2[0] = other; },
                 [&](SendStatement& x) { x.c2.back() = other; },

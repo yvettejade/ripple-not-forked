@@ -209,6 +209,7 @@ proveSend(SendStatement const& statement, SendWitness const& w, uint256 const& c
 {
     auto const n = statement.recipientKeys.size();
     require(n > 0 && statement.c2.size() == n, "recipient and ciphertext counts differ");
+    require(statement.recipientKeys[0] == statement.senderKey, "first recipient is not the sender");
     require(
         std::ranges::all_of(statement.recipientKeys, encodable) &&
             std::ranges::all_of(statement.c2, encodable) && encodable(statement.senderKey) &&
@@ -259,7 +260,7 @@ std::optional<Scalar>
 verifySend(SendStatement const& statement, Slice proof, uint256 const& contextID)
 {
     auto const n = statement.recipientKeys.size();
-    if (n == 0 || statement.c2.size() != n)
+    if (n == 0 || statement.c2.size() != n || !(statement.recipientKeys[0] == statement.senderKey))
         return std::nullopt;
 
     auto const scalars = parseScalars(proof, 6);
