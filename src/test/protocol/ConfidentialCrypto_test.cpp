@@ -4,7 +4,10 @@
 #include <xrpl/basics/contract.h>
 #include <xrpl/basics/strHex.h>
 #include <xrpl/beast/unit_test/suite.h>
+#include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/ConfidentialCrypto.h>
+#include <xrpl/protocol/Indexes.h>
+#include <xrpl/protocol/UintTypes.h>
 
 #include <algorithm>
 #include <array>
@@ -12,8 +15,10 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace xrpl::confidential {
 
@@ -212,6 +217,19 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         BEAST_EXPECT(!(g == o));
         BEAST_EXPECT(!(g == -g));
 
+        // The constant-time multiplication agrees with the public one.
+        BEAST_EXPECT(mulSecret(two, g) == two * g);
+        BEAST_EXPECT(orderMinusOne && mulSecret(*orderMinusOne, point(kP)) == point(kMinusP));
+        for (int i = 0; i < 4; ++i)
+        {
+            auto const k = Scalar::random();
+            auto const q = mulGenerator(Scalar::random());
+            BEAST_EXPECT(mulSecret(k, q) == k * q);
+            BEAST_EXPECT(mulSecret(k, g) == mulGenerator(k));
+        }
+        BEAST_EXPECT(mulSecret(Scalar{}, g).isInfinity());
+        BEAST_EXPECT(mulSecret(two, o).isInfinity());
+
         // Distributivity and associativity on arbitrary multiples.
         auto const a = Scalar::fromUint64(0x1234567890ABCDEFULL);
         auto const b = Scalar::fromUint64(0x0FEDCBA987654321ULL);
@@ -395,6 +413,340 @@ class ConfidentialCrypto_test : public beast::unit_test::Suite
         BEAST_EXPECT(!(c1 - c1).toBuffer());
     }
 
+    void
+    testScalarArithmetic()
+    {
+        testcase("Scalar arithmetic");
+
+        auto const s = [](std::uint64_t v) { return Scalar::fromUint64(v); };
+        auto const orderMinusOne = *Scalar::fromBytes(makeSlice(hex(kOrderMinusOne)));
+        auto const one = s(1);
+
+        BEAST_EXPECT(s(5) + s(7) == s(12));
+        BEAST_EXPECT(s(7) - s(5) == s(2));
+        BEAST_EXPECT(s(6) * s(7) == s(42));
+        BEAST_EXPECT(Scalar{} + s(9) == s(9));
+        BEAST_EXPECT(s(9) + Scalar{} == s(9));
+        BEAST_EXPECT((s(9) * Scalar{}).isZero());
+        BEAST_EXPECT((Scalar{} * s(9)).isZero());
+        BEAST_EXPECT((-Scalar{}).isZero());
+        BEAST_EXPECT((s(9) - s(9)).isZero());
+
+        // Wrap-around modulo n.
+        BEAST_EXPECT(-one == orderMinusOne);
+        BEAST_EXPECT(-orderMinusOne == one);
+        BEAST_EXPECT((orderMinusOne + one).isZero());
+        BEAST_EXPECT(orderMinusOne + s(2) == one);
+        BEAST_EXPECT(orderMinusOne * orderMinusOne == one);
+        BEAST_EXPECT(s(3) - s(5) == -s(2));
+
+        // Inverses.
+        BEAST_EXPECT(one.inverse() == one);
+        BEAST_EXPECT(s(2).inverse() * s(2) == one);
+        BEAST_EXPECT(orderMinusOne.inverse() == orderMinusOne);
+        auto const bip340 = *Scalar::fromBytes(makeSlice(hex(kBip340Secret)));
+        BEAST_EXPECT(bip340.inverse() * bip340 == one);
+        bool threw = false;
+        try
+        {
+            (void)Scalar{}.inverse();
+        }
+        catch (std::domain_error const&)
+        {
+            threw = true;
+        }
+        BEAST_EXPECT(threw);
+
+        // Field laws on random values, and consistency with the group.
+        for (int i = 0; i < 8; ++i)
+        {
+            auto const a = Scalar::random();
+            auto const b = Scalar::random();
+            auto const c = Scalar::random();
+            BEAST_EXPECT(a * (b + c) == a * b + a * c);
+            BEAST_EXPECT((a * b) * c == a * (b * c));
+            BEAST_EXPECT(a + b == b + a);
+            BEAST_EXPECT(a - b + b == a);
+            BEAST_EXPECT(a * a.inverse() == one);
+            BEAST_EXPECT(mulGenerator(a + b) == mulGenerator(a) + mulGenerator(b));
+            BEAST_EXPECT(mulGenerator(a * b) == a * mulGenerator(b));
+            BEAST_EXPECT(mulGenerator(-a) == -mulGenerator(a));
+        }
+    }
+
+    void
+    testDigestReduction()
+    {
+        testcase("Digest reduction");
+
+        auto const digest = [](std::string const& h) {
+            std::array<std::uint8_t, kScalarLength> out{};
+            auto const b = hex(h);
+            std::copy(b.begin(), b.end(), out.begin());
+            return out;
+        };
+
+        BEAST_EXPECT(Scalar::fromDigest(digest(std::string(64, '0'))).isZero());
+        BEAST_EXPECT(
+            Scalar::fromDigest(digest(std::string(62, '0') + "2A")) == Scalar::fromUint64(42));
+        BEAST_EXPECT(strHex(Scalar::fromDigest(digest(kOrderMinusOne)).bytes()) == kOrderMinusOne);
+        BEAST_EXPECT(Scalar::fromDigest(digest(kOrder)).isZero());
+        BEAST_EXPECT(
+            Scalar::fromDigest(
+                digest("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364146")) ==
+            Scalar::fromUint64(5));
+        // Reductions that borrow across bytes.
+        BEAST_EXPECT(
+            Scalar::fromDigest(
+                digest("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364200")) ==
+            Scalar::fromUint64(0xBF));
+        BEAST_EXPECT(
+            strHex(
+                Scalar::fromDigest(
+                    digest("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000000000000000000000000"))
+                    .bytes()) ==
+            "000000000000000000000000000000004551231950B75FC4402DA1732FC9BEBF");
+        // 2^256 - 1 - n
+        BEAST_EXPECT(
+            strHex(Scalar::fromDigest(digest(std::string(64, 'F'))).bytes()) ==
+            "000000000000000000000000000000014551231950B75FC4402DA1732FC9BEBE");
+    }
+
+    void
+    testRandom()
+    {
+        testcase("Random scalars");
+
+        std::set<std::string> seen;
+        for (int i = 0; i < 32; ++i)
+        {
+            auto const r = Scalar::random();
+            BEAST_EXPECT(!r.isZero());
+            BEAST_EXPECT(Scalar::fromBytes(makeSlice(r.bytes())) == r);
+            BEAST_EXPECT(seen.insert(strHex(r.bytes())).second);
+        }
+    }
+
+    void
+    testGenerators()
+    {
+        testcase("Generators");
+
+        // Reference values from an independent Python implementation of the
+        // try-and-increment construction.
+        BEAST_EXPECT(
+            toHex(pedersenGenerator()) ==
+            "0216337C9C8E1F92C51ADCDE0562CA57FE910B2D18EF442E16E85C62E9DE5148BE");
+        BEAST_EXPECT(
+            toHex(innerProductGenerator()) ==
+            "029A3739ACCE6B1AE4E1C2297B597748A29200B74F205DD33CFF84BA4AEB84B640");
+
+        auto const g = bulletproofGeneratorsG();
+        auto const h = bulletproofGeneratorsH();
+        if (!BEAST_EXPECT(g.size() == kMaxBulletproofBits && h.size() == kMaxBulletproofBits))
+            return;
+        BEAST_EXPECT(
+            toHex(g[0]) == "02CEA2A2FD25B8E3A768EC4BFBA3962EB7D7AD38EC74AC77B3F1C611809C56BCBF");
+        BEAST_EXPECT(
+            toHex(g[1]) == "02CEB997DD16C3AB7EA520E0787500FBB9AFD25FCE8462AC524D5B51BFBA82E984");
+        BEAST_EXPECT(
+            toHex(g[127]) == "02D62B591366445527C27908697C9102526A5BE1E36FCA678572F54F894173AAD6");
+        BEAST_EXPECT(
+            toHex(h[0]) == "02C9A96A4011D71B5D7219C43F7B3B2432623B9277E4C2753CAAC95853685E37A0");
+        BEAST_EXPECT(
+            toHex(h[1]) == "029EBE592D38ED859D654311780BE8AD7FE5321DD8D235C107F41F18367C73E03F");
+        BEAST_EXPECT(
+            toHex(h[127]) == "028BB8AB58C4C58D25941E6D554B88390FFF3156003C5537F1C55180C70C2728CF");
+
+        // All generators are distinct from each other and from G.
+        std::set<std::string> all{toHex(Point::generator()), toHex(pedersenGenerator())};
+        all.insert(toHex(innerProductGenerator()));
+        for (std::size_t i = 0; i < kMaxBulletproofBits; ++i)
+        {
+            all.insert(toHex(g[i]));
+            all.insert(toHex(h[i]));
+        }
+        BEAST_EXPECT(all.size() == 3 + 2 * kMaxBulletproofBits);
+
+        // Every generator, pinned as SHA-256(G_0 || ... || G_127 || H_0 || ... || H_127).
+        {
+            Blob all;
+            for (auto const* v : {&g, &h})
+            {
+                for (auto const& p : *v)
+                {
+                    auto const b = *p.bytes();
+                    all.insert(all.end(), b.begin(), b.end());
+                }
+            }
+            BEAST_EXPECT(
+                strHex(sha256({makeSlice(all)})) ==
+                "B40DB32027E6F8A4C5855A72DCD6EF3ACCC856AC9538DA1C02CC881FE337D8B0");
+        }
+
+        // Deterministic, and the same object on every call.
+        BEAST_EXPECT(&pedersenGenerator() == &pedersenGenerator());
+        std::string const seed = "CMPT_PEDERSEN_H";
+        BEAST_EXPECT(hashToCurve(makeSlice(seed)) == pedersenGenerator());
+    }
+
+    void
+    testHashing()
+    {
+        testcase("Hashing");
+
+        std::string const abc = "abc";
+        BEAST_EXPECT(
+            strHex(sha256({makeSlice(abc)})) ==
+            "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD");
+        std::string const a = "a";
+        std::string const bc = "bc";
+        BEAST_EXPECT(sha256({makeSlice(a), makeSlice(bc)}) == sha256({makeSlice(abc)}));
+        BEAST_EXPECT(
+            strHex(sha256({})) ==
+            "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855");
+    }
+
+    void
+    testPedersen()
+    {
+        testcase("Pedersen commitments");
+
+        auto const s = [](std::uint64_t v) { return Scalar::fromUint64(v); };
+        BEAST_EXPECT(
+            toHex(pedersenCommit(s(1000), s(77))) ==
+            "029793491D041336F0945E1EA405C01BE02A74E2FBCE4E871801A95FEAB76F9294");
+        BEAST_EXPECT(
+            pedersenCommit(s(1000), s(77)) == mulGenerator(s(1000)) + s(77) * pedersenGenerator());
+        BEAST_EXPECT(
+            pedersenCommit(s(10), s(3)) + pedersenCommit(s(20), s(4)) ==
+            pedersenCommit(s(30), s(7)));
+        BEAST_EXPECT(
+            pedersenCommit(s(30), s(7)) - pedersenCommit(s(20), s(4)) ==
+            pedersenCommit(s(10), s(3)));
+        BEAST_EXPECT(pedersenCommit(Scalar{}, Scalar{}).isInfinity());
+        BEAST_EXPECT(pedersenCommit(Scalar{}, s(5)) == s(5) * pedersenGenerator());
+    }
+
+    void
+    testMultiScalarMul()
+    {
+        testcase("Multi-scalar multiplication");
+
+        auto const s = [](std::uint64_t v) { return Scalar::fromUint64(v); };
+        std::vector<Scalar> scalars;
+        std::vector<Point> points;
+        Point expected;
+        for (std::uint64_t i = 1; i <= 10; ++i)
+        {
+            scalars.push_back(Scalar::random());
+            points.push_back(mulGenerator(s(i * 1000 + 7)));
+            expected = expected + scalars.back() * points.back();
+        }
+        BEAST_EXPECT(multiScalarMul(scalars, points) == expected);
+
+        // Zero scalars and identity points are skipped.
+        scalars.push_back(Scalar{});
+        points.push_back(Point::generator());
+        scalars.push_back(s(3));
+        points.push_back(Point{});
+        BEAST_EXPECT(multiScalarMul(scalars, points) == expected);
+
+        BEAST_EXPECT(multiScalarMul({}, {}).isInfinity());
+        std::vector<Scalar> const zeros(3);
+        std::vector<Point> const gs(3, Point::generator());
+        BEAST_EXPECT(multiScalarMul(zeros, gs).isInfinity());
+
+        // A sum that cancels is the identity.
+        std::vector<Scalar> const cancel{s(5), -s(5)};
+        std::vector<Point> const same{Point::generator(), Point::generator()};
+        BEAST_EXPECT(multiScalarMul(cancel, same).isInfinity());
+
+        bool threw = false;
+        try
+        {
+            (void)multiScalarMul(cancel, gs);
+        }
+        catch (std::invalid_argument const&)
+        {
+            threw = true;
+        }
+        BEAST_EXPECT(threw);
+    }
+
+    void
+    testEncryptedZero()
+    {
+        testcase("Canonical encrypted zero");
+
+        AccountID account;
+        std::fill(account.begin(), account.end(), 0x11);
+        AccountID issuer;
+        std::fill(issuer.begin(), issuer.end(), 0x22);
+        auto const issuance = makeMptID(7, issuer);
+        auto const sk = Scalar::fromUint64(0xC0FFEE);
+        auto const pk = mulGenerator(sk);
+
+        auto const r = encryptedZeroRandomness(account, issuance);
+        BEAST_EXPECT(
+            strHex(r.bytes()) ==
+            "BD18E7336467D6C7B1C1D7B59E1DE1529617156B973459442FBB3926DFF91745");
+
+        auto const zero = encryptedZero(account, issuance, pk);
+        auto const buf = zero.toBuffer();
+        BEAST_EXPECT(
+            buf &&
+            strHex(*buf) ==
+                "020EF52C67196B62F575759E655140A3EEA5592F73A6025D9995680D65FF12F4AB"
+                "03F4E97150F4A483266C4663E2F244AD6DF2BEF0AD0A54E029CA02C7F970EF0F7C");
+        BEAST_EXPECT(verifyElGamalEncryption(zero, Scalar{}, r, pk));
+        BEAST_EXPECT((zero.c2 - sk * zero.c1).isInfinity());
+        BEAST_EXPECT(encryptedZero(account, issuance, pk) == zero);
+
+        // Distinct per account, per issuance, and per key.
+        AccountID other = account;
+        other.data()[0] = 0x12;
+        BEAST_EXPECT(!(encryptedZero(other, issuance, pk) == zero));
+        BEAST_EXPECT(!(encryptedZero(account, makeMptID(8, issuer), pk) == zero));
+        auto const otherKey = encryptedZero(account, issuance, mulGenerator(Scalar::fromUint64(5)));
+        BEAST_EXPECT(otherKey.c1 == zero.c1);
+        BEAST_EXPECT(!(otherKey.c2 == zero.c2));
+    }
+
+    void
+    testContextID()
+    {
+        testcase("Transaction context");
+
+        AccountID account;
+        std::fill(account.begin(), account.end(), 0x11);
+        AccountID issuer;
+        std::fill(issuer.begin(), issuer.end(), 0x22);
+        AccountID party;
+        std::fill(party.begin(), party.end(), 0x33);
+        auto const issuance = makeMptID(7, issuer);
+
+        auto const id =
+            transactionContextID(0x58, account, issuance, 0x01020304, party, 0xA0B0C0D0);
+        BEAST_EXPECT(
+            to_string(id) == "EEC5F99B11BEEE197096BE09515B83A383DD3E4A01EBCEF3DF00EE4DB2B9D5D8");
+
+        // Every input is bound.
+        BEAST_EXPECT(
+            transactionContextID(0x57, account, issuance, 0x01020304, party, 0xA0B0C0D0) != id);
+        BEAST_EXPECT(
+            transactionContextID(0x58, party, issuance, 0x01020304, party, 0xA0B0C0D0) != id);
+        BEAST_EXPECT(
+            transactionContextID(
+                0x58, account, makeMptID(8, issuer), 0x01020304, party, 0xA0B0C0D0) != id);
+        BEAST_EXPECT(
+            transactionContextID(0x58, account, issuance, 0x01020305, party, 0xA0B0C0D0) != id);
+        BEAST_EXPECT(
+            transactionContextID(0x58, account, issuance, 0x01020304, account, 0xA0B0C0D0) != id);
+        BEAST_EXPECT(
+            transactionContextID(0x58, account, issuance, 0x01020304, party, 0xA0B0C0D1) != id);
+    }
+
 public:
     void
     run() override
@@ -405,6 +757,15 @@ public:
         testCiphertextEncoding();
         testEncryption();
         testHomomorphism();
+        testScalarArithmetic();
+        testDigestReduction();
+        testRandom();
+        testGenerators();
+        testHashing();
+        testPedersen();
+        testMultiScalarMul();
+        testEncryptedZero();
+        testContextID();
     }
 };
 

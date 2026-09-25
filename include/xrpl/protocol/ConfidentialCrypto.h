@@ -2,19 +2,29 @@
 
 #include <xrpl/basics/Buffer.h>
 #include <xrpl/basics/Slice.h>
+#include <xrpl/basics/base_uint.h>
+#include <xrpl/protocol/AccountID.h>
+#include <xrpl/protocol/UintTypes.h>
 
 #include <secp256k1.h>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
+#include <span>
 
 /** secp256k1 group primitives and EC-ElGamal encryption for XLS-0096
     Confidential MPTs.
 
-    These routines verify public data (ciphertexts, keys, commitments and
-    disclosed blinding factors) and are not constant-time.
+    Validators only verify public data (ciphertexts, keys, commitments and
+    disclosed blinding factors), for which the variable-time operations are
+    appropriate. Code that handles secret scalars (provers, decryption) must
+    use mulGenerator and mulSecret, which are constant-time; Scalar arithmetic
+    and Scalar storage wiping are constant-time as well.
+
+    Every hash is SHA-256, and hash outputs become scalars by reduction mod n.
 */
 namespace xrpl::confidential {
 
@@ -36,6 +46,14 @@ public:
     /** The zero scalar. */
     Scalar() = default;
 
+    Scalar(Scalar const&) = default;
+
+    Scalar&
+    operator=(Scalar const&) = default;
+
+    /** Wipes the value; scalars may hold secrets. */
+    ~Scalar();
+
     /** Parse a canonical 32-byte big-endian scalar.
 
         @return the scalar, or nullopt unless the input is exactly 32 bytes
@@ -47,8 +65,39 @@ public:
     [[nodiscard]] static Scalar
     fromUint64(std::uint64_t v);
 
+    /** A 32-byte big-endian digest reduced modulo n. */
+    [[nodiscard]] static Scalar
+    fromDigest(std::array<std::uint8_t, kScalarLength> const& digest);
+
+    /** A uniformly random non-zero scalar from the system CSPRNG.
+
+        @throws std::runtime_error if the CSPRNG keeps returning invalid
+                scalars, which only a broken generator does.
+    */
+    [[nodiscard]] static Scalar
+    random();
+
     [[nodiscard]] bool
     isZero() const;
+
+    /** The multiplicative inverse.
+
+        @throws std::domain_error if this scalar is zero.
+    */
+    [[nodiscard]] Scalar
+    inverse() const;
+
+    friend Scalar
+    operator+(Scalar const& a, Scalar const& b);
+
+    friend Scalar
+    operator-(Scalar const& a);
+
+    friend Scalar
+    operator-(Scalar const& a, Scalar const& b);
+
+    friend Scalar
+    operator*(Scalar const& a, Scalar const& b);
 
     /** Big-endian encoding. */
     [[nodiscard]] std::array<std::uint8_t, kScalarLength> const&
@@ -107,16 +156,71 @@ public:
     friend Point
     operator*(Scalar const& k, Point const& p);
 
+    /** k·p in constant time, for secret k. */
+    friend Point
+    mulSecret(Scalar const& k, Point const& p);
+
     friend bool
     operator==(Point const& a, Point const& b);
 
     /** k·G */
     friend Point
     mulGenerator(Scalar const& k);
+
+    friend Point
+    multiScalarMul(std::span<Scalar const> scalars, std::span<Point const> points);
 };
+
+/** Σ scalars[i]·points[i]; the empty sum is the point at infinity.
+
+    @throws std::invalid_argument if the spans differ in length.
+*/
+[[nodiscard]] Point
+multiScalarMul(std::span<Scalar const> scalars, std::span<Point const> points);
+
+/** SHA-256 of the concatenation of the given byte strings. */
+[[nodiscard]] std::array<std::uint8_t, kScalarLength>
+sha256(std::initializer_list<Slice> parts);
+
+/** Deterministic hash-to-curve by try-and-increment: for ctr = 0, 1, ... the
+    first valid point with compressed encoding 02 || SHA-256(seed || u32be(ctr)).
+
+    Seeds must be fixed-format, domain-separated tags: variable-length seeds
+    could alias another seed's counter bytes.
+*/
+[[nodiscard]] Point
+hashToCurve(Slice seed);
+
+/** Number of Bulletproof vector generators: 64 bits for 2 aggregated values. */
+inline constexpr std::size_t kMaxBulletproofBits = 128;
+
+/** The Pedersen blinding generator H = hashToCurve("CMPT_PEDERSEN_H"). */
+[[nodiscard]] Point const&
+pedersenGenerator();
+
+/** The inner-product generator u = hashToCurve("CMPT_BP_U"). */
+[[nodiscard]] Point const&
+innerProductGenerator();
+
+/** G_i = hashToCurve("CMPT_BP_G" || u32be(i)), i < kMaxBulletproofBits. */
+[[nodiscard]] std::span<Point const>
+bulletproofGeneratorsG();
+
+/** H_i = hashToCurve("CMPT_BP_H" || u32be(i)), i < kMaxBulletproofBits. */
+[[nodiscard]] std::span<Point const>
+bulletproofGeneratorsH();
+
+/** Pedersen commitment value·G + blinding·H; both products are
+    constant-time multiplications.
+*/
+[[nodiscard]] Point
+pedersenCommit(Scalar const& value, Scalar const& blinding);
 
 [[nodiscard]] Point
 mulGenerator(Scalar const& k);
+
+[[nodiscard]] Point
+mulSecret(Scalar const& k, Point const& p);
 
 /** True if the input is a valid 33-byte compressed secp256k1 point. */
 [[nodiscard]] bool
@@ -153,12 +257,41 @@ struct ElGamalCiphertext
     operator==(ElGamalCiphertext const&, ElGamalCiphertext const&) = default;
 };
 
-/** Enc_pk(m; r) = (r·G, m·G + r·pk).
+/** Enc_pk(m; r) = (r·G, m·G + r·pk); every product is a constant-time
+    multiplication.
 
     @throws std::invalid_argument if pk is the point at infinity.
 */
 [[nodiscard]] ElGamalCiphertext
 elGamalEncrypt(Scalar const& m, Scalar const& r, Point const& pk);
+
+/** Randomness of the canonical encrypted zero (XLS-0096 §9.4):
+    SHA-256("EncZero" || account || issuer || issuance) mod n, or 1 if that
+    reduces to zero.
+*/
+[[nodiscard]] Scalar
+encryptedZeroRandomness(AccountID const& account, MPTID const& issuance);
+
+/** The canonical encrypted zero of an account's balance under pk. */
+[[nodiscard]] ElGamalCiphertext
+encryptedZero(AccountID const& account, MPTID const& issuance, Point const& pk);
+
+/** TransactionContextID (Updated spec eq. 40, 61, 77):
+    SHA-256(u16be(txType) || account || issuance || u32be(sequence) ||
+            party || u32be(version)).
+
+    The trailing party and version form TxSpecific: the destination and the
+    sender's version for Send, the account and its version for ConvertBack,
+    the holder and 0 for Clawback, and the account and 0 for Convert.
+*/
+[[nodiscard]] uint256
+transactionContextID(
+    std::uint16_t txType,
+    AccountID const& account,
+    MPTID const& issuance,
+    std::uint32_t sequence,
+    AccountID const& party,
+    std::uint32_t version);
 
 /** Deterministic plaintext-ciphertext check using a disclosed blinding
     factor: C1 == r·G and C2 == m·G + r·pk.
