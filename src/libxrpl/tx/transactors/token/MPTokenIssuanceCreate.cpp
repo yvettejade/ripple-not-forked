@@ -38,14 +38,8 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
         return false;
 
     if ((ctx.tx.isFlag(tfMPTCanHoldConfidentialBalance) ||
-         ctx.tx.isFieldPresent(sfImmutableFlags)) &&
+         (ctx.tx[~sfMutableFlags].value_or(0) & tmfMPTCanMutateCanHoldConfidentialBalance) != 0u) &&
         !ctx.rules.enabled(featureConfidentialTransfer))
-        return false;
-
-    // XLS-0096 attributes sfImmutableFlags to DynamicMPT and requires that
-    // amendment for it, although the DynamicMPT implemented here only defines
-    // sfMutableFlags.
-    if (ctx.tx.isFieldPresent(sfImmutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
     return true;
@@ -70,11 +64,6 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
     // specified.
     if (auto const mutableFlags = ctx.tx[~sfMutableFlags]; mutableFlags &&
         ((*mutableFlags == 0u) || ((*mutableFlags & tmfMPTokenIssuanceCreateMutableMask) != 0u)))
-        return temINVALID_FLAG;
-
-    if (auto const immutableFlags = ctx.tx[~sfImmutableFlags]; immutableFlags &&
-        ((*immutableFlags == 0u) ||
-         ((*immutableFlags & tifMPTokenIssuanceCreateImmutableMask) != 0u)))
         return temINVALID_FLAG;
 
     if (auto const fee = ctx.tx[~sfTransferFee])
@@ -168,9 +157,6 @@ MPTokenIssuanceCreate::create(ApplyView& view, beast::Journal journal, MPTCreate
         if (args.mutableFlags)
             (*mptIssuance)[sfMutableFlags] = *args.mutableFlags;
 
-        if (args.immutableFlags)
-            (*mptIssuance)[sfImmutableFlags] = *args.immutableFlags;
-
         if (args.referenceHolding)
         {
             // Defensive: the holding must already exist and be of an
@@ -214,7 +200,6 @@ MPTokenIssuanceCreate::doApply()
             .metadata = tx[~sfMPTokenMetadata],
             .domainId = tx[~sfDomainID],
             .mutableFlags = tx[~sfMutableFlags],
-            .immutableFlags = tx[~sfImmutableFlags],
         });
     return result ? tesSUCCESS : result.error();
 }

@@ -86,9 +86,8 @@ public:
  *  MPTokenIssuance:
  *    - ConfidentialOutstandingAmount <= OutstandingAmount, and it is only
  *      non-zero with lsfMPTCanHoldConfidentialBalance and an issuer key
- *    - lsfMPTCanHoldConfidentialBalance is never cleared, and never changes
- *      while lsifMPTCanHoldConfidentialBalance is set
- *    - ImmutableFlags never changes and holds only known flags
+ *    - lsfMPTCanHoldConfidentialBalance is never cleared, and is only set
+ *      after creation with lsmfMPTCanMutateCanHoldConfidentialBalance
  *    - encryption keys are valid points, need
  *      lsfMPTCanHoldConfidentialBalance, an auditor key needs an issuer key
  *      and is only added together with it,
@@ -154,7 +153,6 @@ class ValidConfidentialMPToken
     bool coaExceedsOutstanding_ = false;
     bool coaWithoutConfidentialFlag_ = false;
     bool confidentialFlagChanged_ = false;
-    bool immutableFlagsInvalid_ = false;
     bool issuanceKeysInvalid_ = false;
     bool transferFeeWithConfidential_ = false;
     bool issuanceDeletedWithCOA_ = false;

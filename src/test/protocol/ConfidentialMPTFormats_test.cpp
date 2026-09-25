@@ -9,6 +9,7 @@
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/Serializer.h>
+#include <xrpl/protocol/TxFlags.h>
 #include <xrpl/protocol/UintTypes.h>
 
 #include <cstdint>
@@ -63,7 +64,7 @@ class ConfidentialMPTFormats_test : public beast::unit_test::Suite
         sle[sfPreviousTxnID] = uint256{};
         sle[sfPreviousTxnLgrSeq] = 1;
         sle[sfFlags] = lsfMPTCanHoldConfidentialBalance;
-        sle[sfImmutableFlags] = lsifMPTCanHoldConfidentialBalance;
+        sle[sfMutableFlags] = lsmfMPTCanMutateCanHoldConfidentialBalance;
         sle[sfConfidentialOutstandingAmount] = 500'000;
         Blob const issuerKey(33, 0x02);
         Blob const auditorKey(33, 0x03);
@@ -72,7 +73,7 @@ class ConfidentialMPTFormats_test : public beast::unit_test::Suite
 
         auto const copy = roundTrip(sle);
         BEAST_EXPECT(copy->getFlags() == lsfMPTCanHoldConfidentialBalance);
-        BEAST_EXPECT((*copy)[sfImmutableFlags] == lsifMPTCanHoldConfidentialBalance);
+        BEAST_EXPECT((*copy)[sfMutableFlags] == lsmfMPTCanMutateCanHoldConfidentialBalance);
         BEAST_EXPECT((*copy)[sfConfidentialOutstandingAmount] == 500'000);
         BEAST_EXPECT(copy->getFieldVL(sfIssuerEncryptionKey) == issuerKey);
         BEAST_EXPECT(copy->getFieldVL(sfAuditorEncryptionKey) == auditorKey);
@@ -82,16 +83,13 @@ class ConfidentialMPTFormats_test : public beast::unit_test::Suite
         BEAST_EXPECT(json[sfConfidentialOutstandingAmount.jsonName] == "500000");
         BEAST_EXPECT(json[sfOutstandingAmount.jsonName] == "1000000");
 
-        // Both new integers are soeDEFAULT: assigning zero through the proxy
-        // removes them, and an issuance without them round-trips.
+        // The new amount is soeDEFAULT: assigning zero through the proxy
+        // removes it, and an issuance without it round-trips.
         sle[sfConfidentialOutstandingAmount] = 0;
-        sle[sfImmutableFlags] = 0;
         BEAST_EXPECT(!sle.isFieldPresent(sfConfidentialOutstandingAmount));
-        BEAST_EXPECT(!sle.isFieldPresent(sfImmutableFlags));
         BEAST_EXPECT(sle[sfConfidentialOutstandingAmount] == 0);
         auto const cleared = roundTrip(sle);
         BEAST_EXPECT(!cleared->isFieldPresent(sfConfidentialOutstandingAmount));
-        BEAST_EXPECT(!cleared->isFieldPresent(sfImmutableFlags));
 
         // A soeDEFAULT field explicitly stored as zero cannot be read back,
         // so writers must use the proxy (or makeFieldAbsent) for zero.
@@ -192,7 +190,24 @@ class ConfidentialMPTFormats_test : public beast::unit_test::Suite
             lsfMPTCanEscrow | lsfMPTCanTrade | lsfMPTCanTransfer | lsfMPTCanClawback;
         BEAST_EXPECT(lsfMPTCanHoldConfidentialBalance == 0x00000080);
         BEAST_EXPECT((lsfMPTCanHoldConfidentialBalance & otherIssuanceFlags) == 0);
-        BEAST_EXPECT(lsifMPTCanHoldConfidentialBalance == 0x00000080);
+
+        // Mutability follows DynamicMPT: the ledger flag equals the flag it
+        // guards, the create flag equals the ledger flag, and the set flag is
+        // the next free MPTokenIssuanceSet mutable bit, with no clear flag.
+        std::uint32_t const otherMutable = lsmfMPTCanMutateCanLock | lsmfMPTCanMutateRequireAuth |
+            lsmfMPTCanMutateCanEscrow | lsmfMPTCanMutateCanTrade | lsmfMPTCanMutateCanTransfer |
+            lsmfMPTCanMutateCanClawback | lsmfMPTCanMutateMetadata | lsmfMPTCanMutateTransferFee;
+        BEAST_EXPECT(lsmfMPTCanMutateCanHoldConfidentialBalance == lsfMPTCanHoldConfidentialBalance);
+        BEAST_EXPECT((lsmfMPTCanMutateCanHoldConfidentialBalance & otherMutable) == 0);
+        BEAST_EXPECT(
+            tmfMPTCanMutateCanHoldConfidentialBalance ==
+            lsmfMPTCanMutateCanHoldConfidentialBalance);
+        BEAST_EXPECT(
+            (tmfMPTCanMutateCanHoldConfidentialBalance & tmfMPTokenIssuanceCreateMutableMask) == 0);
+        BEAST_EXPECT(tmfMPTSetCanHoldConfidentialBalance == 0x00001000);
+        BEAST_EXPECT(
+            (tmfMPTSetCanHoldConfidentialBalance & tmfMPTokenIssuanceSetMutableMask) == 0);
+        BEAST_EXPECT((~tmfMPTokenIssuanceSetMutableMask & tmfMPTSetCanHoldConfidentialBalance << 1) == 0);
     }
 
 public:

@@ -34,11 +34,12 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         return bytes ? strHex(*bytes) : std::string{};
     }
 
+    static constexpr std::uint32_t kCanMutate = tmfMPTCanMutateCanHoldConfidentialBalance;
+
     static json::Value
     createJV(
         jtx::Account const& issuer,
         std::uint32_t flags,
-        std::optional<std::uint32_t> immutableFlags = std::nullopt,
         std::optional<std::uint16_t> transferFee = std::nullopt,
         std::optional<std::uint32_t> mutableFlags = std::nullopt)
     {
@@ -46,8 +47,6 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         jv[jss::TransactionType] = jss::MPTokenIssuanceCreate;
         jv[jss::Account] = issuer.human();
         jv[jss::Flags] = flags;
-        if (immutableFlags)
-            jv[sfImmutableFlags.jsonName] = *immutableFlags;
         if (transferFee)
             jv[sfTransferFee.jsonName] = *transferFee;
         if (mutableFlags)
@@ -63,6 +62,15 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         jv[jss::Account] = account.human();
         jv[sfMPTokenIssuanceID.jsonName] = to_string(id);
         jv[jss::Flags] = flags;
+        return jv;
+    }
+
+    // Enables confidential balances after creation (DynamicMPT's MutableFlags).
+    static json::Value
+    enableJV(jtx::Account const& account, MPTID const& id)
+    {
+        auto jv = setJV(account, id);
+        jv[sfMutableFlags.jsonName] = tmfMPTSetCanHoldConfidentialBalance;
         return jv;
     }
 
@@ -120,21 +128,29 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         using namespace jtx;
 
         Account const alice("alice");
+        bool const dynamicMPT = features[featureDynamicMPT];
 
-        // The confidential flag and ImmutableFlags need the amendment.
+        // The confidential flag and its mutability need the amendment.
         {
             Env env{*this, features - featureConfidentialTransfer};
             env.fund(XRP(1'000), alice);
             env(createJV(alice, tfMPTCanHoldConfidentialBalance), Ter(temDISABLED));
-            env(createJV(alice, 0, tifMPTCanHoldConfidentialBalance), Ter(temDISABLED));
+            if (dynamicMPT)
+            {
+                env(createJV(alice, 0, std::nullopt, kCanMutate), Ter(temDISABLED));
+                env(createJV(alice, 0, std::nullopt, kCanMutate | tmfMPTCanMutateCanLock),
+                    Ter(temDISABLED));
+                env(createJV(alice, 0, std::nullopt, tmfMPTCanMutateCanLock));
+            }
             env(createJV(alice, tfMPTCanTransfer));
         }
 
-        // XLS-0096 requires DynamicMPT for ImmutableFlags.
+        // Without DynamicMPT confidential balances can only be enabled at
+        // creation.
         {
             Env env{*this, features - featureDynamicMPT};
             env.fund(XRP(1'000), alice);
-            env(createJV(alice, 0, tifMPTCanHoldConfidentialBalance), Ter(temDISABLED));
+            env(createJV(alice, 0, std::nullopt, kCanMutate), Ter(temDISABLED));
             auto const id = create(env, createJV(alice, tfMPTCanHoldConfidentialBalance), alice);
             auto const sle = issuance(env, id);
             BEAST_EXPECT(sle && sle->isFlag(lsfMPTCanHoldConfidentialBalance));
@@ -143,28 +159,14 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         Env env{*this, features};
         env.fund(XRP(1'000), alice);
         env.close();
-        bool const dynamicMPT = features[featureDynamicMPT];
-
-        // ImmutableFlags must be non-zero and only contain known flags.
-        if (dynamicMPT)
-        {
-            env(createJV(alice, 0, 0), Ter(temINVALID_FLAG));
-            env(createJV(alice, 0, 0x00000001), Ter(temINVALID_FLAG));
-            env(createJV(alice, 0, tifMPTCanHoldConfidentialBalance | 0x00000100),
-                Ter(temINVALID_FLAG));
-        }
 
         // Confidential balances are incompatible with a non-zero TransferFee.
-        env(createJV(alice, tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance, std::nullopt, 1),
+        env(createJV(alice, tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance, 1),
             Ter(temBAD_TRANSFER_FEE));
-        env(createJV(alice, tfMPTCanHoldConfidentialBalance, std::nullopt, 1),
-            Ter(temBAD_TRANSFER_FEE));
+        env(createJV(alice, tfMPTCanHoldConfidentialBalance, 1), Ter(temBAD_TRANSFER_FEE));
         {
-            auto const id = create(
-                env,
-                createJV(
-                    alice, tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance, std::nullopt, 0),
-                alice);
+            auto const id =
+                create(env, createJV(alice, tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance, 0), alice);
             auto const sle = issuance(env, id);
             BEAST_EXPECT(sle && sle->isFlag(lsfMPTCanHoldConfidentialBalance));
             BEAST_EXPECT(sle && !sle->isFieldPresent(sfTransferFee));
@@ -172,42 +174,39 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
 
         // A non-confidential issuance keeps its TransferFee.
         {
-            auto const id =
-                create(env, createJV(alice, tfMPTCanTransfer, std::nullopt, 100), alice);
+            auto const id = create(env, createJV(alice, tfMPTCanTransfer, 100), alice);
             auto const sle = issuance(env, id);
             BEAST_EXPECT(sle && (*sle)[sfTransferFee] == 100);
             BEAST_EXPECT(sle && !sle->isFlag(lsfMPTCanHoldConfidentialBalance));
         }
 
-        // Enabled and locked on.
-        if (dynamicMPT)
+        // Enabled at creation.
         {
-            auto const id = create(
-                env,
-                createJV(alice, tfMPTCanHoldConfidentialBalance, tifMPTCanHoldConfidentialBalance),
-                alice);
+            auto const id = create(env, createJV(alice, tfMPTCanHoldConfidentialBalance), alice);
             auto const sle = issuance(env, id);
             BEAST_EXPECT(sle && sle->isFlag(lsfMPTCanHoldConfidentialBalance));
-            BEAST_EXPECT(sle && (*sle)[sfImmutableFlags] == lsifMPTCanHoldConfidentialBalance);
+            BEAST_EXPECT(sle && !sle->isFieldPresent(sfMutableFlags));
             BEAST_EXPECT(sle && !sle->isFieldPresent(sfConfidentialOutstandingAmount));
         }
 
-        // Locked off.
+        // Off, but may be enabled later; unknown mutable flags still fail.
         if (dynamicMPT)
         {
-            auto const id =
-                create(env, createJV(alice, 0, tifMPTCanHoldConfidentialBalance), alice);
+            auto const id = create(env, createJV(alice, 0, std::nullopt, kCanMutate), alice);
             auto const sle = issuance(env, id);
             BEAST_EXPECT(sle && !sle->isFlag(lsfMPTCanHoldConfidentialBalance));
-            BEAST_EXPECT(sle && (*sle)[sfImmutableFlags] == lsifMPTCanHoldConfidentialBalance);
+            BEAST_EXPECT(
+                sle && (*sle)[sfMutableFlags] == lsmfMPTCanMutateCanHoldConfidentialBalance);
+
+            env(createJV(alice, 0, std::nullopt, kCanMutate | 0x00000001), Ter(temINVALID_FLAG));
         }
 
-        // Default: neither flag.
+        // Default: off, and fixed.
         {
             auto const id = create(env, createJV(alice, 0), alice);
             auto const sle = issuance(env, id);
             BEAST_EXPECT(sle && !sle->isFlag(lsfMPTCanHoldConfidentialBalance));
-            BEAST_EXPECT(sle && !sle->isFieldPresent(sfImmutableFlags));
+            BEAST_EXPECT(sle && !sle->isFieldPresent(sfMutableFlags));
         }
     }
 
@@ -222,6 +221,8 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         auto const issuerKey = keyHex(0x1111);
         auto const auditorKey = keyHex(0x2222);
 
+        bool const dynamicMPT = features[featureDynamicMPT];
+
         // Every confidential change needs the amendment.
         {
             Env env{*this, features - featureConfidentialTransfer};
@@ -229,7 +230,7 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
             env.close();
             auto const id = create(env, createJV(alice, tfMPTCanLock), alice);
 
-            env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance), Ter(temDISABLED));
+            env(enableJV(alice, id), Ter(temDISABLED));
             auto jv = setJV(alice, id);
             jv[sfIssuerEncryptionKey.jsonName] = issuerKey;
             env(jv, Ter(temDISABLED));
@@ -242,15 +243,26 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         Env env{*this, features};
         env.fund(XRP(1'000), alice, bob);
         env.close();
-        auto const id = create(env, createJV(alice, tfMPTCanLock), alice);
+        auto const id = create(
+            env,
+            createJV(
+                alice,
+                tfMPTCanLock,
+                std::nullopt,
+                dynamicMPT ? std::optional<std::uint32_t>{kCanMutate} : std::nullopt),
+            alice);
         MPTTester mpt(env, alice, id, {bob});
         mpt.authorize({.account = bob});
 
+        // Enabling after creation uses MutableFlags, so it needs DynamicMPT.
+        if (!dynamicMPT)
+            env(enableJV(alice, id), Ter(temDISABLED));
+
         // Confidential settings apply to the issuance, not a holder.
         {
-            auto jv = setJV(alice, id, tfMPTSetCanHoldConfidentialBalance);
+            auto jv = enableJV(alice, id);
             jv[sfHolder.jsonName] = bob.human();
-            env(jv, Ter(temMALFORMED));
+            env(jv, Ter(dynamicMPT ? TER{temMALFORMED} : TER{temDISABLED}));
 
             jv = setJV(alice, id);
             jv[sfHolder.jsonName] = bob.human();
@@ -270,11 +282,11 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
               std::string("02") + std::string(64, '0'),
               std::string("04") + issuerKey.substr(2)})
         {
-            auto jv = setJV(alice, id, tfMPTSetCanHoldConfidentialBalance);
+            auto jv = setJV(alice, id);
             jv[sfIssuerEncryptionKey.jsonName] = bad;
             env(jv, Ter(temMALFORMED));
 
-            jv = setJV(alice, id, tfMPTSetCanHoldConfidentialBalance);
+            jv = setJV(alice, id);
             jv[sfIssuerEncryptionKey.jsonName] = issuerKey;
             jv[sfAuditorEncryptionKey.jsonName] = bad;
             env(jv, Ter(temMALFORMED));
@@ -282,27 +294,31 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
 
         // An auditor key needs an issuer key in the same transaction.
         {
-            auto jv = setJV(alice, id, tfMPTSetCanHoldConfidentialBalance);
+            auto jv = setJV(alice, id);
             jv[sfAuditorEncryptionKey.jsonName] = auditorKey;
             env(jv, Ter(temMALFORMED));
         }
 
-        // Enabling confidential balances together with a TransferFee.
-        if (features[featureDynamicMPT])
+        if (dynamicMPT)
         {
-            auto jv = setJV(alice, id, tfMPTSetCanHoldConfidentialBalance);
+            // Enabling confidential balances together with a TransferFee.
+            auto jv = enableJV(alice, id);
             jv[sfTransferFee.jsonName] = 1;
             env(jv, Ter(temBAD_TRANSFER_FEE));
 
-            // Mutating fields and setting flags stay mutually exclusive.
-            jv = setJV(alice, id, tfMPTSetCanHoldConfidentialBalance);
-            jv[sfTransferFee.jsonName] = 0;
-            env(jv, Ter(temMALFORMED));
+            // Mutations and Flags stay mutually exclusive.
+            env(enableJV(alice, id), Txflags(tfMPTLock), Ter(temMALFORMED));
+
+            // There is no flag to clear it again, and unknown bits fail.
+            jv = enableJV(alice, id);
+            jv[sfMutableFlags.jsonName] = tmfMPTSetCanHoldConfidentialBalance << 1;
+            env(jv, Ter(temINVALID_FLAG));
         }
 
-        // Keys alone count as a change.
+        // Enabling and registering keys in one transaction.
+        if (dynamicMPT)
         {
-            auto jv = setJV(alice, id, tfMPTSetCanHoldConfidentialBalance);
+            auto jv = enableJV(alice, id);
             jv[sfIssuerEncryptionKey.jsonName] = issuerKey;
             env(jv);
             env.close();
@@ -326,53 +342,60 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         Env env{*this, features};
         env.fund(XRP(1'000), alice, bob);
         env.close();
+        bool const dynamicMPT = features[featureDynamicMPT];
+        auto const mutableOpt = [&](std::uint32_t flags) {
+            return dynamicMPT ? std::optional<std::uint32_t>{flags} : std::nullopt;
+        };
 
         // Only the issuer may change the settings.
         {
-            auto const id = create(env, createJV(alice, 0), alice);
-            env(setJV(bob, id, tfMPTSetCanHoldConfidentialBalance), Ter(tecNO_PERMISSION));
-            auto jv = setJV(bob, id, tfMPTSetCanHoldConfidentialBalance);
+            auto const id =
+                create(env, createJV(alice, tfMPTCanHoldConfidentialBalance, std::nullopt, mutableOpt(kCanMutate)), alice);
+            if (dynamicMPT)
+                env(enableJV(bob, id), Ter(tecNO_PERMISSION));
+            auto jv = setJV(bob, id);
             jv[sfIssuerEncryptionKey.jsonName] = issuerKey;
             env(jv, Ter(tecNO_PERMISSION));
         }
 
-        // lsifMPTCanHoldConfidentialBalance freezes the setting.
-        if (features[featureDynamicMPT])
+        // Without lsmfMPTCanMutateCanHoldConfidentialBalance the setting is
+        // fixed at creation, even for a no-op.
+        if (dynamicMPT)
         {
-            auto const locked =
-                create(env, createJV(alice, 0, tifMPTCanHoldConfidentialBalance), alice);
-            env(setJV(alice, locked, tfMPTSetCanHoldConfidentialBalance), Ter(tecNO_PERMISSION));
+            auto const off = create(env, createJV(alice, 0), alice);
+            env(enableJV(alice, off), Ter(tecNO_PERMISSION));
+            auto const otherMutable =
+                create(env, createJV(alice, 0, std::nullopt, tmfMPTCanMutateCanLock), alice);
+            env(enableJV(alice, otherMutable), Ter(tecNO_PERMISSION));
 
-            auto const lockedOn = create(
-                env,
-                createJV(alice, tfMPTCanHoldConfidentialBalance, tifMPTCanHoldConfidentialBalance),
-                alice);
-            env(setJV(alice, lockedOn, tfMPTSetCanHoldConfidentialBalance), Ter(tecNO_PERMISSION));
+            auto const on = create(env, createJV(alice, tfMPTCanHoldConfidentialBalance), alice);
+            env(enableJV(alice, on), Ter(tecNO_PERMISSION));
 
             // Keys can still be registered once the flag is on.
-            auto jv = setJV(alice, lockedOn);
+            auto jv = setJV(alice, on);
             jv[sfIssuerEncryptionKey.jsonName] = issuerKey;
             env(jv);
             env.close();
-            auto const sle = issuance(env, lockedOn);
+            auto const sle = issuance(env, on);
             BEAST_EXPECT(sle && sle->isFieldPresent(sfIssuerEncryptionKey));
         }
 
         // An existing TransferFee blocks enabling confidential balances.
+        if (dynamicMPT)
         {
-            auto const id = create(env, createJV(alice, tfMPTCanTransfer, std::nullopt, 50), alice);
-            env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance), Ter(tecNO_PERMISSION));
+            auto const id =
+                create(env, createJV(alice, tfMPTCanTransfer, 50, kCanMutate), alice);
+            env(enableJV(alice, id), Ter(tecNO_PERMISSION));
         }
 
         // Confidential balances block setting a non-zero TransferFee.
-        if (features[featureDynamicMPT])
+        if (dynamicMPT)
         {
             auto const id = create(
                 env,
                 createJV(
                     alice,
                     tfMPTCanTransfer | tfMPTCanHoldConfidentialBalance,
-                    std::nullopt,
                     std::nullopt,
                     tmfMPTCanMutateTransferFee),
                 alice);
@@ -384,20 +407,26 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         }
 
         // Keys need confidential balances enabled, before or in the same tx.
-        auto const id = create(env, createJV(alice, 0), alice);
         {
-            auto jv = setJV(alice, id);
+            auto const off = create(env, createJV(alice, 0, std::nullopt, mutableOpt(kCanMutate)), alice);
+            auto jv = setJV(alice, off);
             jv[sfIssuerEncryptionKey.jsonName] = issuerKey;
             env(jv, Ter(tecNO_PERMISSION));
         }
+        auto const id = dynamicMPT
+            ? create(env, createJV(alice, 0, std::nullopt, kCanMutate), alice)
+            : create(env, createJV(alice, tfMPTCanHoldConfidentialBalance), alice);
+        if (dynamicMPT)
         {
             // Enabling is idempotent and does not need keys.
-            env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance));
-            env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance));
+            env(enableJV(alice, id));
+            env(enableJV(alice, id));
             env.close();
             auto const sle = issuance(env, id);
             BEAST_EXPECT(sle && sle->isFlag(lsfMPTCanHoldConfidentialBalance));
             BEAST_EXPECT(sle && !sle->isFieldPresent(sfIssuerEncryptionKey));
+            BEAST_EXPECT(
+                sle && (*sle)[sfMutableFlags] == lsmfMPTCanMutateCanHoldConfidentialBalance);
         }
         {
             auto jv = setJV(alice, id);
@@ -417,10 +446,13 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
             env(jv, Ter(tecNO_PERMISSION));
         }
 
-        // Both keys at once, then neither can be replaced.
-        auto const both = create(env, createJV(alice, 0), alice);
+        // Both keys at once (enabling in the same transaction where
+        // DynamicMPT allows it), then neither can be replaced.
+        auto const both = dynamicMPT
+            ? create(env, createJV(alice, 0, std::nullopt, kCanMutate), alice)
+            : create(env, createJV(alice, tfMPTCanHoldConfidentialBalance), alice);
         {
-            auto jv = setJV(alice, both, tfMPTSetCanHoldConfidentialBalance);
+            auto jv = dynamicMPT ? enableJV(alice, both) : setJV(alice, both);
             jv[sfIssuerEncryptionKey.jsonName] = issuerKey;
             jv[sfAuditorEncryptionKey.jsonName] = auditorKey;
             env(jv);
@@ -450,30 +482,25 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         using namespace jtx;
 
         // Without SingleAssetVault and DynamicMPT, an issuance that cannot be
-        // locked accepted no MPTokenIssuanceSet at all; confidential changes
-        // are still allowed.
+        // locked accepted no MPTokenIssuanceSet at all; registering keys is
+        // still allowed, while enabling after creation needs DynamicMPT.
         Account const alice("alice");
         Env env{*this, features - featureSingleAssetVault - featureDynamicMPT};
         env.fund(XRP(1'000), alice);
         env.close();
 
-        auto const id = create(env, createJV(alice, 0), alice);
+        auto const id = create(env, createJV(alice, tfMPTCanHoldConfidentialBalance), alice);
         env(setJV(alice, id), Ter(tecNO_PERMISSION));
-        env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance | tfMPTLock),
-            Ter(tecNO_PERMISSION));
-        env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance));
-        env.close();
-        auto sle = issuance(env, id);
-        BEAST_EXPECT(sle && sle->isFlag(lsfMPTCanHoldConfidentialBalance));
-        BEAST_EXPECT(sle && !sle->isFlag(lsfMPTLocked));
+        env(setJV(alice, id, tfMPTLock), Ter(tecNO_PERMISSION));
+        env(enableJV(alice, id), Ter(temDISABLED));
 
-        // Keys alone, on an issuance that already allows confidential balances.
         auto jv = setJV(alice, id);
         jv[sfIssuerEncryptionKey.jsonName] = keyHex(0x7777);
         env(jv);
         env.close();
-        sle = issuance(env, id);
+        auto const sle = issuance(env, id);
         BEAST_EXPECT(sle && sle->isFieldPresent(sfIssuerEncryptionKey));
+        BEAST_EXPECT(sle && !sle->isFlag(lsfMPTLocked));
     }
 
     void
@@ -488,34 +515,37 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
         env.fund(XRP(1'000), alice, bob);
         env.close();
 
-        auto const id = create(env, createJV(alice, tfMPTCanLock), alice);
+        // Without DynamicMPT the issuance starts confidential, so only keys
+        // remain to be set.
+        bool const dynamicMPT = features[featureDynamicMPT];
+        auto const id = dynamicMPT
+            ? create(env, createJV(alice, tfMPTCanLock, std::nullopt, kCanMutate), alice)
+            : create(env, createJV(alice, tfMPTCanLock | tfMPTCanHoldConfidentialBalance), alice);
+        auto const change = [&] {
+            auto jv = dynamicMPT ? enableJV(alice, id) : setJV(alice, id);
+            jv[sfIssuerEncryptionKey.jsonName] = keyHex(0x6666);
+            return jv;
+        };
 
         // Granular lock permissions do not extend to confidential settings.
         env(delegate::set(alice, bob, {"MPTokenIssuanceLock", "MPTokenIssuanceUnlock"}));
         env.close();
-        env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance),
-            delegate::As(bob),
-            Ter(terNO_DELEGATE_PERMISSION));
-        env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance | tfMPTLock),
-            delegate::As(bob),
-            Ter(terNO_DELEGATE_PERMISSION));
+        if (dynamicMPT)
+            env(enableJV(alice, id), delegate::As(bob), Ter(terNO_DELEGATE_PERMISSION));
         {
             auto jv = setJV(alice, id);
             jv[sfIssuerEncryptionKey.jsonName] = keyHex(0x6666);
             env(jv, delegate::As(bob), Ter(terNO_DELEGATE_PERMISSION));
         }
+        env(change(), delegate::As(bob), Ter(terNO_DELEGATE_PERMISSION));
         env(setJV(alice, id, tfMPTLock), delegate::As(bob));
         env.close();
 
         // A delegate with the full transaction permission may enable them.
         env(delegate::set(alice, bob, {"MPTokenIssuanceSet"}));
         env.close();
-        {
-            auto jv = setJV(alice, id, tfMPTSetCanHoldConfidentialBalance);
-            jv[sfIssuerEncryptionKey.jsonName] = keyHex(0x6666);
-            env(jv, delegate::As(bob));
-            env.close();
-        }
+        env(change(), delegate::As(bob));
+        env.close();
         auto const sle = issuance(env, id);
         BEAST_EXPECT(sle && sle->isFlag(lsfMPTCanHoldConfidentialBalance));
         BEAST_EXPECT(sle && sle->isFieldPresent(sfIssuerEncryptionKey));
@@ -570,14 +600,11 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
                 alice,
                 tfMPTCanLock | tfMPTCanHoldConfidentialBalance,
                 std::nullopt,
-                std::nullopt,
-                features[featureDynamicMPT] ? std::optional<std::uint32_t>{tmfMPTCanMutateMetadata}
-                                            : std::nullopt),
+                features[featureDynamicMPT]
+                    ? std::optional<std::uint32_t>{tmfMPTCanMutateMetadata | kCanMutate}
+                    : std::nullopt),
             alice);
         env(setJV(alice, id, tfMPTLock));
-        env(setJV(alice, id, tfMPTUnlock));
-        // Enabling (a no-op here) combines with locking.
-        env(setJV(alice, id, tfMPTSetCanHoldConfidentialBalance | tfMPTLock));
         env.close();
         BEAST_EXPECT(issuance(env, id)->isFlag(lsfMPTLocked));
         env(setJV(alice, id, tfMPTUnlock));
@@ -587,8 +614,11 @@ class ConfidentialMPTIssuance_test : public beast::unit_test::Suite
             jv[sfMPTokenMetadata.jsonName] = strHex(std::string("meta"));
             env(jv);
 
-            jv[jss::Flags] = tfMPTSetCanHoldConfidentialBalance;
-            env(jv, Ter(temMALFORMED));
+            // Enabling (a no-op here) combines with other mutations, but
+            // not with Flags.
+            jv[sfMutableFlags.jsonName] = tmfMPTSetCanHoldConfidentialBalance;
+            env(jv);
+            env(jv, Txflags(tfMPTLock), Ter(temMALFORMED));
         }
         env.close();
         auto const sle = issuance(env, id);

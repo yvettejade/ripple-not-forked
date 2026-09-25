@@ -30,10 +30,16 @@
 namespace xrpl {
 
 static bool
+setsConfidential(STTx const& tx)
+{
+    return (tx[~sfMutableFlags].value_or(0) & tmfMPTSetCanHoldConfidentialBalance) != 0u;
+}
+
+static bool
 isConfidentialChange(STTx const& tx)
 {
-    return tx.isFlag(tfMPTSetCanHoldConfidentialBalance) ||
-        tx.isFieldPresent(sfIssuerEncryptionKey) || tx.isFieldPresent(sfAuditorEncryptionKey);
+    return setsConfidential(tx) || tx.isFieldPresent(sfIssuerEncryptionKey) ||
+        tx.isFieldPresent(sfAuditorEncryptionKey);
 }
 
 bool
@@ -63,7 +69,19 @@ struct MPTMutabilityFlags
     std::uint32_t canMutateFlag;
 };
 
-static constexpr std::array<MPTMutabilityFlags, 6> kMptMutabilityFlags = {
+// doApply sets and clears the issuance flag equal to canMutateFlag.
+static_assert(lsmfMPTCanMutateCanHoldConfidentialBalance == lsfMPTCanHoldConfidentialBalance);
+
+// XLS-0096 section 6.2 stores the permission as lsifMPTCanHoldConfidentialBalance
+// in an sfImmutableFlags field it attributes to DynamicMPT, and section 12
+// enables it with a tfMPTSetCanHoldConfidentialBalance bit in Flags. The
+// DynamicMPT implemented here has no sfImmutableFlags: flags are fixed unless
+// created mutable, and changed through sfMutableFlags, which cannot be
+// combined with Flags. Confidential balances follow that model, so they can
+// only be enabled after creation if the issuance was created with
+// tmfMPTCanMutateCanHoldConfidentialBalance (XLS-0096 section 6.3.1 makes
+// that the default instead). There is no clear flag: enabling is one-way.
+static constexpr std::array<MPTMutabilityFlags, 7> kMptMutabilityFlags = {
     {{.setFlag = tmfMPTSetCanLock,
       .clearFlag = tmfMPTClearCanLock,
       .canMutateFlag = lsmfMPTCanMutateCanLock},
@@ -81,7 +99,10 @@ static constexpr std::array<MPTMutabilityFlags, 6> kMptMutabilityFlags = {
       .canMutateFlag = lsmfMPTCanMutateCanTransfer},
      {.setFlag = tmfMPTSetCanClawback,
       .clearFlag = tmfMPTClearCanClawback,
-      .canMutateFlag = lsmfMPTCanMutateCanClawback}}};
+      .canMutateFlag = lsmfMPTCanMutateCanClawback},
+     {.setFlag = tmfMPTSetCanHoldConfidentialBalance,
+      .clearFlag = 0,
+      .canMutateFlag = lsmfMPTCanMutateCanHoldConfidentialBalance}}};
 
 NotTEC
 MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
@@ -124,7 +145,7 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
             (auditorKey && !confidential::isValidPoint(*auditorKey)))
             return temMALFORMED;
 
-        if (ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance) && transferFee.value_or(0) != 0)
+        if (setsConfidential(ctx.tx) && transferFee.value_or(0) != 0)
             return temBAD_TRANSFER_FEE;
     }
 
@@ -303,15 +324,11 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
             return tecNO_PERMISSION;
     }
 
-    bool const setConfidential = ctx.tx.isFlag(tfMPTSetCanHoldConfidentialBalance);
-    if (setConfidential)
-    {
-        if (((*sleMptIssuance)[sfImmutableFlags] & lsifMPTCanHoldConfidentialBalance) != 0u)
-            return tecNO_PERMISSION;
-
-        if ((*sleMptIssuance)[sfTransferFee] != 0u)
-            return tecNO_PERMISSION;
-    }
+    // The mutability check above already required
+    // lsmfMPTCanMutateCanHoldConfidentialBalance.
+    bool const setConfidential = setsConfidential(ctx.tx);
+    if (setConfidential && (*sleMptIssuance)[sfTransferFee] != 0u)
+        return tecNO_PERMISSION;
 
     auto const hasIssuerKey = ctx.tx.isFieldPresent(sfIssuerEncryptionKey);
     auto const hasAuditorKey = ctx.tx.isFieldPresent(sfAuditorEncryptionKey);
@@ -366,10 +383,6 @@ MPTokenIssuanceSet::doApply()
     {
         flagsOut &= ~lsfMPTLocked;
     }
-
-    // Enabling confidential balances is one-way; there is no flag to clear it.
-    if (ctx_.tx.isFlag(tfMPTSetCanHoldConfidentialBalance))
-        flagsOut |= lsfMPTCanHoldConfidentialBalance;
 
     if (auto const mutableFlags = ctx_.tx[~sfMutableFlags].value_or(0))
     {

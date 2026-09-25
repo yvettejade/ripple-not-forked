@@ -830,8 +830,6 @@ ValidConfidentialMPToken::visitIssuance(bool isDelete, SLE const* before, SLE co
         coaExceedsOutstanding_ = true;
     if (coa != 0 && !confidential)
         coaWithoutConfidentialFlag_ = true;
-    if ((after[sfImmutableFlags] & ~lsifMPTCanHoldConfidentialBalance) != 0u)
-        immutableFlagsInvalid_ = true;
     if (after[sfTransferFee] != 0 && confidential)
         transferFeeWithConfidential_ = true;
 
@@ -850,14 +848,12 @@ ValidConfidentialMPToken::visitIssuance(bool isDelete, SLE const* before, SLE co
     if (!before)
         return;
 
+    // Enabling is one-way, and after creation needs the mutability flag.
     bool const wasConfidential = before->isFlag(lsfMPTCanHoldConfidentialBalance);
     if ((wasConfidential && !confidential) ||
-        (((*before)[sfImmutableFlags] & lsifMPTCanHoldConfidentialBalance) != 0u &&
-         wasConfidential != confidential))
+        (!wasConfidential && confidential &&
+         ((*before)[sfMutableFlags] & lsmfMPTCanMutateCanHoldConfidentialBalance) == 0u))
         confidentialFlagChanged_ = true;
-
-    if ((*before)[sfImmutableFlags] != after[sfImmutableFlags])
-        immutableFlagsInvalid_ = true;
 
     if (blobChanged(*before, after, sfIssuerEncryptionKey) ||
         blobChanged(*before, after, sfAuditorEncryptionKey))
@@ -1160,8 +1156,6 @@ ValidConfidentialMPToken::finalize(
         fail("ConfidentialOutstandingAmount without lsfMPTCanHoldConfidentialBalance");
     if (confidentialFlagChanged_)
         fail("lsfMPTCanHoldConfidentialBalance changed illegally");
-    if (immutableFlagsInvalid_)
-        fail("MPTokenIssuance ImmutableFlags invalid or changed");
     if (issuanceKeysInvalid_)
         fail("MPTokenIssuance encryption keys invalid or changed");
     if (transferFeeWithConfidential_)

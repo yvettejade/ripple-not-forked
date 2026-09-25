@@ -130,8 +130,9 @@ public:
                 BEAST_EXPECT(
                     leFlags["MPTokenIssuance"]["lsfMPTCanHoldConfidentialBalance"] == 0x00000080);
                 BEAST_EXPECT(
-                    leFlags["MPTokenIssuanceImmutable"]["lsifMPTCanHoldConfidentialBalance"] ==
-                    0x00000080);
+                    leFlags["MPTokenIssuanceMutable"]
+                           ["lsmfMPTCanMutateCanHoldConfidentialBalance"] == 0x00000080);
+                BEAST_EXPECT(!leFlags.isMember("MPTokenIssuanceImmutable"));
             }
 
             // XLS-0096 Confidential MPT protocol definitions
@@ -161,7 +162,7 @@ public:
                         BEAST_EXPECTS(field[jss::isSigningField].asBool(), name);
                     };
                 expectField("ConfidentialBalanceVersion", "UInt32", 69, false);
-                expectField("ImmutableFlags", "UInt32", 70, false);
+                BEAST_EXPECT(findField("ImmutableFlags").isNull());
                 expectField("ConfidentialOutstandingAmount", "UInt64", 32, false);
                 expectField("BlindingFactor", "Hash256", 40, false);
                 expectField("IssuerEncryptionKey", "Blob", 32, true);
@@ -195,8 +196,7 @@ public:
                 BEAST_EXPECT(txFlags["MPTokenIssuanceSet"]["tfMPTLock"] == 0x00000001);
                 BEAST_EXPECT(txFlags["MPTokenIssuanceSet"]["tfMPTUnlock"] == 0x00000002);
                 BEAST_EXPECT(
-                    txFlags["MPTokenIssuanceSet"]["tfMPTSetCanHoldConfidentialBalance"] ==
-                    0x00000100);
+                    !txFlags["MPTokenIssuanceSet"].isMember("tfMPTSetCanHoldConfidentialBalance"));
                 BEAST_EXPECT(
                     txFlags["MPTokenIssuanceCreate"]["tfMPTCanHoldConfidentialBalance"] ==
                     0x00000080);

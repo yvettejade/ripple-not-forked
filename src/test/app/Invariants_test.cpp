@@ -5097,11 +5097,6 @@ class Invariants_test : public beast::unit_test::Suite
             }),
             confidential);
         check(
-            {"MPTokenIssuance ImmutableFlags invalid or changed"},
-            updateIssuance(
-                [](SLE& sle) { sle[sfImmutableFlags] = lsifMPTCanHoldConfidentialBalance; }),
-            confidential);
-        check(
             {"MPTokenIssuance deleted with non-zero ConfidentialOutstandingAmount"},
             [](MPTID const& id, AccountID const&, ApplyContext& ac) {
                 auto sle = ac.view().peek(keylet::mptIssuance(id));
@@ -5163,22 +5158,29 @@ class Invariants_test : public beast::unit_test::Suite
             confidential,
             seedHolder);
 
-        // Issuance settings.
-        Seed const lockedOff = [](SLE& issuance, SLE&) {
-            issuance[sfImmutableFlags] = lsifMPTCanHoldConfidentialBalance;
+        // Issuance settings: enabling after creation needs
+        // lsmfMPTCanMutateCanHoldConfidentialBalance, and clearing is never
+        // allowed.
+        Seed const mutableConfidential = [](SLE& issuance, SLE&) {
+            issuance[sfMutableFlags] = lsmfMPTCanMutateCanHoldConfidentialBalance;
         };
+        auto const enable = updateIssuance([](SLE& sle) {
+            sle.setFieldU32(sfFlags, sle.getFlags() | lsfMPTCanHoldConfidentialBalance);
+        });
+        check({"lsfMPTCanHoldConfidentialBalance changed illegally"}, enable, kMptDexFlags);
+        check(
+            {"lsfMPTCanHoldConfidentialBalance changed illegally"},
+            enable,
+            kMptDexFlags,
+            [](SLE& issuance, SLE&) { issuance[sfMutableFlags] = lsmfMPTCanMutateCanLock; });
+        check({}, enable, kMptDexFlags, mutableConfidential, pass);
         check(
             {"lsfMPTCanHoldConfidentialBalance changed illegally"},
             updateIssuance([](SLE& sle) {
-                sle.setFieldU32(sfFlags, sle.getFlags() | lsfMPTCanHoldConfidentialBalance);
+                sle.setFieldU32(sfFlags, sle.getFlags() & ~lsfMPTCanHoldConfidentialBalance);
             }),
-            kMptDexFlags,
-            lockedOff);
-        check(
-            {"MPTokenIssuance ImmutableFlags invalid or changed"},
-            updateIssuance([](SLE& sle) { sle[sfOutstandingAmount] = 100; }),
             confidential,
-            [](SLE& issuance, SLE&) { issuance[sfImmutableFlags] = 0x00000100; });
+            mutableConfidential);
         check(
             {"ConfidentialOutstandingAmount without lsfMPTCanHoldConfidentialBalance"},
             updateIssuance([](SLE& sle) { sle[sfConfidentialOutstandingAmount] = 10; }),

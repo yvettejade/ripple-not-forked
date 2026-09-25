@@ -150,8 +150,7 @@ inline constexpr FlagValue tfUniversalMask = ~tfUniversal;
                                                                                                                                                                \
     TRANSACTION(MPTokenIssuanceSet,                                                                                                                            \
         TF_FLAG(tfMPTLock, 0x00000001)                                                                                                                         \
-        TF_FLAG(tfMPTUnlock, 0x00000002)                                                                                                                       \
-        TF_FLAG(tfMPTSetCanHoldConfidentialBalance, 0x00000100),                                                                                               \
+        TF_FLAG(tfMPTUnlock, 0x00000002),                                                                                                                      \
         MASK_ADJ(0))                                                                                                                                           \
                                                                                                                                                                \
     TRANSACTION(NFTokenCreateOffer,                                                                                                                            \
@@ -351,15 +350,14 @@ inline constexpr FlagValue tmfMPTCanMutateCanTransfer = lsmfMPTCanMutateCanTrans
 inline constexpr FlagValue tmfMPTCanMutateCanClawback = lsmfMPTCanMutateCanClawback;
 inline constexpr FlagValue tmfMPTCanMutateMetadata = lsmfMPTCanMutateMetadata;
 inline constexpr FlagValue tmfMPTCanMutateTransferFee = lsmfMPTCanMutateTransferFee;
+// XLS-0096; requires ConfidentialTransfer.
+inline constexpr FlagValue tmfMPTCanMutateCanHoldConfidentialBalance =
+    lsmfMPTCanMutateCanHoldConfidentialBalance;
 inline constexpr FlagValue tmfMPTokenIssuanceCreateMutableMask =
     ~(tmfMPTCanMutateCanLock | tmfMPTCanMutateRequireAuth | tmfMPTCanMutateCanEscrow |
       tmfMPTCanMutateCanTrade | tmfMPTCanMutateCanTransfer | tmfMPTCanMutateCanClawback |
-      tmfMPTCanMutateMetadata | tmfMPTCanMutateTransferFee);
-
-// MPTokenIssuanceCreate ImmutableFlags (XLS-0096):
-// Indicating specific flags may never be changed after issuance.
-inline constexpr FlagValue tifMPTCanHoldConfidentialBalance = lsifMPTCanHoldConfidentialBalance;
-inline constexpr FlagValue tifMPTokenIssuanceCreateImmutableMask = ~tifMPTCanHoldConfidentialBalance;
+      tmfMPTCanMutateMetadata | tmfMPTCanMutateTransferFee |
+      tmfMPTCanMutateCanHoldConfidentialBalance);
 
 // MPTokenIssuanceSet MutableFlags:
 // Set or Clear flags.
@@ -376,10 +374,14 @@ inline constexpr FlagValue tmfMPTSetCanTransfer = 0x00000100;
 inline constexpr FlagValue tmfMPTClearCanTransfer = 0x00000200;
 inline constexpr FlagValue tmfMPTSetCanClawback = 0x00000400;
 inline constexpr FlagValue tmfMPTClearCanClawback = 0x00000800;
-inline constexpr FlagValue tmfMPTokenIssuanceSetMutableMask = ~(
-    tmfMPTSetCanLock | tmfMPTClearCanLock | tmfMPTSetRequireAuth | tmfMPTClearRequireAuth |
-    tmfMPTSetCanEscrow | tmfMPTClearCanEscrow | tmfMPTSetCanTrade | tmfMPTClearCanTrade |
-    tmfMPTSetCanTransfer | tmfMPTClearCanTransfer | tmfMPTSetCanClawback | tmfMPTClearCanClawback);
+// XLS-0096: enabling confidential balances is one-way, so there is no
+// matching clear flag. Requires ConfidentialTransfer.
+inline constexpr FlagValue tmfMPTSetCanHoldConfidentialBalance = 0x00001000;
+inline constexpr FlagValue tmfMPTokenIssuanceSetMutableMask =
+    ~(tmfMPTSetCanLock | tmfMPTClearCanLock | tmfMPTSetRequireAuth | tmfMPTClearRequireAuth |
+      tmfMPTSetCanEscrow | tmfMPTClearCanEscrow | tmfMPTSetCanTrade | tmfMPTClearCanTrade |
+      tmfMPTSetCanTransfer | tmfMPTClearCanTransfer | tmfMPTSetCanClawback |
+      tmfMPTClearCanClawback | tmfMPTSetCanHoldConfidentialBalance);
 
 // Prior to fixRemoveNFTokenAutoTrustLine, transfer of an NFToken between accounts allowed a
 // TrustLine to be added to the issuer of that token without explicit permission from that issuer.
